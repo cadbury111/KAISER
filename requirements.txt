@@ -1,0 +1,3 @@
+# KAISER Foundation Dependencies
+# Minimal foundation dependencies — leverages Python standard library
+pytest>=8.0.0
