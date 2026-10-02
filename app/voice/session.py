@@ -48,6 +48,8 @@ VALID_SESSION_TRANSITIONS: Dict[VoiceSessionStatus, Set[VoiceSessionStatus]] = {
         VoiceSessionStatus.CLOSED,
     },
     VoiceSessionStatus.COMPLETED: {
+        VoiceSessionStatus.ACTIVE,  # Recovery / consecutive turns
+        VoiceSessionStatus.PROCESSING,
         VoiceSessionStatus.CLOSED,
     },
     VoiceSessionStatus.CLOSED: set(),  # Terminal state: cannot transition out
@@ -183,6 +185,18 @@ class VoiceSession:
         """Convenience method to close the session gracefully."""
         self.transition_to(VoiceSessionStatus.CLOSED, reason=reason)
 
+    def recover(self, reason: str = "Session recovered") -> None:
+        """Recover a failed or completed session back to ACTIVE status."""
+        with self._lock:
+            if self._status in (VoiceSessionStatus.FAILED, VoiceSessionStatus.COMPLETED):
+                self.transition_to(VoiceSessionStatus.ACTIVE, reason=reason)
+            elif self._status in (VoiceSessionStatus.ACTIVE, VoiceSessionStatus.IDLE):
+                pass
+            elif self._status == VoiceSessionStatus.CLOSED:
+                raise VoiceSessionError(f"Cannot recover closed session '{self.session_id}'.")
+            elif self._status == VoiceSessionStatus.PROCESSING:
+                raise VoiceSessionError(f"Cannot recover session '{self.session_id}' while actively processing.")
+
     def to_dict(self) -> Dict[str, Any]:
         """Return a point-in-time dictionary snapshot of session state."""
         with self._lock:
@@ -252,6 +266,18 @@ class VoiceSessionManager:
             if session and not session.is_closed:
                 session.close(reason=reason)
                 return True
+            return False
+
+    def recover_session(self, session_id: str, reason: str = "Session recovered") -> bool:
+        """Recover a failed or completed session back to ACTIVE status."""
+        with self._lock:
+            session = self._sessions.get(session_id.strip())
+            if session:
+                try:
+                    session.recover(reason=reason)
+                    return True
+                except VoiceSessionError:
+                    return False
             return False
 
     def list_active_sessions(self) -> List[str]:

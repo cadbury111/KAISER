@@ -142,6 +142,7 @@ class VoiceService:
         device_id: Optional[int] = None,
         config: Optional[AudioCaptureConfig] = None,
         correlation_id: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
     ) -> CapturedAudio:
         """Capture bounded audio from the configured audio input service.
 
@@ -158,6 +159,7 @@ class VoiceService:
             device_id=device_id,
             config=config,
             correlation_id=correlation_id,
+            stop_event=stop_event,
         )
     # Session Management Delegates
     # --------------------------------------------------------------------------
@@ -377,6 +379,7 @@ class VoiceService:
                         device_id=device_id,
                         config=config,
                         correlation_id=resolved_corr_id,
+                        stop_event=stop_event,
                     )
                 except AudioCaptureTimeoutError as exc:
                     err_msg = f"Audio capture timed out: {exc}"
@@ -446,7 +449,10 @@ class VoiceService:
                     return res
 
             # Check if capture was cancelled
-            if isinstance(captured_audio_ref, CapturedAudio) and captured_audio_ref.metadata.get("cancelled", False):
+            if (
+                (isinstance(captured_audio_ref, CapturedAudio) and captured_audio_ref.metadata.get("cancelled", False))
+                or (stop_event is not None and stop_event.is_set())
+            ):
                 logger.info("Audio capture cancelled for turn '%s'", turn_id)
                 with self._lock:
                     self._counters["turns_cancelled"] += 1

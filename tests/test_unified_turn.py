@@ -708,7 +708,15 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         )
 
         stop_evt = threading.Event()
-        stop_evt.set()  # Signal immediate cancellation
+
+        # Trigger cancellation when playback begins
+        orig_play = voice_service.audio_playback.backend.play
+
+        def cancel_on_play(*args, **kwargs):
+            stop_evt.set()
+            return orig_play(*args, **kwargs)
+
+        voice_service.audio_playback.backend.play = cancel_on_play
 
         turn = voice_service.execute_voice_turn(
             duration_seconds=1.0,

@@ -81,6 +81,10 @@ from app.voice.providers import (
     MockTTSProvider,
     Pyttsx3TTSProvider,
 )
+from app.voice.controller import (
+    VoiceControllerError,
+    VoiceInteractionController,
+)
 from app.voice.service import VoiceService
 from app.voice.session import (
     VoiceSession,
@@ -192,9 +196,11 @@ __all__ = [
     "MockAudioCaptureProvider",
     "MockSTTProvider",
     "MockTTSProvider",
-    # Session & Service
+    # Session, Service & Controller
     "VoiceSession",
     "VoiceSessionError",
     "VoiceSessionManager",
     "VoiceService",
+    "VoiceInteractionController",
+    "VoiceControllerError",
 ]

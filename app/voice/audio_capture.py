@@ -246,12 +246,13 @@ class AudioCaptureHandle:
         correlation_id: str,
         config: AudioCaptureConfig,
         device_info: AudioDeviceInfo,
+        stop_event: Optional[threading.Event] = None,
     ) -> None:
         self.capture_id = capture_id
         self.correlation_id = correlation_id
         self.config = config
         self.device_info = device_info
-        self.stop_event = threading.Event()
+        self.stop_event = stop_event if stop_event is not None else threading.Event()
 
         self._lock = threading.RLock()
         self._status = AudioCaptureStatus.RECORDING
@@ -368,6 +369,7 @@ class AudioCaptureService:
         config: Optional[AudioCaptureConfig] = None,
         correlation_id: Optional[str] = None,
         handle: Optional[AudioCaptureHandle] = None,
+        stop_event: Optional[threading.Event] = None,
     ) -> CapturedAudio:
         """Capture bounded audio synchronously upon explicit request.
 
@@ -377,6 +379,7 @@ class AudioCaptureService:
             config: Optional custom AudioCaptureConfig.
             correlation_id: Optional tracing identifier.
             handle: Optional pre-created AudioCaptureHandle (for async capture).
+            stop_event: Optional cooperative cancellation event.
 
         Returns:
             CapturedAudio: Immutable container with PCM bytes and metadata.
@@ -395,6 +398,10 @@ class AudioCaptureService:
             capture_id = handle.capture_id
             resolved_config = handle.config
             device_info = handle.device_info
+            if stop_event is not None and handle.stop_event != stop_event:
+                # If an external stop_event is also provided, forward trigger
+                if stop_event.is_set():
+                    handle.stop_event.set()
         else:
             resolved_corr_id = (correlation_id or uuid.uuid4().hex).strip()
             capture_id = f"cap_{uuid.uuid4().hex[:12]}"
@@ -409,6 +416,7 @@ class AudioCaptureService:
                 correlation_id=resolved_corr_id,
                 config=resolved_config,
                 device_info=device_info,
+                stop_event=stop_event,
             )
 
         with self._lock:

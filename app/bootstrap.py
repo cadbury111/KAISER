@@ -23,6 +23,7 @@ from app.voice import (
     MockTTSProvider,
     Pyttsx3Config,
     Pyttsx3TTSProvider,
+    VoiceInteractionController,
     VoiceService,
 )
 
@@ -43,6 +44,7 @@ class SystemStatus:
     market_service: Optional[MarketDataService] = None
     orchestrator: Optional[MasterOrchestrator] = None
     voice_service: Optional[VoiceService] = None
+    voice_controller: Optional[VoiceInteractionController] = None
     audio_capture: Optional[AudioCaptureService] = None
     audio_playback: Optional[AudioPlaybackService] = None
 
@@ -108,6 +110,7 @@ def bootstrap_system(
 
     # Initialize Voice Service foundation (mock providers in safe local mode)
     voice_service: Optional[VoiceService] = None
+    voice_controller: Optional[VoiceInteractionController] = None
     audio_capture: Optional[AudioCaptureService] = None
     if active_settings.voice_enabled:
         if active_settings.stt_provider == "local_whisper":
@@ -149,6 +152,12 @@ def bootstrap_system(
             state_store=state_store,
             name="kaiser_main_voice_service",
         )
+        voice_controller = VoiceInteractionController(
+            voice_service=voice_service,
+            event_bus=event_bus,
+            state_store=state_store,
+            name="kaiser_main_voice_controller",
+        )
 
     # Publish initialization fact on the event bus
     event_bus.publish(
@@ -177,6 +186,7 @@ def bootstrap_system(
         market_service=market_service,
         orchestrator=orchestrator,
         voice_service=voice_service,
+        voice_controller=voice_controller,
         audio_capture=voice_service.audio_capture if voice_service else None,
         audio_playback=voice_service.audio_playback if voice_service else None,
     )

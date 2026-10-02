@@ -34,6 +34,19 @@ class MockTTSProvider(TextToSpeechProvider):
         self._is_available = True
         self._should_fail = False
         self._failure_message = "Simulated TTS synthesis failure"
+        self._calls: List[Dict[str, Any]] = []
+
+    @property
+    def calls(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return copy.deepcopy(self._calls)
+
+    def reset(self) -> None:
+        """Reset mock state and recorded calls."""
+        with self._lock:
+            self._calls.clear()
+            self._is_available = True
+            self._should_fail = False
 
     @property
     def name(self) -> str:
@@ -80,6 +93,13 @@ class MockTTSProvider(TextToSpeechProvider):
             if not self._is_available or self._should_fail:
                 logger.error("TTS provider failure simulated: %s", self._failure_message)
                 raise VoiceProviderError(f"TTS provider error: {self._failure_message}")
+
+            self._calls.append({
+                "text": text,
+                "language": language,
+                "voice_id": voice_id,
+                "context": copy.deepcopy(dict(context)) if context else None,
+            })
 
         if not text or not isinstance(text, str) or not text.strip():
             raise VoiceProviderError("Cannot synthesize empty or whitespace-only text.")
