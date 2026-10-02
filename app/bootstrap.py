@@ -26,6 +26,8 @@ from app.voice import (
     VoiceInteractionController,
     VoiceService,
 )
+from app.analysis import TechnicalAnalysisEngine, register_analysis_handlers
+from app.market.models import Bar
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class SystemStatus:
     orchestrator: Optional[MasterOrchestrator] = None
     voice_service: Optional[VoiceService] = None
     voice_controller: Optional[VoiceInteractionController] = None
+    analysis_engine: Optional[TechnicalAnalysisEngine] = None
     audio_capture: Optional[AudioCaptureService] = None
     audio_playback: Optional[AudioPlaybackService] = None
 
@@ -159,6 +162,36 @@ def bootstrap_system(
             name="kaiser_main_voice_controller",
         )
 
+    # Initialize Technical & Quantitative Analysis Engine
+    analysis_engine = TechnicalAnalysisEngine(
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_analysis_engine",
+    )
+    register_analysis_handlers(orchestrator=orchestrator, engine=analysis_engine)
+
+    def _on_market_bar_updated(event: Event) -> None:
+        try:
+            p = event.payload
+            bar = Bar(
+                symbol=str(p["symbol"]),
+                exchange=str(p["exchange"]),
+                timeframe=str(p["timeframe"]),
+                timestamp=float(p["timestamp"]),
+                open=float(p["open"]),
+                high=float(p["high"]),
+                low=float(p["low"]),
+                close=float(p["close"]),
+                volume=float(p.get("volume", 0.0)),
+                source=str(p.get("source", "mock")),
+            )
+            safe = bool(event.metadata.get("safe_to_consume", True))
+            analysis_engine.add_bar(bar, safe_to_consume=safe, correlation_id=event.correlation_id)
+        except Exception as exc:
+            logger.error("Failed to process market bar in analysis engine: %s", exc)
+
+    event_bus.subscribe(EventType.MARKET_BAR_UPDATED, _on_market_bar_updated)
+
     # Publish initialization fact on the event bus
     event_bus.publish(
         Event.create(
@@ -187,12 +220,14 @@ def bootstrap_system(
         orchestrator=orchestrator,
         voice_service=voice_service,
         voice_controller=voice_controller,
+        analysis_engine=analysis_engine,
         audio_capture=voice_service.audio_capture if voice_service else None,
         audio_playback=voice_service.audio_playback if voice_service else None,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
     logger.info("Voice-first architecture: %s", status.voice_architecture)
+    logger.info("Technical analysis engine: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 
