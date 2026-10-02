@@ -123,6 +123,17 @@ class Settings:
     llm_provider: str = "mock"
     llm_model: str = "mock-model"
     voice_enabled: bool = True
+    stt_provider: str = "mock"
+    stt_model_path: str | None = None
+    stt_model_id: str = "whisper-base"
+    stt_device: str = "cpu"
+    stt_compute_type: str = "int8"
+    tts_provider: str = "mock"
+    tts_voice_id: str | None = None
+    tts_rate: int = 175
+    tts_volume: float = 1.0
+    playback_enabled: bool = False
+    playback_device_id: int | None = None
 
     # Architectural Safety Invariants
     execution_locked: bool = True
@@ -159,6 +170,17 @@ class Settings:
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "voice_enabled": self.voice_enabled,
+            "stt_provider": self.stt_provider,
+            "stt_model_path": self.stt_model_path,
+            "stt_model_id": self.stt_model_id,
+            "stt_device": self.stt_device,
+            "stt_compute_type": self.stt_compute_type,
+            "tts_provider": self.tts_provider,
+            "tts_voice_id": self.tts_voice_id,
+            "tts_rate": self.tts_rate,
+            "tts_volume": self.tts_volume,
+            "playback_enabled": self.playback_enabled,
+            "playback_device_id": self.playback_device_id,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -195,6 +217,17 @@ def get_settings(
         llm_provider=source.get("LLM_PROVIDER", "mock"),
         llm_model=source.get("LLM_MODEL", "mock-model"),
         voice_enabled=parse_bool(source.get("VOICE_ENABLED", "true"), "VOICE_ENABLED"),
+        stt_provider=source.get("STT_PROVIDER", "mock"),
+        stt_model_path=source.get("STT_MODEL_PATH", None),
+        stt_model_id=source.get("STT_MODEL_ID", "whisper-base"),
+        stt_device=source.get("STT_DEVICE", "cpu"),
+        stt_compute_type=source.get("STT_COMPUTE_TYPE", "int8"),
+        tts_provider=source.get("TTS_PROVIDER", "mock"),
+        tts_voice_id=source.get("TTS_VOICE_ID", None),
+        tts_rate=int(source.get("TTS_RATE", "175")),
+        tts_volume=float(source.get("TTS_VOLUME", "1.0")),
+        playback_enabled=parse_bool(source.get("PLAYBACK_ENABLED", "false"), "PLAYBACK_ENABLED"),
+        playback_device_id=int(source["PLAYBACK_DEVICE_ID"]) if "PLAYBACK_DEVICE_ID" in source and source["PLAYBACK_DEVICE_ID"].strip() else None,
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

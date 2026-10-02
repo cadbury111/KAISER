@@ -94,6 +94,17 @@ class EventBus:
 
         return handler
 
+    def subscribe_all(self, handler: EventHandler) -> EventHandler:
+        """Register a subscriber callback for all events via wildcard '*'.
+
+        Args:
+            handler: Callable taking a single immutable Event argument.
+
+        Returns:
+            EventHandler: The registered handler.
+        """
+        return self.subscribe("*", handler)
+
     def unsubscribe(
         self,
         event_type: EventType | str,

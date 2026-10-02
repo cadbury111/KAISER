@@ -13,6 +13,18 @@ from app.core.events import Event, EventBus, EventType
 from app.core.logging_config import get_logger, setup_logging
 from app.core.state import StateStore
 from app.market import MarketDataService, MockMarketFeed
+from app.orchestrator import MasterOrchestrator, create_system_status_handler
+from app.voice import (
+    AudioCaptureService,
+    AudioPlaybackService,
+    LocalSTTConfig,
+    LocalWhisperSTTProvider,
+    MockSTTProvider,
+    MockTTSProvider,
+    Pyttsx3Config,
+    Pyttsx3TTSProvider,
+    VoiceService,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +41,10 @@ class SystemStatus:
     event_bus: Optional[EventBus] = None
     state_store: Optional[StateStore] = None
     market_service: Optional[MarketDataService] = None
+    orchestrator: Optional[MasterOrchestrator] = None
+    voice_service: Optional[VoiceService] = None
+    audio_capture: Optional[AudioCaptureService] = None
+    audio_playback: Optional[AudioPlaybackService] = None
 
 
 def bootstrap_system(
@@ -82,6 +98,58 @@ def bootstrap_system(
         mock_feed = MockMarketFeed(name="default_mock_feed")
         market_service.register_feed(mock_feed)
 
+    # Initialize Master Orchestrator and register safe foundational handlers
+    orchestrator = MasterOrchestrator(
+        event_bus=event_bus,
+        state_store=state_store,
+        settings=active_settings,
+        name="kaiser_main_orchestrator",
+    )
+
+    # Initialize Voice Service foundation (mock providers in safe local mode)
+    voice_service: Optional[VoiceService] = None
+    audio_capture: Optional[AudioCaptureService] = None
+    if active_settings.voice_enabled:
+        if active_settings.stt_provider == "local_whisper":
+            stt_config = LocalSTTConfig(
+                model_path=active_settings.stt_model_path,
+                model_id=active_settings.stt_model_id,
+                device=active_settings.stt_device,
+                compute_type=active_settings.stt_compute_type,
+            )
+            stt_provider = LocalWhisperSTTProvider(config=stt_config, name="local_whisper")
+        else:
+            stt_provider = MockSTTProvider(name="mock_stt")
+
+        if active_settings.tts_provider in ("pyttsx3", "local_pyttsx3"):
+            tts_config = Pyttsx3Config(
+                voice_id=active_settings.tts_voice_id,
+                rate=active_settings.tts_rate,
+                volume=active_settings.tts_volume,
+            )
+            tts_provider = Pyttsx3TTSProvider(config=tts_config, name="pyttsx3")
+        else:
+            tts_provider = MockTTSProvider(name="mock_tts")
+
+        audio_capture = AudioCaptureService(
+            event_bus=event_bus,
+            state_store=state_store,
+        )
+        audio_playback = AudioPlaybackService(
+            event_bus=event_bus,
+            state_store=state_store,
+        )
+        voice_service = VoiceService(
+            orchestrator=orchestrator,
+            stt_provider=stt_provider,
+            tts_provider=tts_provider,
+            audio_capture=audio_capture,
+            audio_playback=audio_playback,
+            event_bus=event_bus,
+            state_store=state_store,
+            name="kaiser_main_voice_service",
+        )
+
     # Publish initialization fact on the event bus
     event_bus.publish(
         Event.create(
@@ -107,6 +175,10 @@ def bootstrap_system(
         event_bus=event_bus,
         state_store=state_store,
         market_service=market_service,
+        orchestrator=orchestrator,
+        voice_service=voice_service,
+        audio_capture=voice_service.audio_capture if voice_service else None,
+        audio_playback=voice_service.audio_playback if voice_service else None,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
