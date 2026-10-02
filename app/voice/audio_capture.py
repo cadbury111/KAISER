@@ -205,6 +205,19 @@ class MockAudioCaptureBackend(AudioCaptureBackend):
     def is_available(self) -> bool:
         return self.provider.is_available
 
+    def set_available(self, available: bool) -> None:
+        """Set whether the mock capture provider is available."""
+        self.provider.set_available(available)
+
+    def set_failure_mode(
+        self,
+        should_fail: bool,
+        exception_cls: Any = AudioCaptureError,
+        message: str = "Simulated microphone driver failure",
+    ) -> None:
+        """Enable or disable simulated capture failure."""
+        self.provider.set_failure_mode(should_fail, exception_cls, message)
+
     def capture(
         self,
         config: AudioCaptureConfig,

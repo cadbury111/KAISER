@@ -55,6 +55,7 @@ from app.voice.stt_models import (
     STTTimeoutError,
 )
 from app.voice.session import VoiceSession, VoiceSessionError, VoiceSessionManager
+from app.voice.tts_models import TTSError, TTSUnsupportedLanguageError
 
 logger = get_logger("voice.service")
 
@@ -262,6 +263,15 @@ class VoiceService:
         if not self._turn_lock.acquire(blocking=False):
             err_msg = "Another voice turn is currently in progress. Overlapping turns are not permitted."
             logger.warning(err_msg)
+            self._publish_event(
+                EventType.VOICE_TURN_REJECTED,
+                correlation_id=resolved_corr_id,
+                payload={
+                    "turn_id": turn_id,
+                    "session_id": session_id or "unknown",
+                    "reason": "concurrency_lock_held",
+                },
+            )
             return VoiceTurnResult.failure(
                 turn_id=turn_id,
                 session_id=session_id or "unknown",
@@ -269,6 +279,9 @@ class VoiceService:
                 error=err_msg,
                 status=VoiceTurnStatus.CONCURRENCY_ERROR,
                 transcription_status="skipped",
+                command_status="skipped",
+                synthesis_status="skipped",
+                playback_status="skipped",
             )
 
         turn_start_time = time.monotonic()
@@ -290,6 +303,15 @@ class VoiceService:
                 elif existing_sess.is_closed:
                     err_msg = f"Voice session '{session_id}' is closed."
                     logger.warning(err_msg)
+                    self._publish_event(
+                        EventType.VOICE_TURN_REJECTED,
+                        correlation_id=resolved_corr_id,
+                        payload={
+                            "turn_id": turn_id,
+                            "session_id": session_id,
+                            "reason": "session_closed",
+                        },
+                    )
                     with self._lock:
                         self._counters["turns_failed"] += 1
                     res = VoiceTurnResult.failure(
@@ -299,6 +321,9 @@ class VoiceService:
                         error=err_msg,
                         status=VoiceTurnStatus.FAILED,
                         transcription_status="skipped",
+                        command_status="skipped",
+                        synthesis_status="skipped",
+                        playback_status="skipped",
                     )
                     self._sync_state_store(last_turn=res)
                     return res
@@ -692,7 +717,7 @@ class VoiceService:
                 },
             )
 
-            # 7. Construct VoiceInput and Route through MasterOrchestrator
+            # 7. Construct VoiceInput and Route through MasterOrchestrator (Text-first command execution)
             voice_input = VoiceInput.create(
                 text=normalized_text,
                 session_id=session.session_id,
@@ -701,51 +726,138 @@ class VoiceService:
                 metadata=dict(transcription.metadata or {}),
             )
 
-            # Auto-enable synthesis if playback is requested
-            should_synthesize = synthesize_output or play_output
-
+            # Route command execution without synthesis first to preserve response on synthesis failure
             voice_output: VoiceOutput = self.process_voice_input(
                 voice_input=voice_input,
-                synthesize_output=should_synthesize,
+                synthesize_output=False,
                 correlation_id=resolved_corr_id,
             )
 
-            # Optional Controlled Audio Playback (Explicit request only)
-            playback_result: Optional[AudioPlaybackResult] = None
-            if play_output and voice_output.is_success and voice_output.has_audio:
-                if self.audio_playback is not None:
-                    try:
-                        playback_result = self.play_audio(
-                            audio_data=voice_output,
-                            device_id=output_device_id,
-                            correlation_id=resolved_corr_id,
-                            stop_event=stop_event,
-                        )
-                    except Exception as play_exc:
-                        logger.error("Turn audio playback encountered error: %s", play_exc)
-
             turn_elapsed_ms = round((time.monotonic() - turn_start_time) * 1000, 2)
 
-            # 8. Assemble Structured VoiceTurnResult
+            # 8. Command Response Handling, Optional Synthesis, and Optional Playback
             if voice_output.is_success:
+                command_status = "success"
+                final_voice_output = voice_output
+                synthesis_status = "skipped"
+                synthesis_error: Optional[str] = None
+                synthesis_result: Optional[SynthesisResult] = None
+                playback_status = "skipped"
+                playback_error: Optional[str] = None
+                playback_result: Optional[AudioPlaybackResult] = None
+
+                # Explicit Synthesis Control: callers requesting synthesis or playback
+                should_synthesize = synthesize_output or play_output
+                if should_synthesize:
+                    if self.tts_provider is None:
+                        synthesis_status = "failed"
+                        synthesis_error = "TTS provider is not configured on VoiceService."
+                        logger.error(synthesis_error)
+                        self._publish_provider_error("tts", synthesis_error, resolved_corr_id)
+                    elif not self.tts_provider.is_available:
+                        synthesis_status = "failed"
+                        synthesis_error = f"TTS provider '{self.tts_provider.name}' is currently unavailable."
+                        logger.warning(synthesis_error)
+                        self._publish_provider_error("tts", synthesis_error, resolved_corr_id)
+                    else:
+                        try:
+                            synthesis_result = self.synthesize_text(
+                                text=voice_output.text,
+                                language=transcription.language,
+                                correlation_id=resolved_corr_id,
+                            )
+                            synthesis_status = "completed"
+                            final_voice_output = VoiceOutput.synthesized(
+                                text=voice_output.text,
+                                session_id=session.session_id,
+                                audio_payload=synthesis_result.audio_bytes,
+                                audio_format=synthesis_result.audio_format,
+                                duration_ms=synthesis_result.duration_ms,
+                                language=transcription.language,
+                                metadata=dict(voice_output.metadata),
+                            )
+                        except TTSUnsupportedLanguageError as unsup_exc:
+                            synthesis_status = "unsupported"
+                            synthesis_error = str(unsup_exc)
+                            logger.warning(
+                                "TTS synthesis unsupported for language '%s': %s",
+                                transcription.language,
+                                unsup_exc,
+                            )
+                            self._publish_event(
+                                EventType.VOICE_SYNTHESIS_UNSUPPORTED,
+                                correlation_id=resolved_corr_id,
+                                payload={
+                                    "turn_id": turn_id,
+                                    "session_id": session.session_id,
+                                    "language": transcription.language,
+                                    "reason": str(unsup_exc),
+                                },
+                            )
+                        except Exception as tts_exc:
+                            synthesis_status = "failed"
+                            synthesis_error = str(tts_exc)
+                            logger.error("TTS synthesis failed for turn '%s': %s", turn_id, tts_exc)
+
+                # Explicit Playback Control: caller requesting playback
+                if play_output:
+                    if synthesis_status == "completed" and final_voice_output.has_audio:
+                        if self.audio_playback is None:
+                            playback_status = "failed"
+                            playback_error = "Audio playback service is not configured on VoiceService."
+                            logger.error(playback_error)
+                        else:
+                            try:
+                                playback_result = self.play_audio(
+                                    audio_data=final_voice_output,
+                                    device_id=output_device_id,
+                                    correlation_id=resolved_corr_id,
+                                    stop_event=stop_event,
+                                )
+                                if playback_result.status == AudioPlaybackStatus.COMPLETED:
+                                    playback_status = "completed"
+                                elif playback_result.status == AudioPlaybackStatus.CANCELLED:
+                                    playback_status = "cancelled"
+                                else:
+                                    playback_status = "failed"
+                                    playback_error = playback_result.error or "Audio playback failed."
+                            except Exception as play_exc:
+                                playback_status = "failed"
+                                playback_error = str(play_exc)
+                                logger.error("Turn audio playback encountered error: %s", play_exc)
+                    else:
+                        playback_status = "skipped"
+
+                turn_elapsed_ms = round((time.monotonic() - turn_start_time) * 1000, 2)
                 with self._lock:
                     self._counters["turns_completed"] += 1
+
                 res = VoiceTurnResult.completed(
                     turn_id=turn_id,
                     session_id=session.session_id,
                     correlation_id=resolved_corr_id,
                     recognized_text=normalized_text,
-                    command_response=voice_output,
+                    command_response=final_voice_output,
                     language=transcription.language,
                     language_hint=language,
                     confidence=transcription.confidence,
                     duration_ms=turn_elapsed_ms,
+                    command_status="success",
+                    synthesis_status=synthesis_status,
+                    playback_status=playback_status,
+                    synthesis_error=synthesis_error,
+                    playback_error=playback_error,
                     metadata={
-                        "command": voice_output.metadata.get("command"),
-                        "orchestrator_request_id": voice_output.metadata.get("orchestrator_request_id"),
+                        "command": final_voice_output.metadata.get("command"),
+                        "orchestrator_request_id": final_voice_output.metadata.get("orchestrator_request_id"),
                         "stt_duration_seconds": getattr(self, "_last_stt_duration", 0.0),
+                        "command_status": "success",
+                        "synthesis_status": synthesis_status,
                         "playback_status": playback_result.status.value if playback_result else None,
-                        "playback_device_id": playback_result.device_id if playback_result else None,
+                        "playback_outcome": playback_status,
+                        "synthesis_error": synthesis_error,
+                        "playback_error": playback_error,
+                        "playback_device_id": playback_result.device_id if playback_result else output_device_id,
                     },
                 )
                 self._publish_event(
@@ -755,10 +867,15 @@ class VoiceService:
                         "turn_id": turn_id,
                         "session_id": session.session_id,
                         "status": res.status.value,
-                        "command": voice_output.metadata.get("command"),
+                        "command": final_voice_output.metadata.get("command"),
+                        "command_status": "success",
+                        "synthesis_status": synthesis_status,
+                        "playback_status": playback_status,
                         "duration_ms": turn_elapsed_ms,
                     },
                 )
+                self._sync_state_store(active_session=session, last_output=final_voice_output, last_turn=res)
+                return res
             else:
                 with self._lock:
                     self._counters["turns_failed"] += 1
@@ -768,6 +885,7 @@ class VoiceService:
                     if "Unknown command" in err_str
                     else VoiceTurnStatus.FAILED
                 )
+                cmd_status = "rejected" if turn_status == VoiceTurnStatus.COMMAND_REJECTED else "failed"
                 res = VoiceTurnResult.failure(
                     turn_id=turn_id,
                     session_id=session.session_id,
@@ -775,6 +893,11 @@ class VoiceService:
                     error=err_str,
                     status=turn_status,
                     transcription_status="success",
+                    command_status=cmd_status,
+                    synthesis_status="skipped",
+                    playback_status="skipped",
+                    synthesis_error=None,
+                    playback_error=None,
                     recognized_text=normalized_text,
                     command_response=voice_output,
                     language=transcription.language,
@@ -784,6 +907,10 @@ class VoiceService:
                         "command": voice_output.metadata.get("command"),
                         "orchestrator_request_id": voice_output.metadata.get("orchestrator_request_id"),
                         "stt_duration_seconds": getattr(self, "_last_stt_duration", 0.0),
+                        "command_status": cmd_status,
+                        "synthesis_status": "skipped",
+                        "playback_status": None,
+                        "playback_outcome": "skipped",
                     },
                 )
                 self._publish_event(
@@ -793,13 +920,13 @@ class VoiceService:
                         "turn_id": turn_id,
                         "session_id": session.session_id,
                         "status": res.status.value,
+                        "command_status": cmd_status,
                         "error": err_str,
                         "duration_ms": turn_elapsed_ms,
                     },
                 )
-
-            self._sync_state_store(active_session=session, last_output=voice_output, last_turn=res)
-            return res
+                self._sync_state_store(active_session=session, last_output=voice_output, last_turn=res)
+                return res
 
         finally:
             # Resource Safety Invariants: Always drop raw audio and release concurrency lock

@@ -448,10 +448,10 @@ class VoiceTurnResult:
 
     Encapsulates:
     - Tracing identifiers (turn_id, session_id, correlation_id)
-    - Turn execution status (status, transcription_status)
+    - Turn execution status (status, transcription_status, command_status, synthesis_status, playback_status)
     - Speech recognition metadata (recognized_text, language, language_hint, confidence)
     - Orchestrator command response (command_response: Optional[VoiceOutput], response_text)
-    - Diagnostics & telemetry (error, duration_ms, created_at, metadata)
+    - Diagnostics & telemetry (error, synthesis_error, playback_error, duration_ms, created_at, metadata)
     """
 
     turn_id: str
@@ -459,6 +459,9 @@ class VoiceTurnResult:
     correlation_id: str
     status: VoiceTurnStatus
     transcription_status: str = "skipped"
+    command_status: str = "skipped"
+    synthesis_status: str = "skipped"
+    playback_status: str = "skipped"
     recognized_text: Optional[str] = None
     language: str = "en"
     language_hint: Optional[str] = None
@@ -466,6 +469,8 @@ class VoiceTurnResult:
     command_response: Optional[VoiceOutput] = None
     response_text: str = ""
     error: Optional[str] = None
+    synthesis_error: Optional[str] = None
+    playback_error: Optional[str] = None
     duration_ms: float = 0.0
     created_at: float = 0.0
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -526,6 +531,9 @@ class VoiceTurnResult:
             "correlation_id": self.correlation_id,
             "status": self.status.value,
             "transcription_status": self.transcription_status,
+            "command_status": self.command_status,
+            "synthesis_status": self.synthesis_status,
+            "playback_status": self.playback_status,
             "recognized_text": self.recognized_text,
             "language": self.language,
             "language_hint": self.language_hint,
@@ -533,6 +541,8 @@ class VoiceTurnResult:
             "command_response": self.command_response.to_dict() if self.command_response else None,
             "response_text": self.response_text,
             "error": self.error,
+            "synthesis_error": self.synthesis_error,
+            "playback_error": self.playback_error,
             "duration_ms": self.duration_ms,
             "created_at": self.created_at,
             "iso_created_at": self.iso_created_at,
@@ -552,6 +562,11 @@ class VoiceTurnResult:
         language_hint: Optional[str] = None,
         confidence: float = 1.0,
         duration_ms: float = 0.0,
+        command_status: str = "success",
+        synthesis_status: str = "skipped",
+        playback_status: str = "skipped",
+        synthesis_error: Optional[str] = None,
+        playback_error: Optional[str] = None,
         metadata: Optional[Mapping[str, Any]] = None,
     ) -> VoiceTurnResult:
         """Factory for a successfully executed voice command turn."""
@@ -561,6 +576,9 @@ class VoiceTurnResult:
             correlation_id=correlation_id,
             status=VoiceTurnStatus.COMPLETED,
             transcription_status="success",
+            command_status=command_status,
+            synthesis_status=synthesis_status,
+            playback_status=playback_status,
             recognized_text=recognized_text,
             language=language,
             language_hint=language_hint,
@@ -568,6 +586,8 @@ class VoiceTurnResult:
             command_response=command_response,
             response_text=command_response.text,
             error=None,
+            synthesis_error=synthesis_error,
+            playback_error=playback_error,
             duration_ms=duration_ms,
             metadata=dict(metadata or {}),
         )
@@ -591,6 +611,9 @@ class VoiceTurnResult:
             correlation_id=correlation_id,
             status=VoiceTurnStatus.EMPTY_SPEECH,
             transcription_status="empty",
+            command_status="skipped",
+            synthesis_status="skipped",
+            playback_status="skipped",
             recognized_text=None,
             language=language,
             language_hint=language_hint,
@@ -598,6 +621,8 @@ class VoiceTurnResult:
             command_response=None,
             response_text="No speech detected.",
             error=error,
+            synthesis_error=None,
+            playback_error=None,
             duration_ms=duration_ms,
             metadata=dict(metadata or {}),
         )
@@ -611,6 +636,11 @@ class VoiceTurnResult:
         error: str,
         status: VoiceTurnStatus = VoiceTurnStatus.FAILED,
         transcription_status: str = "failed",
+        command_status: str = "skipped",
+        synthesis_status: str = "skipped",
+        playback_status: str = "skipped",
+        synthesis_error: Optional[str] = None,
+        playback_error: Optional[str] = None,
         recognized_text: Optional[str] = None,
         command_response: Optional[VoiceOutput] = None,
         language: str = "en",
@@ -626,6 +656,9 @@ class VoiceTurnResult:
             correlation_id=correlation_id,
             status=status,
             transcription_status=transcription_status,
+            command_status=command_status,
+            synthesis_status=synthesis_status,
+            playback_status=playback_status,
             recognized_text=recognized_text,
             language=language,
             language_hint=language_hint,
@@ -633,6 +666,8 @@ class VoiceTurnResult:
             command_response=command_response,
             response_text=resp_text,
             error=error,
+            synthesis_error=synthesis_error,
+            playback_error=playback_error,
             duration_ms=duration_ms,
             metadata=dict(metadata or {}),
         )
@@ -654,6 +689,9 @@ class VoiceTurnResult:
             correlation_id=correlation_id,
             status=VoiceTurnStatus.CANCELLED,
             transcription_status="cancelled",
+            command_status="skipped",
+            synthesis_status="skipped",
+            playback_status="skipped",
             recognized_text=None,
             language="en",
             language_hint=None,
@@ -661,6 +699,8 @@ class VoiceTurnResult:
             command_response=None,
             response_text="Voice turn cancelled.",
             error=error,
+            synthesis_error=None,
+            playback_error=None,
             duration_ms=duration_ms,
             metadata=dict(metadata or {}),
         )
