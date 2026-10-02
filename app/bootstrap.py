@@ -26,7 +26,14 @@ from app.voice import (
     VoiceInteractionController,
     VoiceService,
 )
+from app.agents import TechnicalAnalysisAgent, register_technical_agent_handlers
 from app.analysis import TechnicalAnalysisEngine, register_analysis_handlers
+from app.market.historical import (
+    HistoricalDataLoader,
+    HistoricalDataProvider,
+    MockHistoricalDataProvider,
+    register_historical_handlers,
+)
 from app.market.models import Bar
 
 
@@ -48,6 +55,9 @@ class SystemStatus:
     voice_service: Optional[VoiceService] = None
     voice_controller: Optional[VoiceInteractionController] = None
     analysis_engine: Optional[TechnicalAnalysisEngine] = None
+    technical_agent: Optional[TechnicalAnalysisAgent] = None
+    historical_loader: Optional[HistoricalDataLoader] = None
+    historical_provider: Optional[HistoricalDataProvider] = None
     audio_capture: Optional[AudioCaptureService] = None
     audio_playback: Optional[AudioPlaybackService] = None
 
@@ -170,6 +180,28 @@ def bootstrap_system(
     )
     register_analysis_handlers(orchestrator=orchestrator, engine=analysis_engine)
 
+    # Initialize Technical Analysis Specialist Agent
+    technical_agent = TechnicalAnalysisAgent(
+        analysis_engine=analysis_engine,
+        quality_engine=market_service.quality_engine if market_service else None,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_technical_agent",
+    )
+    register_technical_agent_handlers(orchestrator=orchestrator, agent=technical_agent)
+
+    # Initialize Historical Market Data Provider and Loader
+    historical_provider = MockHistoricalDataProvider(name="mock_historical_provider")
+    historical_loader = HistoricalDataLoader(
+        provider=historical_provider,
+        quality_engine=market_service.quality_engine,
+        analysis_engine=analysis_engine,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_historical_loader",
+    )
+    register_historical_handlers(orchestrator=orchestrator, loader=historical_loader)
+
     def _on_market_bar_updated(event: Event) -> None:
         try:
             p = event.payload
@@ -221,6 +253,9 @@ def bootstrap_system(
         voice_service=voice_service,
         voice_controller=voice_controller,
         analysis_engine=analysis_engine,
+        technical_agent=technical_agent,
+        historical_loader=historical_loader,
+        historical_provider=historical_provider,
         audio_capture=voice_service.audio_capture if voice_service else None,
         audio_playback=voice_service.audio_playback if voice_service else None,
     )
@@ -228,6 +263,8 @@ def bootstrap_system(
     logger.info("System initialized successfully in '%s' mode.", status.environment)
     logger.info("Voice-first architecture: %s", status.voice_architecture)
     logger.info("Technical analysis engine: ready")
+    logger.info("Technical analysis agent: ready")
+    logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 

@@ -17,6 +17,9 @@ from app.market.models import Bar
 class RollingBarSeries:
     """Thread-safe, bounded rolling window container for historical Bar records.
 
+    Tracks duplicate bars, out-of-order sequences, and detected missing intervals (gaps)
+    without ever fabricating synthetic candles.
+
     Attributes:
         symbol: Ticker symbol.
         timeframe: Bar timeframe.
@@ -32,12 +35,25 @@ class RollingBarSeries:
             raise ValidationError(f"max_capacity must be at least 20, got {max_capacity}")
 
         self.symbol = symbol.strip().upper()
-        self.timeframe = timeframe.strip()
+        # Normalization with fallback for non-standard timeframes
+        from app.analysis.models import TIMEFRAME_SECONDS, normalize_timeframe
+        try:
+            self.timeframe = normalize_timeframe(timeframe)
+        except ValidationError:
+            self.timeframe = timeframe.strip()
+
         self.max_capacity = max_capacity
+        self._interval_seconds = TIMEFRAME_SECONDS.get(self.timeframe)
 
         self._lock = threading.RLock()
         self._bars: collections.deque[Bar] = collections.deque(maxlen=max_capacity)
         self._last_timestamp: Optional[float] = None
+
+        # Data Quality & Synchronization Tracking
+        self._duplicate_count: int = 0
+        self._out_of_order_count: int = 0
+        self._missing_intervals_count: int = 0
+        self._gap_records: List[Tuple[float, float, int]] = []
 
     def add_bar(self, bar: Bar) -> bool:
         """Append a new Bar to the series if it matches symbol, timeframe, and timestamp order.
@@ -50,12 +66,27 @@ class RollingBarSeries:
                   duplicate, or non-increasing timestamp).
         """
         with self._lock:
-            if bar.symbol.upper() != self.symbol or bar.timeframe != self.timeframe:
+            # Check symbol and timeframe isolation
+            bar_sym = bar.symbol.strip().upper()
+            bar_tf = bar.timeframe.strip()
+            if bar_sym != self.symbol or (bar_tf != self.timeframe and bar_tf.upper() != self.timeframe.upper()):
                 return False
 
-            if self._last_timestamp is not None and bar.timestamp <= self._last_timestamp:
-                # Reject duplicate or out-of-order bar
-                return False
+            if self._last_timestamp is not None:
+                if bar.timestamp == self._last_timestamp:
+                    self._duplicate_count += 1
+                    return False
+                elif bar.timestamp < self._last_timestamp:
+                    self._out_of_order_count += 1
+                    return False
+
+                # Chronological advance: check for missing intervals (gaps)
+                if self._interval_seconds is not None:
+                    elapsed = bar.timestamp - self._last_timestamp
+                    if elapsed > self._interval_seconds * 1.5:
+                        missed_bars = max(1, int(round(elapsed / self._interval_seconds)) - 1)
+                        self._missing_intervals_count += missed_bars
+                        self._gap_records.append((self._last_timestamp, bar.timestamp, missed_bars))
 
             self._bars.append(bar)
             self._last_timestamp = bar.timestamp
@@ -103,8 +134,43 @@ class RollingBarSeries:
         with self._lock:
             return [b.volume for b in self._bars]
 
+    @property
+    def missing_intervals_count(self) -> int:
+        """Return total detected missing bar intervals (gaps)."""
+        with self._lock:
+            return self._missing_intervals_count
+
+    @property
+    def has_gaps(self) -> bool:
+        """True if any missing bar intervals were detected in chronological history."""
+        with self._lock:
+            return self._missing_intervals_count > 0
+
+    @property
+    def gap_records(self) -> List[Tuple[float, float, int]]:
+        """Return snapshot of recorded gaps (start_ts, end_ts, missing_count)."""
+        with self._lock:
+            return list(self._gap_records)
+
+    @property
+    def duplicate_count(self) -> int:
+        """Return count of rejected duplicate bars."""
+        with self._lock:
+            return self._duplicate_count
+
+    @property
+    def out_of_order_count(self) -> int:
+        """Return count of rejected out-of-order bars."""
+        with self._lock:
+            return self._out_of_order_count
+
     def clear(self) -> None:
-        """Clear all stored bars and reset timestamp tracking."""
+        """Clear all stored bars and reset timestamp and quality tracking."""
         with self._lock:
             self._bars.clear()
             self._last_timestamp = None
+            self._duplicate_count = 0
+            self._out_of_order_count = 0
+            self._missing_intervals_count = 0
+            self._gap_records.clear()
+

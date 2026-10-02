@@ -8,8 +8,9 @@ dispatching analysis events, and caching technical feature vectors.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.analysis.indicators import (
     calculate_atr,
@@ -23,10 +24,16 @@ from app.analysis.indicators import (
     classify_rsi,
 )
 from app.analysis.models import (
+    SUPPORTED_TIMEFRAMES,
+    TIMEFRAME_SECONDS,
     AnalysisConfig,
     IndicatorType,
     IndicatorValue,
+    MultiTimeframeSyncState,
     TechnicalFeatureVector,
+    TimeframeHealth,
+    TimeframeHealthStatus,
+    normalize_timeframe,
 )
 from app.analysis.series import RollingBarSeries
 from app.core.events import Event, EventBus, EventType
@@ -59,6 +66,7 @@ class TechnicalAnalysisEngine:
         self._lock = threading.RLock()
         self._series: Dict[Tuple[str, str], RollingBarSeries] = {}
         self._latest_vectors: Dict[Tuple[str, str], TechnicalFeatureVector] = {}
+        self._stream_rejected_unhealthy: Dict[Tuple[str, str], int] = {}
 
         self._counters = {
             "bars_processed": 0,
@@ -67,13 +75,21 @@ class TechnicalAnalysisEngine:
             "indicators_calculated": 0,
         }
 
+    def _normalize_tf(self, timeframe: str) -> str:
+        """Helper to obtain canonical timeframe with fallback."""
+        try:
+            return normalize_timeframe(timeframe)
+        except Exception:
+            return timeframe.strip()
+
     def _get_or_create_series(self, symbol: str, timeframe: str) -> RollingBarSeries:
         """Internal helper to retrieve or allocate a RollingBarSeries under lock."""
-        key = (symbol.strip().upper(), timeframe.strip())
+        norm_tf = self._normalize_tf(timeframe)
+        key = (symbol.strip().upper(), norm_tf)
         if key not in self._series:
             self._series[key] = RollingBarSeries(
                 symbol=symbol,
-                timeframe=timeframe,
+                timeframe=norm_tf,
                 max_capacity=self.config.max_bar_history,
             )
         return self._series[key]
@@ -100,28 +116,32 @@ class TechnicalAnalysisEngine:
             or None if the bar was rejected or duplicate.
         """
         cid = correlation_id or uuid.uuid4().hex
+        norm_tf = self._normalize_tf(bar.timeframe)
+        sym_upper = bar.symbol.strip().upper()
+        key = (sym_upper, norm_tf)
 
         # 1. Quality Gate Check
         if not safe_to_consume:
             with self._lock:
                 self._counters["bars_rejected_unhealthy"] += 1
+                self._stream_rejected_unhealthy[key] = self._stream_rejected_unhealthy.get(key, 0) + 1
             logger.warning(
                 "Rejected unsafe bar for %s (%s) from analysis series [cid=%s]",
                 bar.symbol,
-                bar.timeframe,
+                norm_tf,
                 cid,
             )
             return None
 
         # 2. Add to Rolling Bar Series
         with self._lock:
-            series = self._get_or_create_series(bar.symbol, bar.timeframe)
+            series = self._get_or_create_series(sym_upper, norm_tf)
             accepted = series.add_bar(bar)
             if not accepted:
                 logger.debug(
                     "Bar for %s (%s) rejected (duplicate or out-of-order) [cid=%s]",
                     bar.symbol,
-                    bar.timeframe,
+                    norm_tf,
                     cid,
                 )
                 return None
@@ -130,8 +150,10 @@ class TechnicalAnalysisEngine:
 
             # 3. Compute Feature Vector
             vector = self._compute_feature_vector(series, correlation_id=cid)
-            key = (bar.symbol.upper(), bar.timeframe)
             self._latest_vectors[key] = vector
+            raw_key = (sym_upper, bar.timeframe.strip())
+            if raw_key != key:
+                self._latest_vectors[raw_key] = vector
             self._counters["feature_vectors_computed"] += 1
 
         # 4. StateStore Synchronization
@@ -150,10 +172,11 @@ class TechnicalAnalysisEngine:
     ) -> Optional[TechnicalFeatureVector]:
         """Calculate technical indicators over current in-memory history on-demand."""
         cid = correlation_id or uuid.uuid4().hex
-        key = (symbol.strip().upper(), timeframe.strip())
+        norm_tf = self._normalize_tf(timeframe)
+        key = (symbol.strip().upper(), norm_tf)
 
         with self._lock:
-            series = self._series.get(key)
+            series = self._series.get(key) or self._series.get((symbol.strip().upper(), timeframe.strip()))
             if not series or series.count == 0:
                 return None
             vector = self._compute_feature_vector(series, correlation_id=cid)
@@ -170,9 +193,31 @@ class TechnicalAnalysisEngine:
         timeframe: str = "1m",
     ) -> Optional[TechnicalFeatureVector]:
         """Retrieve the latest cached TechnicalFeatureVector."""
-        key = (symbol.strip().upper(), timeframe.strip())
+        norm_tf = self._normalize_tf(timeframe)
+        key = (symbol.strip().upper(), norm_tf)
+        raw_key = (symbol.strip().upper(), timeframe.strip())
         with self._lock:
-            return self._latest_vectors.get(key)
+            return self._latest_vectors.get(key) or self._latest_vectors.get(raw_key)
+
+    def get_latest_vector(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+    ) -> Optional[TechnicalFeatureVector]:
+        """Alias for get_feature_vector."""
+        return self.get_feature_vector(symbol, timeframe)
+
+    def get_series(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+    ) -> Optional[RollingBarSeries]:
+        """Retrieve the RollingBarSeries container for a stream."""
+        norm_tf = self._normalize_tf(timeframe)
+        key = (symbol.strip().upper(), norm_tf)
+        raw_key = (symbol.strip().upper(), timeframe.strip())
+        with self._lock:
+            return self._series.get(key) or self._series.get(raw_key)
 
     def get_indicator(
         self,
@@ -188,32 +233,216 @@ class TechnicalAnalysisEngine:
 
     def get_history(self, symbol: str, timeframe: str = "1m") -> List[Bar]:
         """Return the current rolling sequence of bars for a stream."""
-        key = (symbol.strip().upper(), timeframe.strip())
+        norm_tf = self._normalize_tf(timeframe)
+        key = (symbol.strip().upper(), norm_tf)
+        raw_key = (symbol.strip().upper(), timeframe.strip())
         with self._lock:
-            series = self._series.get(key)
+            series = self._series.get(key) or self._series.get(raw_key)
             if not series:
                 return []
             return series.get_bars()
+
+    def get_available_timeframes(self, symbol: str) -> List[str]:
+        """Return list of canonical timeframes with active bars for the given symbol."""
+        sym_upper = symbol.strip().upper()
+        available: List[str] = []
+        with self._lock:
+            for (s, tf), series in self._series.items():
+                if s == sym_upper and series.count > 0:
+                    norm_tf = self._normalize_tf(tf)
+                    if norm_tf not in available:
+                        available.append(norm_tf)
+        return sorted(available, key=lambda t: SUPPORTED_TIMEFRAMES.index(t) if t in SUPPORTED_TIMEFRAMES else 99)
+
+    def get_all_feature_vectors(self, symbol: str) -> Dict[str, TechnicalFeatureVector]:
+        """Return a mapping of timeframe -> TechnicalFeatureVector for all available streams."""
+        sym_upper = symbol.strip().upper()
+        res: Dict[str, TechnicalFeatureVector] = {}
+        with self._lock:
+            for (s, tf), vec in self._latest_vectors.items():
+                if s == sym_upper:
+                    norm_tf = self._normalize_tf(tf)
+                    if norm_tf not in res:
+                        res[norm_tf] = vec
+        return res
+
+    def check_timeframe_health(
+        self,
+        symbol: str,
+        timeframe: str,
+        reference_time: Optional[float] = None,
+        stale_threshold_seconds: Optional[float] = None,
+    ) -> TimeframeHealth:
+        """Evaluate data quality and synchronization health for a specific (symbol, timeframe)."""
+        sym_upper = symbol.strip().upper()
+        norm_tf = self._normalize_tf(timeframe)
+        key = (sym_upper, norm_tf)
+        now = time.time() if reference_time is None else reference_time
+
+        with self._lock:
+            series = self._series.get(key) or self._series.get((sym_upper, timeframe.strip()))
+            rejected_unhealthy = self._stream_rejected_unhealthy.get(key, 0)
+
+        warnings: List[str] = []
+        if rejected_unhealthy > 0:
+            warnings.append(f"Stream had {rejected_unhealthy} quarantined bar(s) rejected by quality gate.")
+
+        if not series or series.count == 0:
+            if rejected_unhealthy > 0:
+                status = TimeframeHealthStatus.UNHEALTHY
+            else:
+                status = TimeframeHealthStatus.EMPTY
+            warnings.append(f"No bar data available for {sym_upper} ({norm_tf}).")
+            return TimeframeHealth(
+                symbol=sym_upper,
+                timeframe=norm_tf,
+                status=status,
+                bar_count=0,
+                latest_timestamp=None,
+                age_seconds=None,
+                missing_intervals_count=0,
+                unhealthy_bars_rejected=rejected_unhealthy,
+                warnings=tuple(warnings),
+                is_valid_for_analysis=False,
+            )
+
+        bar_count = series.count
+        latest_bar = series.latest_bar
+        latest_ts = latest_bar.timestamp if latest_bar else None
+        age = max(0.0, now - latest_ts) if latest_ts is not None else None
+        missing_gaps = series.missing_intervals_count
+
+        if missing_gaps > 0:
+            warnings.append(f"Detected {missing_gaps} missing bar interval(s) in chronological history.")
+
+        # Freshness determination
+        interval_sec = TIMEFRAME_SECONDS.get(norm_tf, 60.0)
+        thresh = stale_threshold_seconds or max(120.0, interval_sec * 2.5)
+        is_stale = False
+        if age is not None and age > thresh:
+            is_stale = True
+            warnings.append(
+                f"Data is stale: latest bar is {age:.1f}s old (freshness threshold is {thresh:.1f}s)."
+            )
+
+        # Health status resolution
+        if is_stale:
+            status = TimeframeHealthStatus.STALE
+            is_valid = False
+        elif bar_count < 15:
+            status = TimeframeHealthStatus.INSUFFICIENT_DATA
+            warnings.append(
+                f"Insufficient bar history ({bar_count} bars); minimum 15 bars required for reliable indicator analysis."
+            )
+            is_valid = False
+        elif rejected_unhealthy > 0 or missing_gaps > 0:
+            status = TimeframeHealthStatus.DEGRADED
+            is_valid = True
+        else:
+            status = TimeframeHealthStatus.HEALTHY
+            is_valid = True
+
+        return TimeframeHealth(
+            symbol=sym_upper,
+            timeframe=norm_tf,
+            status=status,
+            bar_count=bar_count,
+            latest_timestamp=latest_ts,
+            age_seconds=age,
+            missing_intervals_count=missing_gaps,
+            unhealthy_bars_rejected=rejected_unhealthy,
+            warnings=tuple(warnings),
+            is_valid_for_analysis=is_valid,
+        )
+
+    def get_multi_timeframe_sync(
+        self,
+        symbol: str,
+        timeframes: Optional[Sequence[str]] = None,
+        reference_time: Optional[float] = None,
+    ) -> MultiTimeframeSyncState:
+        """Evaluate synchronization and completeness across all target timeframes."""
+        sym_upper = symbol.strip().upper()
+        target_tfs = tuple(timeframes) if timeframes else SUPPORTED_TIMEFRAMES
+        now = time.time() if reference_time is None else reference_time
+
+        tf_health_map: Dict[str, TimeframeHealth] = {}
+        available_tfs: List[str] = []
+        missing_tfs: List[str] = []
+        stale_tfs: List[str] = []
+        unhealthy_tfs: List[str] = []
+        cross_warnings: List[str] = []
+
+        for tf in target_tfs:
+            norm_tf = self._normalize_tf(tf)
+            h = self.check_timeframe_health(sym_upper, norm_tf, reference_time=now)
+            tf_health_map[norm_tf] = h
+
+            if h.bar_count > 0:
+                available_tfs.append(norm_tf)
+            else:
+                missing_tfs.append(norm_tf)
+                cross_warnings.append(f"Timeframe {norm_tf} is missing (0 bars).")
+
+            if h.status == TimeframeHealthStatus.STALE:
+                stale_tfs.append(norm_tf)
+                cross_warnings.append(f"Timeframe {norm_tf} is stale.")
+            elif h.status in (TimeframeHealthStatus.UNHEALTHY, TimeframeHealthStatus.DEGRADED):
+                unhealthy_tfs.append(norm_tf)
+                cross_warnings.append(f"Timeframe {norm_tf} is {h.status.value.lower()}.")
+
+        all_present = len(missing_tfs) == 0
+        no_stale = len(stale_tfs) == 0
+        no_unhealthy = len(unhealthy_tfs) == 0
+        all_valid = all(h.is_valid_for_analysis for h in tf_health_map.values())
+        is_fully_synchronized = all_present and no_stale and no_unhealthy and all_valid
+
+        # Sync quality score: [0.0, 1.0]
+        if not target_tfs:
+            quality = 0.0
+        else:
+            healthy_count = sum(1 for h in tf_health_map.values() if h.status == TimeframeHealthStatus.HEALTHY)
+            degraded_count = sum(1 for h in tf_health_map.values() if h.status == TimeframeHealthStatus.DEGRADED)
+            quality = max(0.0, min(1.0, (healthy_count * 1.0 + degraded_count * 0.6) / len(target_tfs)))
+
+        return MultiTimeframeSyncState(
+            symbol=sym_upper,
+            reference_timestamp=now,
+            timeframes=tf_health_map,
+            available_timeframes=tuple(available_tfs),
+            missing_timeframes=tuple(missing_tfs),
+            stale_timeframes=tuple(stale_tfs),
+            unhealthy_timeframes=tuple(unhealthy_tfs),
+            is_fully_synchronized=is_fully_synchronized,
+            sync_quality=quality,
+            warnings=tuple(cross_warnings),
+        )
 
     def reset(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> None:
         """Reset historical series and cached vectors."""
         with self._lock:
             if symbol and timeframe:
-                key = (symbol.strip().upper(), timeframe.strip())
-                if key in self._series:
-                    self._series[key].clear()
-                self._latest_vectors.pop(key, None)
+                norm_tf = self._normalize_tf(timeframe)
+                key = (symbol.strip().upper(), norm_tf)
+                raw_key = (symbol.strip().upper(), timeframe.strip())
+                for k in (key, raw_key):
+                    if k in self._series:
+                        self._series[k].clear()
+                    self._latest_vectors.pop(k, None)
+                    self._stream_rejected_unhealthy.pop(k, None)
             elif symbol:
                 sym_upper = symbol.strip().upper()
                 keys_to_remove = [k for k in self._series if k[0] == sym_upper]
                 for k in keys_to_remove:
                     self._series[k].clear()
                     self._latest_vectors.pop(k, None)
+                    self._stream_rejected_unhealthy.pop(k, None)
             else:
                 for s in self._series.values():
                     s.clear()
                 self._series.clear()
                 self._latest_vectors.clear()
+                self._stream_rejected_unhealthy.clear()
 
     def get_counters(self) -> Dict[str, int]:
         """Return operational telemetry counters."""

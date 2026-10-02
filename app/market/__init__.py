@@ -11,6 +11,17 @@ from app.market.feeds import (
     MockScenario,
     ReplayMarketFeed,
 )
+from app.market.historical import (
+    HistoricalBarRequest,
+    HistoricalBarResponse,
+    HistoricalDataLoader,
+    HistoricalDataProvider,
+    HistoricalIngestionResult,
+    HistoricalProviderStatus,
+    MockHistoricalDataProvider,
+    get_base_price_for_symbol,
+    register_historical_handlers,
+)
 from app.market.models import Bar, OrderBookLevel, OrderBookSnapshot, Quote
 from app.market.normalizer import MarketDataNormalizer
 from app.market.quality import (
@@ -54,4 +65,13 @@ __all__ = [
     "evaluate_order_book_completeness",
     "resolve_quality_status",
     "is_safe_for_downstream",
+    "HistoricalBarRequest",
+    "HistoricalBarResponse",
+    "HistoricalIngestionResult",
+    "HistoricalProviderStatus",
+    "HistoricalDataProvider",
+    "MockHistoricalDataProvider",
+    "HistoricalDataLoader",
+    "register_historical_handlers",
+    "get_base_price_for_symbol",
 ]

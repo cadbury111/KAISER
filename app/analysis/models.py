@@ -222,3 +222,162 @@ class AnalysisConfig:
             raise ValidationError("ATR period must be a strictly positive integer.")
         if self.max_bar_history < 50:
             raise ValidationError(f"max_bar_history must be at least 50 bars, got {self.max_bar_history}")
+
+
+# -----------------------------------------------------------------------------
+# Multi-Timeframe Synchronization Models & Invariants
+# -----------------------------------------------------------------------------
+
+SUPPORTED_TIMEFRAMES: Tuple[str, ...] = ("1m", "5m", "15m", "1h", "1D")
+
+TIMEFRAME_SECONDS: Dict[str, float] = {
+    "1m": 60.0,
+    "5m": 300.0,
+    "15m": 900.0,
+    "1h": 3600.0,
+    "1D": 86400.0,
+}
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    """Normalize and validate a timeframe string into its canonical representation.
+
+    Args:
+        timeframe: Raw timeframe string (e.g., '1m', '1M', '5m', '1h', '1H', '1d', '1D').
+
+    Returns:
+        str: Canonical timeframe ('1m', '5m', '15m', '1h', '1D').
+
+    Raises:
+        ValidationError: If timeframe is unrecognized or unsupported.
+    """
+    if not timeframe or not isinstance(timeframe, str) or not timeframe.strip():
+        raise ValidationError("Timeframe must be a non-empty string.")
+
+    cleaned = timeframe.strip()
+    mapping = {
+        "1M": "1m",
+        "1m": "1m",
+        "5M": "5m",
+        "5m": "5m",
+        "15M": "15m",
+        "15m": "15m",
+        "1H": "1h",
+        "1h": "1h",
+        "1D": "1D",
+        "1d": "1D",
+    }
+    canonical = mapping.get(cleaned)
+    if not canonical or canonical not in SUPPORTED_TIMEFRAMES:
+        raise ValidationError(
+            f"Unsupported timeframe '{timeframe}'. Supported timeframes are: {list(SUPPORTED_TIMEFRAMES)}"
+        )
+    return canonical
+
+
+class TimeframeHealthStatus(str, Enum):
+    """Operational health condition of a specific (symbol, timeframe) stream."""
+
+    HEALTHY = "HEALTHY"
+    STALE = "STALE"
+    DEGRADED = "DEGRADED"
+    MISSING_DATA = "MISSING_DATA"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    EMPTY = "EMPTY"
+    UNHEALTHY = "UNHEALTHY"
+
+
+@dataclass(frozen=True)
+class TimeframeHealth:
+    """Immutable data quality and health assessment for a single timeframe.
+
+    Attributes:
+        symbol: Ticker symbol.
+        timeframe: Canonical timeframe string.
+        status: Health status assessment.
+        bar_count: Total valid bars currently retained.
+        latest_timestamp: Timestamp of the most recent bar, if any.
+        age_seconds: Seconds elapsed since latest bar relative to reference clock.
+        missing_intervals_count: Detected skipped bar intervals in history.
+        unhealthy_bars_rejected: Count of quarantined bars discarded by quality gate.
+        warnings: Descriptive quality warnings.
+        is_valid_for_analysis: True if stream is healthy and has sufficient history.
+    """
+
+    symbol: str
+    timeframe: str
+    status: TimeframeHealthStatus
+    bar_count: int
+    latest_timestamp: Optional[float] = None
+    age_seconds: Optional[float] = None
+    missing_intervals_count: int = 0
+    unhealthy_bars_rejected: int = 0
+    warnings: Tuple[str, ...] = ()
+    is_valid_for_analysis: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+        object.__setattr__(self, "timeframe", normalize_timeframe(self.timeframe))
+        object.__setattr__(self, "warnings", tuple(self.warnings or ()))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
+            "status": self.status.value,
+            "bar_count": self.bar_count,
+            "latest_timestamp": self.latest_timestamp,
+            "age_seconds": round(self.age_seconds, 2) if self.age_seconds is not None else None,
+            "missing_intervals_count": self.missing_intervals_count,
+            "unhealthy_bars_rejected": self.unhealthy_bars_rejected,
+            "warnings": list(self.warnings),
+            "is_valid_for_analysis": self.is_valid_for_analysis,
+        }
+
+
+@dataclass(frozen=True)
+class MultiTimeframeSyncState:
+    """Immutable synchronization state across all monitored timeframes for a symbol.
+
+    Attributes:
+        symbol: Ticker symbol.
+        reference_timestamp: POSIX UTC reference timestamp when synchronization was assessed.
+        timeframes: Detailed health assessment for each evaluated timeframe.
+        available_timeframes: Tuple of timeframes with data available.
+        missing_timeframes: Tuple of timeframes with no bars ingested.
+        stale_timeframes: Tuple of timeframes exceeding freshness threshold.
+        unhealthy_timeframes: Tuple of timeframes with quarantined bars or data corruption.
+        is_fully_synchronized: True only if all configured timeframes are present and healthy.
+        sync_quality: Aggregate synchronization quality score [0.0, 1.0].
+        warnings: Cross-timeframe data quality warnings.
+    """
+
+    symbol: str
+    reference_timestamp: float
+    timeframes: Dict[str, TimeframeHealth]
+    available_timeframes: Tuple[str, ...]
+    missing_timeframes: Tuple[str, ...]
+    stale_timeframes: Tuple[str, ...]
+    unhealthy_timeframes: Tuple[str, ...]
+    is_fully_synchronized: bool
+    sync_quality: float
+    warnings: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+        object.__setattr__(self, "warnings", tuple(self.warnings or ()))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "reference_timestamp": self.reference_timestamp,
+            "timeframes": {k: v.to_dict() for k, v in self.timeframes.items()},
+            "available_timeframes": list(self.available_timeframes),
+            "missing_timeframes": list(self.missing_timeframes),
+            "stale_timeframes": list(self.stale_timeframes),
+            "unhealthy_timeframes": list(self.unhealthy_timeframes),
+            "is_fully_synchronized": self.is_fully_synchronized,
+            "sync_quality": round(self.sync_quality, 4),
+            "warnings": list(self.warnings),
+        }
+
