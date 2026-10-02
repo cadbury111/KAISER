@@ -1,7 +1,7 @@
 """KAISER Market Data Package.
 
 Manages market data ingestion, streaming, caching, provider abstraction,
-and quality reliability evaluation.
+local persistence, and quality reliability evaluation.
 """
 
 from app.market.feeds import (
@@ -12,14 +12,22 @@ from app.market.feeds import (
     ReplayMarketFeed,
 )
 from app.market.historical import (
+    HistoricalBarRepository,
     HistoricalBarRequest,
     HistoricalBarResponse,
+    HistoricalDataCache,
     HistoricalDataLoader,
     HistoricalDataProvider,
     HistoricalIngestionResult,
     HistoricalProviderStatus,
+    HistoricalReplayEngine,
+    HistoricalReplayRequest,
+    HistoricalReplayResult,
+    HistoricalReplayStatus,
     MockHistoricalDataProvider,
+    SQLiteHistoricalBarRepository,
     get_base_price_for_symbol,
+    make_cache_key,
     register_historical_handlers,
 )
 from app.market.models import Bar, OrderBookLevel, OrderBookSnapshot, Quote
@@ -74,4 +82,12 @@ __all__ = [
     "HistoricalDataLoader",
     "register_historical_handlers",
     "get_base_price_for_symbol",
+    "HistoricalBarRepository",
+    "SQLiteHistoricalBarRepository",
+    "HistoricalDataCache",
+    "make_cache_key",
+    "HistoricalReplayRequest",
+    "HistoricalReplayResult",
+    "HistoricalReplayStatus",
+    "HistoricalReplayEngine",
 ]

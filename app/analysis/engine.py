@@ -219,6 +219,24 @@ class TechnicalAnalysisEngine:
         with self._lock:
             return self._series.get(key) or self._series.get(raw_key)
 
+    def reset_stream(self, symbol: str, timeframe: str = "1m") -> None:
+        """Reset rolling series, feature vectors, and quarantine count for a stream."""
+        norm_tf = self._normalize_tf(timeframe)
+        sym_upper = symbol.strip().upper()
+        key = (sym_upper, norm_tf)
+        raw_key = (sym_upper, timeframe.strip())
+        with self._lock:
+            series = self._series.pop(key, None)
+            if series:
+                series.clear()
+            raw_series = self._series.pop(raw_key, None)
+            if raw_series and raw_series is not series:
+                raw_series.clear()
+            self._latest_vectors.pop(key, None)
+            self._latest_vectors.pop(raw_key, None)
+            self._stream_rejected_unhealthy.pop(key, None)
+            self._stream_rejected_unhealthy.pop(raw_key, None)
+
     def get_indicator(
         self,
         symbol: str,

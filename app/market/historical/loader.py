@@ -50,6 +50,8 @@ class HistoricalDataLoader:
         analysis_engine: Optional[TechnicalAnalysisEngine] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        repository: Optional[Any] = None,
+        cache: Optional[Any] = None,
         name: str = "historical_data_loader",
     ) -> None:
         self.name = name
@@ -58,12 +60,50 @@ class HistoricalDataLoader:
         self.analysis_engine = analysis_engine
         self.event_bus = event_bus
         self.state_store = state_store
+        self.repository = repository
+        self.cache = cache
         self.normalizer = MarketDataNormalizer()
 
     def set_provider(self, provider: HistoricalDataProvider) -> None:
         """Dynamically swap or update the historical data provider."""
         self.provider = provider
         logger.info("Updated historical data provider to '%s'", provider.name)
+
+    def set_repository(self, repository: Any) -> None:
+        """Dynamically set the local storage repository."""
+        self.repository = repository
+        logger.info("Updated repository to '%s'", getattr(repository, "name", "custom"))
+
+    def set_cache(self, cache: Any) -> None:
+        """Dynamically set or swap the query cache."""
+        self.cache = cache
+
+    def persist_bars(self, bars: Sequence[Bar], source_provider: Optional[str] = None) -> int:
+        """Persist bars to local repository and invalidate stream cache."""
+        if not self.repository or not bars:
+            return 0
+        src = source_provider or self.provider.name
+        stored_count = self.repository.store_bars(bars, source_provider=src)
+
+        # Invalidate stream in cache to guarantee cache freshness
+        if self.cache and bars:
+            self.cache.invalidate_stream(bars[0].symbol, bars[0].timeframe)
+
+        if self.event_bus and stored_count > 0:
+            self.event_bus.publish(
+                Event.create(
+                    event_type=EventType.HISTORICAL_DATA_STORED,
+                    source=self.name,
+                    payload={
+                        "symbol": bars[0].symbol,
+                        "timeframe": bars[0].timeframe,
+                        "count": stored_count,
+                        "source": src,
+                    },
+                )
+            )
+
+        return stored_count
 
     def load_bars(
         self,
@@ -96,9 +136,40 @@ class HistoricalDataLoader:
                 )
             )
 
+        # 1. Check cache if available (for unpaginated root requests)
+        if self.cache and not request.page_token:
+            from app.market.historical.cache import make_cache_key
+            ckey = make_cache_key(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_time=request.start_time,
+                end_time=request.end_time,
+                limit=request.limit or 1000,
+            )
+            cached_bars = self.cache.get(ckey)
+            if cached_bars is not None:
+                cached_resp = HistoricalBarResponse(
+                    request=request,
+                    status=HistoricalProviderStatus.SUCCESS if cached_bars else HistoricalProviderStatus.EMPTY,
+                    bars=cached_bars,
+                    provider_name=f"{self.provider.name}_cached",
+                )
+                self._publish_loaded_event(cached_resp, cid)
+                return cached_resp
+
         initial_response = self.provider.get_historical_bars(request)
 
         if not paginate_all or not initial_response.next_page_token or initial_response.status != HistoricalProviderStatus.PARTIAL:
+            if self.cache and not request.page_token and initial_response.status == HistoricalProviderStatus.SUCCESS:
+                from app.market.historical.cache import make_cache_key
+                ckey = make_cache_key(
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    start_time=request.start_time,
+                    end_time=request.end_time,
+                    limit=request.limit or 1000,
+                )
+                self.cache.put(ckey, initial_response.bars, is_complete=True)
             self._publish_loaded_event(initial_response, cid)
             return initial_response
 
@@ -139,6 +210,17 @@ class HistoricalDataLoader:
             next_page_token=current_token,
             provider_name=self.provider.name,
         )
+
+        if self.cache and not current_token and final_response.status == HistoricalProviderStatus.SUCCESS:
+            from app.market.historical.cache import make_cache_key
+            ckey = make_cache_key(
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+                start_time=request.start_time,
+                end_time=request.end_time,
+                limit=request.limit or 1000,
+            )
+            self.cache.put(ckey, final_response.bars, is_complete=True)
 
         self._publish_loaded_event(final_response, cid)
         return final_response

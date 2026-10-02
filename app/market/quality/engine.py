@@ -342,3 +342,30 @@ class MarketDataQualityEngine:
             self._seen_fingerprints.clear()
             self._latest_stream_timestamps.clear()
             self.source_tracker = SourceHealthTracker()
+
+    def reset_stream(
+        self,
+        symbol: str,
+        source: Optional[str] = None,
+        data_type: Optional[str] = "bar",
+    ) -> None:
+        """Reset timestamp and fingerprint tracking for a specific symbol/stream."""
+        with self._lock:
+            norm_sym = symbol.strip().upper()
+            keys_to_del = [
+                k for k in self._latest_stream_timestamps
+                if k[1].upper() == norm_sym
+                and (source is None or k[0] == source)
+                and (data_type is None or k[2] == data_type)
+            ]
+            for k in keys_to_del:
+                self._latest_stream_timestamps.pop(k, None)
+
+            # Evict fingerprints matching this stream
+            fps_to_del = [
+                fp for fp in self._seen_fingerprints
+                if f":{norm_sym}:" in fp
+                and (source is None or fp.startswith(f"{source}:"))
+            ]
+            for fp in fps_to_del:
+                self._seen_fingerprints.pop(fp, None)

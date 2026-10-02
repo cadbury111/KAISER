@@ -29,9 +29,13 @@ from app.voice import (
 from app.agents import TechnicalAnalysisAgent, register_technical_agent_handlers
 from app.analysis import TechnicalAnalysisEngine, register_analysis_handlers
 from app.market.historical import (
+    HistoricalBarRepository,
+    HistoricalDataCache,
     HistoricalDataLoader,
     HistoricalDataProvider,
+    HistoricalReplayEngine,
     MockHistoricalDataProvider,
+    SQLiteHistoricalBarRepository,
     register_historical_handlers,
 )
 from app.market.models import Bar
@@ -58,6 +62,9 @@ class SystemStatus:
     technical_agent: Optional[TechnicalAnalysisAgent] = None
     historical_loader: Optional[HistoricalDataLoader] = None
     historical_provider: Optional[HistoricalDataProvider] = None
+    historical_repository: Optional[HistoricalBarRepository] = None
+    historical_cache: Optional[HistoricalDataCache] = None
+    historical_replay_engine: Optional[HistoricalReplayEngine] = None
     audio_capture: Optional[AudioCaptureService] = None
     audio_playback: Optional[AudioPlaybackService] = None
 
@@ -190,6 +197,16 @@ def bootstrap_system(
     )
     register_technical_agent_handlers(orchestrator=orchestrator, agent=technical_agent)
 
+    # Initialize Historical Repository & Bounded Cache
+    db_path = "data/kaiser.db"
+    if active_settings.database_url.startswith("sqlite:///"):
+        db_path = active_settings.database_url.replace("sqlite:///", "")
+    elif active_settings.database_url.startswith("sqlite://"):
+        db_path = active_settings.database_url.replace("sqlite://", "")
+
+    historical_repository = SQLiteHistoricalBarRepository(db_path=db_path, name="sqlite_historical_repo")
+    historical_cache = HistoricalDataCache(max_size=200, ttl_seconds=300.0)
+
     # Initialize Historical Market Data Provider and Loader
     historical_provider = MockHistoricalDataProvider(name="mock_historical_provider")
     historical_loader = HistoricalDataLoader(
@@ -198,9 +215,27 @@ def bootstrap_system(
         analysis_engine=analysis_engine,
         event_bus=event_bus,
         state_store=state_store,
+        repository=historical_repository,
+        cache=historical_cache,
         name="kaiser_main_historical_loader",
     )
-    register_historical_handlers(orchestrator=orchestrator, loader=historical_loader)
+
+    # Initialize Historical Replay Engine
+    historical_replay_engine = HistoricalReplayEngine(
+        repository=historical_repository,
+        quality_engine=market_service.quality_engine,
+        analysis_engine=analysis_engine,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_replay_engine",
+    )
+
+    register_historical_handlers(
+        orchestrator=orchestrator,
+        loader=historical_loader,
+        repository=historical_repository,
+        replay_engine=historical_replay_engine,
+    )
 
     def _on_market_bar_updated(event: Event) -> None:
         try:
@@ -256,6 +291,9 @@ def bootstrap_system(
         technical_agent=technical_agent,
         historical_loader=historical_loader,
         historical_provider=historical_provider,
+        historical_repository=historical_repository,
+        historical_cache=historical_cache,
+        historical_replay_engine=historical_replay_engine,
         audio_capture=voice_service.audio_capture if voice_service else None,
         audio_playback=voice_service.audio_playback if voice_service else None,
     )
@@ -265,6 +303,9 @@ def bootstrap_system(
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)
+    logger.info("Historical repository: ready (db=%s)", db_path)
+    logger.info("Historical cache: ready (max_size=200)")
+    logger.info("Historical replay engine: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 
