@@ -62,6 +62,20 @@ from app.backtesting.robustness import (
     StressScenario,
     StressScenarioResult,
 )
+from app.backtesting.portfolio_simulation import (
+    DiversificationMetrics,
+    PortfolioPosition,
+    PortfolioRiskSnapshot,
+    PortfolioRiskWarning,
+    PortfolioSimulationConfig,
+    PortfolioSimulationEngine,
+    PortfolioSimulationResult,
+    PortfolioSimulationStatus,
+    StrategyAllocation,
+    StrategyContribution,
+    calculate_pearson_correlation,
+    compute_diversification_metrics,
+)
 
 __all__ = [
     "BacktestEngine",
@@ -109,4 +123,17 @@ __all__ = [
     "RobustnessSummary",
     "RobustnessTestConfig",
     "RobustnessTestResult",
+    "PortfolioSimulationEngine",
+    "PortfolioSimulationConfig",
+    "PortfolioSimulationResult",
+    "PortfolioSimulationStatus",
+    "StrategyAllocation",
+    "PortfolioPosition",
+    "PortfolioRiskSnapshot",
+    "PortfolioRiskWarning",
+    "StrategyContribution",
+    "DiversificationMetrics",
+    "calculate_pearson_correlation",
+    "compute_diversification_metrics",
 ]
+
