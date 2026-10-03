@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from app.analysis.models import TIMEFRAME_SECONDS, normalize_timeframe
 from app.backtesting.engine import BacktestEngine
 from app.backtesting.models import BacktestConfig
+from app.backtesting.robustness.engine import RobustnessTestEngine
+from app.backtesting.robustness.models import RobustnessTestConfig
 from app.backtesting.strategy import StrategyRegistry
 from app.backtesting.validation.models import WalkForwardConfig
 from app.backtesting.validation.validator import WalkForwardValidator
@@ -29,13 +31,15 @@ def register_backtest_handlers(
     engine: BacktestEngine,
     strategy_registry: Optional[StrategyRegistry] = None,
     validator: Optional[WalkForwardValidator] = None,
+    robustness_engine: Optional[RobustnessTestEngine] = None,
 ) -> None:
-    """Register backtesting and validation commands with the Master Orchestrator.
+    """Register backtesting, validation, and robustness commands with the Master Orchestrator.
 
     Commands registered:
     - `run_backtest`: Execute deterministic backtest across stored historical data.
     - `list_backtest_strategies`: List all available research strategies.
     - `run_walk_forward_validation`: Execute chronological in-sample/out-of-sample validation.
+    - `run_robustness_test`: Execute transaction-cost stress testing and parameter sensitivity analysis.
     """
     registry = strategy_registry or getattr(engine, "strategy_registry", StrategyRegistry())
 
@@ -242,3 +246,102 @@ def register_backtest_handlers(
         description="Run chronological in-sample/out-of-sample walk-forward validation",
         allow_override=True,
     )
+
+    def handle_run_robustness_test(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'run_robustness_test' command."""
+        rob_engine = robustness_engine
+        if not rob_engine:
+            raise ValidationError(
+                "Robustness test engine is not configured in this environment."
+            )
+
+        p = dict(getattr(req, "context", {}) or getattr(req, "parameters", {}) or getattr(req, "payload", {}) or {})
+
+        symbol_raw = p.get("symbol")
+        if not symbol_raw or not isinstance(symbol_raw, str) or not symbol_raw.strip():
+            raise ValidationError("Field 'symbol' is required for robustness testing.")
+
+        timeframe_raw = str(p.get("timeframe", "15m")).strip()
+        timeframe = normalize_timeframe(timeframe_raw)
+
+        strategy_name = str(p.get("strategy") or p.get("strategy_name", "sma_crossover")).strip()
+        if not registry.has_strategy(strategy_name):
+            available = [s["name"] for s in registry.list_strategies()]
+            raise ValidationError(
+                f"Unknown strategy '{strategy_name}'. Available strategies: {available}"
+            )
+
+        interval = TIMEFRAME_SECONDS.get(timeframe, 60)
+
+        end_val = p.get("end_time") or p.get("end_iso")
+        end_time = parse_timestamp(end_val) if end_val is not None else time.time()
+
+        start_val = p.get("start_time") or p.get("start_iso")
+        start_time = parse_timestamp(start_val) if start_val is not None else end_time - (500 * interval)
+
+        initial_cash = float(p.get("initial_cash", 100_000.0))
+        size_type = str(p.get("position_size_type", "fixed_quantity")).strip()
+        size_val = float(p.get("position_size_value", 10.0))
+        fee_model = str(p.get("fee_model", "percentage")).strip()
+        fee_rate = float(p.get("fee_rate", 0.0005))
+        fixed_fee = float(p.get("fixed_fee", 0.0))
+        slippage_bps = float(p.get("slippage_bps", 2.0))
+        half_spread_bps = float(p.get("half_spread_bps", 1.0))
+        execution_model = str(p.get("execution_model", "next_bar_open")).strip()
+
+        include_costs = bool(p.get("include_cost_stress", True))
+        include_params = bool(p.get("include_parameter_sensitivity", True))
+        include_windows = bool(p.get("include_historical_windows", False))
+
+        param_variants = list(p.get("parameter_variants", []) or [])
+        custom_scenarios = list(p.get("custom_scenarios", []) or [])
+        historical_windows = list(p.get("historical_windows", []) or [])
+
+        rob_config = RobustnessTestConfig(
+            symbol=symbol_raw.strip().upper(),
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+            strategy_name=strategy_name,
+            initial_cash=initial_cash,
+            position_size_type=size_type,
+            position_size_value=size_val,
+            fee_model=fee_model,
+            fee_rate=fee_rate,
+            fixed_fee=fixed_fee,
+            slippage_bps=slippage_bps,
+            half_spread_bps=half_spread_bps,
+            execution_model=execution_model,
+            include_cost_stress=include_costs,
+            include_parameter_sensitivity=include_params,
+            include_historical_windows=include_windows,
+            parameter_variants=param_variants,
+            historical_windows=historical_windows,
+            correlation_id=req.correlation_id,
+        )
+
+        result = rob_engine.run(config=rob_config, strategy=strategy_name)
+
+        return {
+            "status": "success" if result.is_success else "failed",
+            "robustness_status": result.status.value,
+            "message": result.summary_text,
+            "summary": result.summary_text,
+            "data": result.to_dict(),
+            "summary_metrics": result.summary.to_dict(),
+            "scenarios_count": len(result.scenario_results),
+            "completed_scenarios": result.summary.completed_scenarios,
+            "baseline_return_pct": result.summary.baseline_return_pct,
+            "worst_case_return_pct": result.summary.worst_case_return_pct,
+            "worst_case_scenario": result.summary.worst_case_scenario_name,
+            "disclaimer": result.disclaimer,
+        }
+
+    orchestrator.register_handler(
+        command="run_robustness_test",
+        handler=handle_run_robustness_test,
+        capability="backtesting",
+        description="Run transaction-cost stress testing and parameter sensitivity analysis",
+        allow_override=True,
+    )
+

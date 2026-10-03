@@ -49,6 +49,19 @@ from app.backtesting.validation import (
     WindowMode,
     generate_walk_forward_windows,
 )
+from app.backtesting.robustness import (
+    HistoricalWindowComparison,
+    ParameterSensitivityResult,
+    RobustnessStatus,
+    RobustnessSummary,
+    RobustnessTestConfig,
+    RobustnessTestEngine,
+    RobustnessTestResult,
+    RobustnessWarning,
+    ScenarioType,
+    StressScenario,
+    StressScenarioResult,
+)
 
 __all__ = [
     "BacktestEngine",
@@ -85,4 +98,15 @@ __all__ = [
     "OutOfSampleSummary",
     "ValidationWarning",
     "generate_walk_forward_windows",
+    "RobustnessTestEngine",
+    "RobustnessStatus",
+    "ScenarioType",
+    "RobustnessWarning",
+    "StressScenario",
+    "StressScenarioResult",
+    "ParameterSensitivityResult",
+    "HistoricalWindowComparison",
+    "RobustnessSummary",
+    "RobustnessTestConfig",
+    "RobustnessTestResult",
 ]

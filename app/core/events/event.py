@@ -138,6 +138,13 @@ class EventType(str, Enum):
     WALK_FORWARD_CANCELLED = "WALK_FORWARD_CANCELLED"
     WALK_FORWARD_FAILED = "WALK_FORWARD_FAILED"
 
+    # Strategy Robustness & Stress Testing (Phase 2, Step 07)
+    ROBUSTNESS_TEST_STARTED = "ROBUSTNESS_TEST_STARTED"
+    ROBUSTNESS_TEST_PROGRESS = "ROBUSTNESS_TEST_PROGRESS"
+    ROBUSTNESS_TEST_COMPLETED = "ROBUSTNESS_TEST_COMPLETED"
+    ROBUSTNESS_TEST_CANCELLED = "ROBUSTNESS_TEST_CANCELLED"
+    ROBUSTNESS_TEST_FAILED = "ROBUSTNESS_TEST_FAILED"
+
 
 def _freeze_container(data: Any) -> Any:
     """Recursively freeze dictionaries and lists into immutable containers."""

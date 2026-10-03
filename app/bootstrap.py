@@ -41,6 +41,7 @@ from app.market.historical import (
 from app.market.models import Bar
 from app.backtesting import (
     BacktestEngine,
+    RobustnessTestEngine,
     StrategyRegistry,
     WalkForwardValidator,
     register_backtest_handlers,
@@ -76,6 +77,7 @@ class SystemStatus:
     backtest_engine: Optional[BacktestEngine] = None
     strategy_registry: Optional[StrategyRegistry] = None
     walk_forward_validator: Optional[WalkForwardValidator] = None
+    robustness_test_engine: Optional[RobustnessTestEngine] = None
 
 
 def bootstrap_system(
@@ -266,11 +268,21 @@ def bootstrap_system(
         state_store=state_store,
         name="kaiser_main_walk_forward_validator",
     )
+    robustness_test_engine = RobustnessTestEngine(
+        engine=backtest_engine,
+        repository=historical_repository,
+        quality_engine=market_service.quality_engine,
+        strategy_registry=strategy_registry,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_robustness_test_engine",
+    )
     register_backtest_handlers(
         orchestrator=orchestrator,
         engine=backtest_engine,
         strategy_registry=strategy_registry,
         validator=walk_forward_validator,
+        robustness_engine=robustness_test_engine,
     )
 
     def _on_market_bar_updated(event: Event) -> None:
@@ -335,6 +347,7 @@ def bootstrap_system(
         backtest_engine=backtest_engine,
         strategy_registry=strategy_registry,
         walk_forward_validator=walk_forward_validator,
+        robustness_test_engine=robustness_test_engine,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -347,6 +360,7 @@ def bootstrap_system(
     logger.info("Historical replay engine: ready")
     logger.info("Backtest engine: ready (strategies=%s)", [s["name"] for s in strategy_registry.list_strategies()])
     logger.info("Walk-forward validator: ready")
+    logger.info("Robustness test engine: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 
