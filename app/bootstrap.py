@@ -47,6 +47,8 @@ from app.backtesting import (
     WalkForwardValidator,
     register_backtest_handlers,
 )
+from app.risk import PortfolioRiskMonitor, register_risk_handlers
+
 
 
 
@@ -81,6 +83,8 @@ class SystemStatus:
     walk_forward_validator: Optional[WalkForwardValidator] = None
     robustness_test_engine: Optional[RobustnessTestEngine] = None
     portfolio_simulation_engine: Optional[PortfolioSimulationEngine] = None
+    portfolio_risk_monitor: Optional[PortfolioRiskMonitor] = None
+
 
 
 
@@ -299,6 +303,15 @@ def bootstrap_system(
         portfolio_engine=portfolio_simulation_engine,
     )
 
+    # Initialize Portfolio Risk Monitoring & Alerting Foundation
+    portfolio_risk_monitor = PortfolioRiskMonitor(
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_portfolio_risk_monitor",
+    )
+    register_risk_handlers(orchestrator=orchestrator, monitor=portfolio_risk_monitor)
+
+
 
     def _on_market_bar_updated(event: Event) -> None:
         try:
@@ -364,6 +377,7 @@ def bootstrap_system(
         walk_forward_validator=walk_forward_validator,
         robustness_test_engine=robustness_test_engine,
         portfolio_simulation_engine=portfolio_simulation_engine,
+        portfolio_risk_monitor=portfolio_risk_monitor,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -378,8 +392,10 @@ def bootstrap_system(
     logger.info("Walk-forward validator: ready")
     logger.info("Robustness test engine: ready")
     logger.info("Portfolio simulation engine: ready")
+    logger.info("Portfolio risk monitor: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
+
 
 
     return status
