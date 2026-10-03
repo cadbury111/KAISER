@@ -47,7 +47,12 @@ from app.backtesting import (
     WalkForwardValidator,
     register_backtest_handlers,
 )
-from app.portfolio import PortfolioAttributionService, register_portfolio_handlers
+from app.portfolio import (
+    PortfolioAttributionService,
+    PortfolioReportingService,
+    register_portfolio_handlers,
+    register_reporting_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -86,6 +91,7 @@ class SystemStatus:
     portfolio_simulation_engine: Optional[PortfolioSimulationEngine] = None
     portfolio_risk_monitor: Optional[PortfolioRiskMonitor] = None
     portfolio_attribution_service: Optional[PortfolioAttributionService] = None
+    portfolio_reporting_service: Optional[PortfolioReportingService] = None
 
 
 
@@ -320,6 +326,15 @@ def bootstrap_system(
     )
     register_portfolio_handlers(orchestrator=orchestrator, service=portfolio_attribution_service)
 
+    # Initialize Portfolio Analytics Reporting & Dashboard Data API Foundation
+    portfolio_reporting_service = PortfolioReportingService(
+        event_bus=event_bus,
+        state_store=state_store,
+        attribution_service=portfolio_attribution_service,
+        risk_monitor=portfolio_risk_monitor,
+    )
+    register_reporting_handlers(orchestrator=orchestrator, service=portfolio_reporting_service)
+
 
 
     def _on_market_bar_updated(event: Event) -> None:
@@ -388,6 +403,7 @@ def bootstrap_system(
         portfolio_simulation_engine=portfolio_simulation_engine,
         portfolio_risk_monitor=portfolio_risk_monitor,
         portfolio_attribution_service=portfolio_attribution_service,
+        portfolio_reporting_service=portfolio_reporting_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -404,6 +420,7 @@ def bootstrap_system(
     logger.info("Portfolio simulation engine: ready")
     logger.info("Portfolio risk monitor: ready")
     logger.info("Portfolio attribution engine: ready")
+    logger.info("Portfolio reporting & dashboard API: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 

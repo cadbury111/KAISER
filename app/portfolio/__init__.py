@@ -31,13 +31,25 @@ from app.portfolio.models import (
     StrategyAttribution,
     TransactionCostAttribution,
 )
+from app.portfolio.report_models import (
+    DashboardSeriesPoint,
+    DashboardTimeSeries,
+    HistoricalReportSummary,
+    ReportDataProvenance,
+    ReportDataStatus,
+    UnifiedPortfolioReport,
+    VoiceSummary,
+)
+from app.portfolio.reporting import PortfolioReportingService
+from app.portfolio.reporting_handlers import register_reporting_handlers
 
 __all__ = [
     # Enums
     "AttributionLevel",
     "ReconciliationStatus",
     "ComparisonType",
-    # Models
+    "ReportDataStatus",
+    # Attribution Models
     "MetricValue",
     "AttributionConfig",
     "RiskAdjustedMetrics",
@@ -48,6 +60,13 @@ __all__ = [
     "PortfolioAttributionReport",
     "ComparisonEntity",
     "ComparisonReport",
+    # Reporting Models
+    "ReportDataProvenance",
+    "DashboardSeriesPoint",
+    "DashboardTimeSeries",
+    "VoiceSummary",
+    "HistoricalReportSummary",
+    "UnifiedPortfolioReport",
     # Metrics
     "calculate_equity_returns",
     "calculate_annualized_volatility",
@@ -57,7 +76,10 @@ __all__ = [
     "calculate_calmar_ratio",
     "calculate_trade_metrics",
     "compute_risk_adjusted_metrics",
-    # Service & Handlers
+    # Services & Handlers
     "PortfolioAttributionService",
+    "PortfolioReportingService",
     "register_portfolio_handlers",
+    "register_reporting_handlers",
 ]
+
