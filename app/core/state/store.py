@@ -107,19 +107,22 @@ class StateStore:
         """
         self._validate_safety(key, updater)
         with self._lock:
-            current_value = copy.deepcopy(self._state.get(key, default))
             if callable(updater):
+                current_value = copy.deepcopy(self._state.get(key, default))
                 new_value = updater(current_value)
-            elif isinstance(updater, dict) and isinstance(current_value, dict):
-                merged = dict(current_value)
-                merged.update(updater)
-                new_value = merged
-            elif isinstance(updater, dict) and current_value is None:
-                new_value = dict(updater)
+                self._state[key] = copy.deepcopy(new_value)
+            elif isinstance(updater, dict):
+                current_raw = self._state.get(key, default)
+                if isinstance(current_raw, dict):
+                    merged = dict(current_raw)
+                    for k, v in updater.items():
+                        merged[k] = copy.deepcopy(v)
+                    self._state[key] = merged
+                else:
+                    self._state[key] = copy.deepcopy(updater)
             else:
-                new_value = updater
+                self._state[key] = copy.deepcopy(updater)
 
-            self._state[key] = copy.deepcopy(new_value)
             self._version += 1
             logger.debug("StateStore '%s' atomically updated key '%s' (v%d)", self.name, key, self._version)
             return copy.deepcopy(self._state[key])

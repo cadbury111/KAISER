@@ -55,10 +55,13 @@ def calculate_ema(prices: Sequence[float], period: int, smoothing: float = 2.0) 
     if period <= 0 or len(prices) < period:
         return None
 
-    series = calculate_ema_series(prices, period=period, smoothing=smoothing)
-    if not series:
-        return None
-    return series[-1]
+    alpha = smoothing / (float(period) + 1.0)
+    current_ema = sum(prices[:period]) / float(period)
+
+    for price in prices[period:]:
+        current_ema = (price - current_ema) * alpha + current_ema
+
+    return round(current_ema, 4)
 
 
 def calculate_ema_series(
@@ -109,21 +112,33 @@ def calculate_rsi(prices: Sequence[float], period: int = 14) -> Optional[float]:
     if period <= 0 or len(prices) < period + 1:
         return None
 
-    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    # Initial average gain and loss over the first `period` changes
+    sum_gain = 0.0
+    sum_loss = 0.0
+    for i in range(1, period + 1):
+        diff = prices[i] - prices[i - 1]
+        if diff > 0.0:
+            sum_gain += diff
+        elif diff < 0.0:
+            sum_loss -= diff
 
-    # Initial average gain and loss over the first `period` deltas
-    gains = [max(0.0, d) for d in deltas[:period]]
-    losses = [max(0.0, -d) for d in deltas[:period]]
+    avg_gain = sum_gain / float(period)
+    avg_loss = sum_loss / float(period)
 
-    avg_gain = sum(gains) / float(period)
-    avg_loss = sum(losses) / float(period)
-
-    # Wilder's smoothing for subsequent deltas
-    for d in deltas[period:]:
-        current_gain = max(0.0, d)
-        current_loss = max(0.0, -d)
-        avg_gain = (avg_gain * (period - 1) + current_gain) / float(period)
-        avg_loss = (avg_loss * (period - 1) + current_loss) / float(period)
+    # Wilder's smoothing for subsequent changes
+    p_float = float(period)
+    p_prev = float(period - 1)
+    for i in range(period + 1, len(prices)):
+        diff = prices[i] - prices[i - 1]
+        if diff > 0.0:
+            avg_gain = (avg_gain * p_prev + diff) / p_float
+            avg_loss = (avg_loss * p_prev) / p_float
+        elif diff < 0.0:
+            avg_gain = (avg_gain * p_prev) / p_float
+            avg_loss = (avg_loss * p_prev - diff) / p_float
+        else:
+            avg_gain = (avg_gain * p_prev) / p_float
+            avg_loss = (avg_loss * p_prev) / p_float
 
     # Boundary handling for zero loss or zero gain
     if avg_loss == 0.0:
@@ -188,12 +203,11 @@ def calculate_macd(
         return None
 
     # Signal line = EMA of MACD line series
-    signal_series = calculate_ema_series(macd_line_series, period=signal_period)
-    if not signal_series:
+    latest_signal = calculate_ema(macd_line_series, period=signal_period)
+    if latest_signal is None:
         return None
 
     latest_macd = macd_line_series[-1]
-    latest_signal = signal_series[-1]
     latest_hist = round(latest_macd - latest_signal, 4)
 
     return {
@@ -280,25 +294,30 @@ def calculate_atr(bars: Sequence[Bar], period: int = 14) -> Optional[float]:
     if period <= 0 or len(bars) < period + 1:
         return None
 
-    # Calculate True Range sequence
-    tr_list: List[float] = []
-    for i in range(1, len(bars)):
-        tr = calculate_true_range(
-            high=bars[i].high,
-            low=bars[i].low,
-            prev_close=bars[i - 1].close,
-        )
-        tr_list.append(tr)
+    # Calculate True Range sequence using single pass without list allocation
+    p_float = float(period)
+    p_prev = float(period - 1)
 
-    if len(tr_list) < period:
-        return None
+    initial_tr_sum = 0.0
+    for i in range(1, period + 1):
+        b = bars[i]
+        pc = bars[i - 1].close
+        hl = b.high - b.low
+        h_pc = abs(b.high - pc)
+        l_pc = abs(b.low - pc)
+        tr = round(max(hl, h_pc, l_pc), 4)
+        initial_tr_sum += tr
 
-    # Seed ATR with SMA of first `period` True Ranges
-    atr = sum(tr_list[:period]) / float(period)
+    atr = initial_tr_sum / p_float
 
-    # Wilder's smoothing for remaining TRs
-    for tr in tr_list[period:]:
-        atr = (atr * (period - 1) + tr) / float(period)
+    for i in range(period + 1, len(bars)):
+        b = bars[i]
+        pc = bars[i - 1].close
+        hl = b.high - b.low
+        h_pc = abs(b.high - pc)
+        l_pc = abs(b.low - pc)
+        tr = round(max(hl, h_pc, l_pc), 4)
+        atr = (atr * p_prev + tr) / p_float
 
     return round(atr, 4)
 

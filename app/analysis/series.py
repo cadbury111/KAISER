@@ -47,6 +47,11 @@ class RollingBarSeries:
 
         self._lock = threading.RLock()
         self._bars: collections.deque[Bar] = collections.deque(maxlen=max_capacity)
+        self._closes: collections.deque[float] = collections.deque(maxlen=max_capacity)
+        self._highs: collections.deque[float] = collections.deque(maxlen=max_capacity)
+        self._lows: collections.deque[float] = collections.deque(maxlen=max_capacity)
+        self._opens: collections.deque[float] = collections.deque(maxlen=max_capacity)
+        self._volumes: collections.deque[float] = collections.deque(maxlen=max_capacity)
         self._last_timestamp: Optional[float] = None
 
         # Data Quality & Synchronization Tracking
@@ -89,6 +94,11 @@ class RollingBarSeries:
                         self._gap_records.append((self._last_timestamp, bar.timestamp, missed_bars))
 
             self._bars.append(bar)
+            self._closes.append(bar.close)
+            self._highs.append(bar.high)
+            self._lows.append(bar.low)
+            self._opens.append(bar.open)
+            self._volumes.append(bar.volume)
             self._last_timestamp = bar.timestamp
             return True
 
@@ -112,27 +122,27 @@ class RollingBarSeries:
     def get_closes(self) -> List[float]:
         """Extract closing prices sequence."""
         with self._lock:
-            return [b.close for b in self._bars]
+            return list(self._closes)
 
     def get_highs(self) -> List[float]:
         """Extract high prices sequence."""
         with self._lock:
-            return [b.high for b in self._bars]
+            return list(self._highs)
 
     def get_lows(self) -> List[float]:
         """Extract low prices sequence."""
         with self._lock:
-            return [b.low for b in self._bars]
+            return list(self._lows)
 
     def get_opens(self) -> List[float]:
         """Extract open prices sequence."""
         with self._lock:
-            return [b.open for b in self._bars]
+            return list(self._opens)
 
     def get_volumes(self) -> List[float]:
         """Extract volumes sequence."""
         with self._lock:
-            return [b.volume for b in self._bars]
+            return list(self._volumes)
 
     @property
     def missing_intervals_count(self) -> int:
@@ -168,6 +178,11 @@ class RollingBarSeries:
         """Clear all stored bars and reset timestamp and quality tracking."""
         with self._lock:
             self._bars.clear()
+            self._closes.clear()
+            self._highs.clear()
+            self._lows.clear()
+            self._opens.clear()
+            self._volumes.clear()
             self._last_timestamp = None
             self._duplicate_count = 0
             self._out_of_order_count = 0

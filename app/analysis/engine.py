@@ -626,10 +626,9 @@ class TechnicalAnalysisEngine:
             {cache_key: vector.to_dict()},
             default={},
         )
-        self.state_store.update(
+        self.state_store.set(
             "analysis_counters",
             self.get_counters(),
-            default={},
         )
 
     def _publish_events(self, vector: TechnicalFeatureVector, correlation_id: str) -> None:
