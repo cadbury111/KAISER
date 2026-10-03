@@ -47,6 +47,7 @@ from app.backtesting import (
     WalkForwardValidator,
     register_backtest_handlers,
 )
+from app.portfolio import PortfolioAttributionService, register_portfolio_handlers
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -84,6 +85,7 @@ class SystemStatus:
     robustness_test_engine: Optional[RobustnessTestEngine] = None
     portfolio_simulation_engine: Optional[PortfolioSimulationEngine] = None
     portfolio_risk_monitor: Optional[PortfolioRiskMonitor] = None
+    portfolio_attribution_service: Optional[PortfolioAttributionService] = None
 
 
 
@@ -311,6 +313,13 @@ def bootstrap_system(
     )
     register_risk_handlers(orchestrator=orchestrator, monitor=portfolio_risk_monitor)
 
+    # Initialize Portfolio Performance Attribution & Risk-Adjusted Metrics Foundation
+    portfolio_attribution_service = PortfolioAttributionService(
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_portfolio_handlers(orchestrator=orchestrator, service=portfolio_attribution_service)
+
 
 
     def _on_market_bar_updated(event: Event) -> None:
@@ -378,6 +387,7 @@ def bootstrap_system(
         robustness_test_engine=robustness_test_engine,
         portfolio_simulation_engine=portfolio_simulation_engine,
         portfolio_risk_monitor=portfolio_risk_monitor,
+        portfolio_attribution_service=portfolio_attribution_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -393,6 +403,7 @@ def bootstrap_system(
     logger.info("Robustness test engine: ready")
     logger.info("Portfolio simulation engine: ready")
     logger.info("Portfolio risk monitor: ready")
+    logger.info("Portfolio attribution engine: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 
