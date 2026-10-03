@@ -961,12 +961,11 @@ class PortfolioSimulationEngine:
 
         gross_profit = sum(t.gross_pnl for t in all_trades if t.gross_pnl > 0)
         gross_loss = abs(sum(t.gross_pnl for t in all_trades if t.gross_pnl < 0))
-        gross_pnl = sum(t.gross_pnl for t in all_trades)
-
-        profit_factor, pf_desc = self._calculate_profit_factor(total_trades, gross_profit, gross_loss)
-
         total_fees = sum(fees_by_strategy.values())
         total_slippage = sum(slippage_by_strategy.values())
+        gross_pnl = net_profit + total_fees + total_slippage
+
+        profit_factor, pf_desc = self._calculate_profit_factor(total_trades, gross_profit, gross_loss)
 
         # Strategy Contributions
         contributions: List[StrategyContribution] = []
@@ -982,8 +981,8 @@ class PortfolioSimulationEngine:
             s_gross_loss = abs(sum(t.gross_pnl for t in strats_trades if t.gross_pnl < 0))
             s_pf, s_pf_desc = self._calculate_profit_factor(s_trades_count, s_gross_prof, s_gross_loss)
 
-            s_gross_pnl = sum(t.gross_pnl for t in strats_trades)
             s_net_pnl = sum(t.net_pnl for t in strats_trades)
+            s_gross_pnl = s_net_pnl + fees_by_strategy[alloc_id] + slippage_by_strategy[alloc_id]
             s_allocated = alloc.weight * initial_equity
             s_net_ret = (s_net_pnl / s_allocated) * 100.0 if s_allocated > 0 else 0.0
             pnl_share = (s_net_pnl / net_profit) * 100.0 if abs(net_profit) > 1e-6 else 0.0
@@ -1065,6 +1064,7 @@ class PortfolioSimulationEngine:
         if self.state_store:
             try:
                 self.state_store.set(f"portfolio_simulation:{config.simulation_id}", result.to_dict())
+                self.state_store.set(f"portfolio_simulation_obj:{config.simulation_id}", result)
             except Exception as e:
                 logger.warning("Failed to store portfolio simulation in state store: %s", e)
 

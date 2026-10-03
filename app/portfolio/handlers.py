@@ -58,9 +58,9 @@ def register_portfolio_handlers(
             }
 
         # 2. Check for simulation_id in StateStore
-        sim_id = p.get("simulation_id")
+        sim_id = p.get("simulation_id") or p.get("run_id")
         if sim_id and service.state_store:
-            sim_data = service.state_store.get(f"portfolio_simulation:{sim_id}")
+            sim_data = service.state_store.get(f"portfolio_simulation_obj:{sim_id}") or service.state_store.get(f"portfolio_simulation:{sim_id}")
             if sim_data:
                 # If stored as object or reconstructed
                 if isinstance(sim_data, PortfolioSimulationResult):

@@ -114,6 +114,7 @@ def register_backtest_handlers(
 
         return {
             "status": "success" if result.is_success else "failed",
+            "backtest_id": result.backtest_id,
             "backtest_status": result.status.value,
             "message": result.summary_text,
             "summary": result.summary_text,
@@ -380,7 +381,7 @@ def register_backtest_handlers(
         raw_allocations = p.get("allocations")
         allocations_list: List[StrategyAllocation] = []
 
-        if raw_allocations and isinstance(raw_allocations, list):
+        if raw_allocations and isinstance(raw_allocations, (list, tuple)):
             for idx, a in enumerate(raw_allocations):
                 strat_name = str(a.get("strategy") or a.get("strategy_name", "sma_crossover")).strip()
                 if not registry.has_strategy(strat_name):
@@ -473,6 +474,7 @@ def register_backtest_handlers(
 
         return {
             "status": "success" if result.is_success else "failed",
+            "simulation_id": result.simulation_id,
             "simulation_status": result.status.value,
             "message": result.summary_text,
             "summary": result.summary_text,

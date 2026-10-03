@@ -46,9 +46,26 @@ def register_reporting_handlers(
         wf_summary = p.get("walk_forward_summary")
         rob_summary = p.get("robustness_summary")
 
-        # 1. Directly provided simulation_result
+        # 1. Directly provided source_result (can be PortfolioSimulationResult, BacktestResult, or dict)
+        raw_src = p.get("source_result")
+        if raw_src is not None and isinstance(raw_src, (PortfolioSimulationResult, BacktestResult, dict)):
+            report = service.generate_unified_report(
+                source_result=raw_src,
+                title=title,
+                provenance_overrides=prov_overrides,
+                walk_forward_summary=wf_summary,
+                robustness_summary=rob_summary,
+            )
+            return {
+                "status": "success",
+                "report": report.to_dict(),
+                "summary": report.summary_text,
+                "voice_summary": report.voice_summary.to_dict() if report.voice_summary else None,
+            }
+
+        # 2. Directly provided simulation_result
         raw_sim = p.get("simulation_result")
-        if isinstance(raw_sim, PortfolioSimulationResult):
+        if raw_sim is not None and isinstance(raw_sim, (PortfolioSimulationResult, dict)):
             report = service.generate_unified_report(
                 source_result=raw_sim,
                 title=title,
@@ -63,9 +80,9 @@ def register_reporting_handlers(
                 "voice_summary": report.voice_summary.to_dict() if report.voice_summary else None,
             }
 
-        # 2. Directly provided backtest_result
+        # 3. Directly provided backtest_result
         raw_bt = p.get("backtest_result")
-        if isinstance(raw_bt, BacktestResult):
+        if raw_bt is not None and isinstance(raw_bt, (BacktestResult, dict)):
             report = service.generate_unified_report(
                 source_result=raw_bt,
                 title=title,
@@ -80,7 +97,7 @@ def register_reporting_handlers(
                 "voice_summary": report.voice_summary.to_dict() if report.voice_summary else None,
             }
 
-        # 3. Source dict directly provided
+        # 4. Source dict directly provided
         if "source_dict" in p and isinstance(p["source_dict"], dict):
             report = service.generate_unified_report(
                 source_result=p["source_dict"],
@@ -96,11 +113,14 @@ def register_reporting_handlers(
                 "voice_summary": report.voice_summary.to_dict() if report.voice_summary else None,
             }
 
-        # 4. Check for simulation_id in StateStore
-        sim_id = p.get("simulation_id")
+        # 5. Check for simulation_id / run_id in StateStore
+        sim_id = p.get("simulation_id") or p.get("run_id")
         if sim_id and service.state_store:
-            sim_data = service.state_store.get(f"portfolio_simulation:{sim_id}")
-            if sim_data and isinstance(sim_data, PortfolioSimulationResult):
+            sim_data = (
+                service.state_store.get(f"portfolio_simulation_obj:{sim_id}")
+                or service.state_store.get(f"portfolio_simulation:{sim_id}")
+            )
+            if sim_data and isinstance(sim_data, (PortfolioSimulationResult, dict)):
                 report = service.generate_unified_report(
                     source_result=sim_data,
                     title=title,
@@ -116,8 +136,8 @@ def register_reporting_handlers(
                 }
 
         raise ValidationError(
-            "generate_unified_portfolio_report requires a valid 'simulation_result', 'backtest_result', "
-            "'source_dict', or stored 'simulation_id'."
+            "generate_unified_portfolio_report requires a valid 'source_result', 'simulation_result', "
+            "'backtest_result', 'source_dict', or stored 'simulation_id'."
         )
 
     def handle_get_latest_portfolio_report(req: OrchestratorRequest) -> Dict[str, Any]:
