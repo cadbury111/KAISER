@@ -38,6 +38,9 @@ def calculate_sma(prices: Sequence[float], period: int) -> Optional[float]:
         return None
 
     window = prices[-period:]
+    for p in window:
+        if not math.isfinite(p):
+            return None
     return round(sum(window) / float(period), 4)
 
 
@@ -54,6 +57,9 @@ def calculate_ema(prices: Sequence[float], period: int, smoothing: float = 2.0) 
     """
     if period <= 0 or len(prices) < period:
         return None
+    for p in prices:
+        if not math.isfinite(p):
+            return None
 
     alpha = smoothing / (float(period) + 1.0)
     current_ema = sum(prices[:period]) / float(period)
@@ -84,6 +90,9 @@ def calculate_ema_series(
     """
     if period <= 0 or len(prices) < period:
         return []
+    for p in prices:
+        if not math.isfinite(p):
+            return []
 
     alpha = smoothing / (float(period) + 1.0)
     # Seed with SMA of the first `period` prices
@@ -111,6 +120,9 @@ def calculate_rsi(prices: Sequence[float], period: int = 14) -> Optional[float]:
     """
     if period <= 0 or len(prices) < period + 1:
         return None
+    for p in prices:
+        if not math.isfinite(p):
+            return None
 
     # Initial average gain and loss over the first `period` changes
     sum_gain = 0.0
@@ -180,6 +192,9 @@ def calculate_macd(
     min_required = slow_period + signal_period - 1
     if len(prices) < min_required:
         return None
+    for p in prices:
+        if not math.isfinite(p):
+            return None
 
     # Calculate full EMA series for slow and fast
     slow_series = calculate_ema_series(prices, period=slow_period)
@@ -237,11 +252,15 @@ def calculate_bollinger_bands(
         return None
 
     window = prices[-period:]
+    for p in window:
+        if not math.isfinite(p):
+            return None
+
     middle = sum(window) / float(period)
 
     # Population variance
     variance = sum((p - middle) ** 2 for p in window) / float(period)
-    std_dev = math.sqrt(variance)
+    std_dev = math.sqrt(max(0.0, variance))
 
     upper = middle + (num_std * std_dev)
     lower = middle - (num_std * std_dev)
@@ -272,7 +291,10 @@ def calculate_true_range(high: float, low: float, prev_close: Optional[float]) -
 
     TR = max(High - Low, abs(High - PrevClose), abs(Low - PrevClose))
     """
-    hl = high - low
+    if not (math.isfinite(high) and math.isfinite(low) and (prev_close is None or math.isfinite(prev_close))):
+        return 0.0
+
+    hl = abs(high - low)
     if prev_close is None:
         return round(hl, 4)
 
@@ -293,6 +315,11 @@ def calculate_atr(bars: Sequence[Bar], period: int = 14) -> Optional[float]:
     """
     if period <= 0 or len(bars) < period + 1:
         return None
+
+    # Guard against non-finite prices in bars
+    for b in bars:
+        if not (math.isfinite(b.high) and math.isfinite(b.low) and math.isfinite(b.close)):
+            return None
 
     # Calculate True Range sequence using single pass without list allocation
     p_float = float(period)

@@ -112,14 +112,25 @@ class StateStore:
                 new_value = updater(current_value)
                 self._state[key] = copy.deepcopy(new_value)
             elif isinstance(updater, dict):
-                current_raw = self._state.get(key, default)
-                if isinstance(current_raw, dict):
-                    merged = dict(current_raw)
-                    for k, v in updater.items():
-                        merged[k] = copy.deepcopy(v)
-                    self._state[key] = merged
+                if key in self._state:
+                    current_raw = self._state[key]
+                    if isinstance(current_raw, dict):
+                        merged = dict(current_raw)
+                        for k, v in updater.items():
+                            merged[k] = copy.deepcopy(v)
+                        self._state[key] = merged
+                    else:
+                        self._state[key] = copy.deepcopy(updater)
                 else:
-                    self._state[key] = copy.deepcopy(updater)
+                    # Key not present yet: isolate default via deepcopy before merging updater
+                    current_raw = copy.deepcopy(default)
+                    if isinstance(current_raw, dict):
+                        merged = current_raw
+                        for k, v in updater.items():
+                            merged[k] = copy.deepcopy(v)
+                        self._state[key] = merged
+                    else:
+                        self._state[key] = copy.deepcopy(updater)
             else:
                 self._state[key] = copy.deepcopy(updater)
 

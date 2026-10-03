@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.exceptions import ValidationError
@@ -58,26 +59,26 @@ class Quote:
         if not self.source or not isinstance(self.source, str) or not self.source.strip():
             raise ValidationError("Quote source must be a non-empty string.")
 
-        if self.timestamp <= 0:
-            raise ValidationError(f"Quote timestamp must be a positive float, got {self.timestamp}")
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"Quote timestamp must be a positive finite float, got {self.timestamp}")
 
-        if self.last_price < 0:
-            raise ValidationError(f"Quote last_price cannot be negative, got {self.last_price}")
+        if not math.isfinite(self.last_price) or self.last_price < 0:
+            raise ValidationError(f"Quote last_price cannot be negative or non-finite, got {self.last_price}")
 
-        if self.volume < 0:
-            raise ValidationError(f"Quote volume cannot be negative, got {self.volume}")
+        if not math.isfinite(self.volume) or self.volume < 0:
+            raise ValidationError(f"Quote volume cannot be negative or non-finite, got {self.volume}")
 
-        if self.bid is not None and self.bid < 0:
-            raise ValidationError(f"Quote bid cannot be negative, got {self.bid}")
+        if self.bid is not None and (not math.isfinite(self.bid) or self.bid < 0):
+            raise ValidationError(f"Quote bid cannot be negative or non-finite, got {self.bid}")
 
-        if self.ask is not None and self.ask < 0:
-            raise ValidationError(f"Quote ask cannot be negative, got {self.ask}")
+        if self.ask is not None and (not math.isfinite(self.ask) or self.ask < 0):
+            raise ValidationError(f"Quote ask cannot be negative or non-finite, got {self.ask}")
 
-        if self.bid_size is not None and self.bid_size < 0:
-            raise ValidationError(f"Quote bid_size cannot be negative, got {self.bid_size}")
+        if self.bid_size is not None and (not math.isfinite(self.bid_size) or self.bid_size < 0):
+            raise ValidationError(f"Quote bid_size cannot be negative or non-finite, got {self.bid_size}")
 
-        if self.ask_size is not None and self.ask_size < 0:
-            raise ValidationError(f"Quote ask_size cannot be negative, got {self.ask_size}")
+        if self.ask_size is not None and (not math.isfinite(self.ask_size) or self.ask_size < 0):
+            raise ValidationError(f"Quote ask_size cannot be negative or non-finite, got {self.ask_size}")
 
         # Invariant: Ask cannot be lower than bid if both exist and are non-zero
         if (
@@ -171,16 +172,16 @@ class Bar:
         if not self.timeframe or not isinstance(self.timeframe, str) or not self.timeframe.strip():
             raise ValidationError("Bar timeframe must be a non-empty string.")
 
-        if self.timestamp <= 0:
-            raise ValidationError(f"Bar timestamp must be a positive float, got {self.timestamp}")
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"Bar timestamp must be a positive finite float, got {self.timestamp}")
 
-        # Check non-negative prices
+        # Check non-negative finite prices
         for price_name, val in [("open", self.open), ("high", self.high), ("low", self.low), ("close", self.close)]:
-            if val < 0:
-                raise ValidationError(f"Bar {price_name} price cannot be negative, got {val}")
+            if not math.isfinite(val) or val < 0:
+                raise ValidationError(f"Bar {price_name} price must be a non-negative finite float, got {val}")
 
-        if self.volume < 0:
-            raise ValidationError(f"Bar volume cannot be negative, got {self.volume}")
+        if not math.isfinite(self.volume) or self.volume < 0:
+            raise ValidationError(f"Bar volume must be a non-negative finite float, got {self.volume}")
 
         # OHLC Relational Invariants
         if self.high < self.open or self.high < self.close or self.high < self.low:
