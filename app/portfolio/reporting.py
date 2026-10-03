@@ -173,6 +173,8 @@ class PortfolioReportingService:
             risk_metrics_dict: Dict[str, Any] = {}
             if attr is not None and attr.risk_adjusted_metrics is not None:
                 risk_metrics_dict = attr.risk_adjusted_metrics.to_dict()
+            elif isinstance(source_result, dict) and "risk_adjusted_metrics" in source_result:
+                risk_metrics_dict = dict(source_result.get("risk_adjusted_metrics") or {})
 
             # 6. Audit data freshness, completeness, and warnings
             data_warnings: List[str] = []
@@ -193,6 +195,19 @@ class PortfolioReportingService:
                 if source_result.warnings:
                     for w in source_result.warnings:
                         data_warnings.append(f"Backtest warning: {w}")
+            elif isinstance(source_result, dict):
+                dict_status = source_result.get("status")
+                if isinstance(dict_status, ReportDataStatus):
+                    status = dict_status
+                elif isinstance(dict_status, str):
+                    try:
+                        status = ReportDataStatus(dict_status.upper())
+                    except ValueError:
+                        pass
+                if "data_warnings" in source_result:
+                    for dw in source_result["data_warnings"]:
+                        if dw not in data_warnings:
+                            data_warnings.append(str(dw))
 
             # Check risk freshness
             if risk is not None:
@@ -220,7 +235,7 @@ class PortfolioReportingService:
             if not inst_available:
                 data_warnings.append("Instrument-level attribution is unavailable in source records.")
 
-            if not equity_points:
+            if not equity_points and status == ReportDataStatus.VALID:
                 status = ReportDataStatus.INCOMPLETE
                 data_warnings.append("No equity curve observations available in source records.")
 
@@ -283,9 +298,9 @@ class PortfolioReportingService:
                 strategy_attributions=tuple(raw_strat_attrs),
                 instrument_attributions=tuple(raw_inst_attrs),
                 instrument_attribution_available=inst_available,
-                reconciliation=recon_dict,
-                risk_status=risk.to_dict() if risk else None,
-                active_alerts_count=len(risk.active_alerts) if risk else 0,
+                reconciliation=recon_dict or (source_result.get("reconciliation") if isinstance(source_result, dict) else None),
+                risk_status=risk.to_dict() if risk else (source_result.get("risk_status") if isinstance(source_result, dict) else None),
+                active_alerts_count=len(risk.active_alerts) if risk else (source_result.get("risk_status", {}).get("active_alerts_count", 0) if isinstance(source_result, dict) and isinstance(source_result.get("risk_status"), dict) else 0),
                 walk_forward_summary=walk_forward_summary,
                 robustness_summary=robustness_summary,
                 voice_summary=voice_summary,
@@ -701,7 +716,7 @@ class PortfolioReportingService:
             # Snapshots for exposures and cash balance
             if source.risk_snapshots:
                 latest_snap = source.risk_snapshots[-1]
-                cash_balance = latest_snap.cash_balance
+                cash_balance = getattr(latest_snap, "cash", getattr(latest_snap, "cash_balance", None))
                 gross_exposure = latest_snap.gross_exposure
                 gross_exposure_pct = latest_snap.gross_exposure_pct
                 net_exposure = latest_snap.net_exposure
