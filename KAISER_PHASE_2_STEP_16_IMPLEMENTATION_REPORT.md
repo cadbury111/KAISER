@@ -263,7 +263,12 @@ Execution engine: locked
 
 ---
 
-### 10. Explicit Confirmation of Invariants
+### 10. Git Commit Hashes
+
+- Code & Test Suite: `138616b` (`feat(integration): complete Phase 2 Step 16 end-to-end integration & failure recovery validation`)
+- Implementation Report: `a960c4f` (`docs(integration): add Phase 2 Step 16 implementation report`)
+
+---
 
 - **Execution Locked**: `Settings.execution_locked = True` is preserved unconditionally across all configurations and runtime states.
 - **Live Trading Engine**: Never initialized, zero live broker connectivity, zero live order pathways.
