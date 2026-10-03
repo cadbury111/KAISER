@@ -19,8 +19,29 @@ def main() -> int:
         int: Process exit code (0 for success, non-zero for error).
     """
     try:
-        status = bootstrap_system()
+        launch_dashboard = "--dashboard" in sys.argv
+        custom_settings = None
+        if launch_dashboard:
+            from app.core.config import Settings, get_settings
+            base_s = get_settings()
+            custom_settings = Settings(
+                **{**base_s.to_dict(), "dashboard_enabled": True}
+            )
+
+        status = bootstrap_system(settings=custom_settings)
         print(format_banner(status))
+
+        if launch_dashboard and status.portfolio_dashboard_server:
+            print(f"\nPortfolio Analytics Command Center active at {status.portfolio_dashboard_server.url}")
+            print("Press Ctrl+C to stop dashboard.")
+            try:
+                import time
+                while status.portfolio_dashboard_server.is_running:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nStopping dashboard server...")
+                status.portfolio_dashboard_server.stop()
+
         return 0
     except KaiserError as err:
         print(f"KAISER Configuration/Initialization Error: {err}", file=sys.stderr)

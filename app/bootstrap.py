@@ -49,6 +49,7 @@ from app.backtesting import (
 )
 from app.portfolio import (
     PortfolioAttributionService,
+    PortfolioDashboardServer,
     PortfolioReportingService,
     register_portfolio_handlers,
     register_reporting_handlers,
@@ -92,6 +93,7 @@ class SystemStatus:
     portfolio_risk_monitor: Optional[PortfolioRiskMonitor] = None
     portfolio_attribution_service: Optional[PortfolioAttributionService] = None
     portfolio_reporting_service: Optional[PortfolioReportingService] = None
+    portfolio_dashboard_server: Optional[PortfolioDashboardServer] = None
 
 
 
@@ -333,7 +335,21 @@ def bootstrap_system(
         attribution_service=portfolio_attribution_service,
         risk_monitor=portfolio_risk_monitor,
     )
-    register_reporting_handlers(orchestrator=orchestrator, service=portfolio_reporting_service)
+
+    # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
+    portfolio_dashboard_server = PortfolioDashboardServer(
+        reporting_service=portfolio_reporting_service,
+        host=active_settings.dashboard_host,
+        port=active_settings.dashboard_port,
+    )
+    if active_settings.dashboard_enabled:
+        portfolio_dashboard_server.start(blocking=False)
+
+    register_reporting_handlers(
+        orchestrator=orchestrator,
+        service=portfolio_reporting_service,
+        server=portfolio_dashboard_server,
+    )
 
 
 
@@ -404,6 +420,7 @@ def bootstrap_system(
         portfolio_risk_monitor=portfolio_risk_monitor,
         portfolio_attribution_service=portfolio_attribution_service,
         portfolio_reporting_service=portfolio_reporting_service,
+        portfolio_dashboard_server=portfolio_dashboard_server,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -421,6 +438,8 @@ def bootstrap_system(
     logger.info("Portfolio risk monitor: ready")
     logger.info("Portfolio attribution engine: ready")
     logger.info("Portfolio reporting & dashboard API: ready")
+    dash_status = f"running at {portfolio_dashboard_server.url}" if portfolio_dashboard_server.is_running else "ready (offline)"
+    logger.info("Portfolio analytics dashboard UI: %s", dash_status)
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 

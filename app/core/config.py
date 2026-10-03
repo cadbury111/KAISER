@@ -135,6 +135,11 @@ class Settings:
     playback_enabled: bool = False
     playback_device_id: int | None = None
 
+    # Portfolio Analytics Dashboard UI (Phase 2, Step 12)
+    dashboard_enabled: bool = False
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8080
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -181,6 +186,9 @@ class Settings:
             "tts_volume": self.tts_volume,
             "playback_enabled": self.playback_enabled,
             "playback_device_id": self.playback_device_id,
+            "dashboard_enabled": self.dashboard_enabled,
+            "dashboard_host": self.dashboard_host,
+            "dashboard_port": self.dashboard_port,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -228,6 +236,9 @@ def get_settings(
         tts_volume=float(source.get("TTS_VOLUME", "1.0")),
         playback_enabled=parse_bool(source.get("PLAYBACK_ENABLED", "false"), "PLAYBACK_ENABLED"),
         playback_device_id=int(source["PLAYBACK_DEVICE_ID"]) if "PLAYBACK_DEVICE_ID" in source and source["PLAYBACK_DEVICE_ID"].strip() else None,
+        dashboard_enabled=parse_bool(source.get("DASHBOARD_ENABLED", "false"), "DASHBOARD_ENABLED"),
+        dashboard_host=source.get("DASHBOARD_HOST", "127.0.0.1"),
+        dashboard_port=int(source.get("DASHBOARD_PORT", "8080")),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

@@ -757,17 +757,17 @@ class PortfolioReportingService:
             })
 
         elif isinstance(source, dict):
-            initial_equity = float(source.get("initial_equity", 100000.0))
-            final_equity = float(source.get("final_equity", initial_equity))
-            gross_pnl = float(source.get("gross_pnl", 0.0))
-            net_pnl = float(source.get("net_pnl", final_equity - initial_equity))
-            gross_return_pct = float(source.get("gross_return_pct", (gross_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0))
-            net_return_pct = float(source.get("net_return_pct", (net_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0))
-            total_costs = float(source.get("total_transaction_costs", 0.0))
+            initial_equity = sanitize_numeric(source.get("initial_equity"), 2, default=100000.0) or 100000.0
+            final_equity = sanitize_numeric(source.get("final_equity"), 2, default=initial_equity) or initial_equity
+            gross_pnl = sanitize_numeric(source.get("gross_pnl"), 2, default=0.0) or 0.0
+            net_pnl = sanitize_numeric(source.get("net_pnl"), 2, default=final_equity - initial_equity) or 0.0
+            gross_return_pct = sanitize_numeric(source.get("gross_return_pct"), 4, default=(gross_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0) or 0.0
+            net_return_pct = sanitize_numeric(source.get("net_return_pct"), 4, default=(net_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0) or 0.0
+            total_costs = sanitize_numeric(source.get("total_transaction_costs"), 4, default=0.0) or 0.0
             cost_breakdown = dict(source.get("cost_breakdown", {}))
-            cash_balance = float(source.get("cash_balance", final_equity))
-            max_dd_pct = float(source.get("max_drawdown_pct", 0.0))
-            max_dd_amt = float(source.get("max_drawdown_amount", 0.0))
+            cash_balance = sanitize_numeric(source.get("cash_balance"), 2, default=final_equity) or final_equity
+            max_dd_pct = sanitize_numeric(source.get("max_drawdown_pct"), 2, default=0.0) or 0.0
+            max_dd_amt = sanitize_numeric(source.get("max_drawdown_amount"), 2, default=0.0) or 0.0
             max_dd_duration = int(source.get("max_drawdown_duration_bars", 0))
             raw_equity_points = source.get("equity_curve", ())
             raw_strat_attrs = list(source.get("strategy_attributions", []))

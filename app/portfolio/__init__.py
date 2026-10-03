@@ -40,6 +40,7 @@ from app.portfolio.report_models import (
     UnifiedPortfolioReport,
     VoiceSummary,
 )
+from app.portfolio.dashboard import PortfolioDashboardServer, get_dashboard_html
 from app.portfolio.reporting import PortfolioReportingService
 from app.portfolio.reporting_handlers import register_reporting_handlers
 
@@ -76,10 +77,13 @@ __all__ = [
     "calculate_calmar_ratio",
     "calculate_trade_metrics",
     "compute_risk_adjusted_metrics",
-    # Services & Handlers
+    # Services, Server & Handlers
     "PortfolioAttributionService",
     "PortfolioReportingService",
+    "PortfolioDashboardServer",
+    "get_dashboard_html",
     "register_portfolio_handlers",
     "register_reporting_handlers",
 ]
+
 

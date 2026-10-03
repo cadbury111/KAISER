@@ -22,11 +22,13 @@ from app.portfolio.reporting import PortfolioReportingService
 
 if TYPE_CHECKING:
     from app.orchestrator.master import MasterOrchestrator
+    from app.portfolio.dashboard.server import PortfolioDashboardServer
 
 
 def register_reporting_handlers(
     orchestrator: MasterOrchestrator,
     service: PortfolioReportingService,
+    server: Optional[PortfolioDashboardServer] = None,
 ) -> None:
     """Register portfolio analytics reporting command handlers with the Master Orchestrator.
 
@@ -293,3 +295,59 @@ def register_reporting_handlers(
         description="Retrieve concise structured speech summary fields for voice synthesis",
         allow_override=True,
     )
+
+    if server is not None:
+        def handle_start_portfolio_dashboard(req: OrchestratorRequest) -> Dict[str, Any]:
+            """Handler for 'start_portfolio_dashboard' command."""
+            if not server.is_running:
+                server.start(blocking=False)
+            return {
+                "status": "success",
+                "is_running": server.is_running,
+                "url": server.url,
+                "host": server.host,
+                "port": server.port,
+            }
+
+        def handle_stop_portfolio_dashboard(req: OrchestratorRequest) -> Dict[str, Any]:
+            """Handler for 'stop_portfolio_dashboard' command."""
+            if server.is_running:
+                server.stop()
+            return {
+                "status": "success",
+                "is_running": server.is_running,
+            }
+
+        def handle_get_portfolio_dashboard_status(req: OrchestratorRequest) -> Dict[str, Any]:
+            """Handler for 'get_portfolio_dashboard_status' command."""
+            return {
+                "status": "success",
+                "is_running": server.is_running,
+                "url": server.url,
+                "host": server.host,
+                "port": server.port,
+            }
+
+        orchestrator.register_handler(
+            command="start_portfolio_dashboard",
+            handler=handle_start_portfolio_dashboard,
+            capability="portfolio_analytics",
+            description="Start the local read-only Portfolio Analytics Dashboard HTTP server",
+            allow_override=True,
+        )
+
+        orchestrator.register_handler(
+            command="stop_portfolio_dashboard",
+            handler=handle_stop_portfolio_dashboard,
+            capability="portfolio_analytics",
+            description="Stop the local read-only Portfolio Analytics Dashboard HTTP server",
+            allow_override=True,
+        )
+
+        orchestrator.register_handler(
+            command="get_portfolio_dashboard_status",
+            handler=handle_get_portfolio_dashboard_status,
+            capability="portfolio_analytics",
+            description="Get the status and URL of the Portfolio Analytics Dashboard server",
+            allow_override=True,
+        )
