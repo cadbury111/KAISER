@@ -41,6 +41,12 @@ from app.portfolio.report_models import (
     VoiceSummary,
 )
 from app.portfolio.dashboard import PortfolioDashboardServer, get_dashboard_html
+from app.portfolio.diagnostics import (
+    DiagnosticEventType,
+    DiagnosticOutcome,
+    OperationalDiagnosticEvent,
+    PortfolioDiagnosticsService,
+)
 from app.portfolio.reporting import PortfolioReportingService
 from app.portfolio.reporting_handlers import register_reporting_handlers
 
@@ -50,6 +56,8 @@ __all__ = [
     "ReconciliationStatus",
     "ComparisonType",
     "ReportDataStatus",
+    "DiagnosticEventType",
+    "DiagnosticOutcome",
     # Attribution Models
     "MetricValue",
     "AttributionConfig",
@@ -68,6 +76,7 @@ __all__ = [
     "VoiceSummary",
     "HistoricalReportSummary",
     "UnifiedPortfolioReport",
+    "OperationalDiagnosticEvent",
     # Metrics
     "calculate_equity_returns",
     "calculate_annualized_volatility",
@@ -81,6 +90,7 @@ __all__ = [
     "PortfolioAttributionService",
     "PortfolioReportingService",
     "PortfolioDashboardServer",
+    "PortfolioDiagnosticsService",
     "get_dashboard_html",
     "register_portfolio_handlers",
     "register_reporting_handlers",

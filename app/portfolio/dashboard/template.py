@@ -731,6 +731,58 @@ def get_dashboard_html() -> str:
         </div>
       </section>
 
+      <!-- Section H: Operational Diagnostics & System Audit -->
+      <section class="card-panel" id="diagnosticsSection">
+        <div class="panel-header">
+          <div class="panel-title">🛠️ Operational Diagnostics & System Audit</div>
+          <div id="diagStatusBadge" class="badge badge-valid">OPERATIONAL</div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 16px; font-size: 0.85rem;">
+          <div class="metric-card" style="padding: 12px 14px;">
+            <div class="metric-label">Dashboard Server State</div>
+            <div id="valDiagServerState" class="metric-value" style="font-size: 1.1rem; color: var(--accent-green);">RUNNING</div>
+            <div id="footDiagServer" class="metric-footnote">http://127.0.0.1:8080 (Loopback)</div>
+          </div>
+          <div class="metric-card" style="padding: 12px 14px;">
+            <div class="metric-label">Operational Events</div>
+            <div id="valDiagEventsCount" class="metric-value" style="font-size: 1.1rem;">0 Recorded</div>
+            <div id="footDiagEviction" class="metric-footnote">0 evicted • Bounded FIFO</div>
+          </div>
+          <div class="metric-card" style="padding: 12px 14px;">
+            <div class="metric-label">Latest Report Generation</div>
+            <div id="valDiagLatestReport" class="metric-value" style="font-size: 1.1rem; color: var(--text-main);">N/A</div>
+            <div id="footDiagLatestReport" class="metric-footnote">Duration: N/A</div>
+          </div>
+          <div class="metric-card" style="padding: 12px 14px;">
+            <div class="metric-label">Audit Retention Policy</div>
+            <div class="metric-value" style="font-size: 1.0rem; color: var(--accent-cyan);">In-Memory (FIFO)</div>
+            <div id="footDiagRetention" class="metric-footnote">Max limit: 100 events</div>
+          </div>
+        </div>
+
+        <div class="panel-header" style="margin-top: 10px; margin-bottom: 8px;">
+          <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Recent Operational Event Log</div>
+          <div id="diagEventsCountMeta" class="panel-meta">Showing recent events</div>
+        </div>
+        <div class="table-responsive">
+          <table class="data-table" id="diagEventsTable">
+            <thead>
+              <tr>
+                <th>Timestamp (UTC)</th>
+                <th>Event Type</th>
+                <th>Outcome</th>
+                <th>Correlation / Run ID</th>
+                <th>Data Status</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody id="diagEventsTableBody">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-dim);">No operational diagnostic events recorded yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
     </div>
   </main>
 
@@ -800,6 +852,17 @@ def get_dashboard_html() -> str:
       const provVersion = document.getElementById('provVersion');
       const provWarnings = document.getElementById('provWarnings');
 
+      // Diagnostics fields
+      const valDiagServerState = document.getElementById('valDiagServerState');
+      const footDiagServer = document.getElementById('footDiagServer');
+      const valDiagEventsCount = document.getElementById('valDiagEventsCount');
+      const footDiagEviction = document.getElementById('footDiagEviction');
+      const valDiagLatestReport = document.getElementById('valDiagLatestReport');
+      const footDiagLatestReport = document.getElementById('footDiagLatestReport');
+      const diagStatusBadge = document.getElementById('diagStatusBadge');
+      const diagEventsTableBody = document.getElementById('diagEventsTableBody');
+      const diagEventsCountMeta = document.getElementById('diagEventsCountMeta');
+
       // Utilities: Number check & HTML escaping
       function isNumeric(val) {
         return val !== null && val !== undefined && typeof val === 'number' && !isNaN(val) && isFinite(val);
@@ -830,14 +893,22 @@ def get_dashboard_html() -> str:
       // Initialize
       window.addEventListener('DOMContentLoaded', () => {
         loadReportList();
-        btnRefresh.addEventListener('click', () => loadReport(reportSelect.value || 'latest'));
-        reportSelect.addEventListener('change', () => loadReport(reportSelect.value));
+        loadDiagnostics();
+        btnRefresh.addEventListener('click', () => {
+          loadReport(reportSelect.value || 'latest');
+          loadDiagnostics();
+        });
+        reportSelect.addEventListener('change', () => {
+          loadReport(reportSelect.value);
+          loadDiagnostics();
+        });
 
         // Delegated click handler for comparison table links
         comparisonTableBody.addEventListener('click', (evt) => {
           const link = evt.target.closest('.report-link');
           if (link && link.dataset.reportId) {
             loadReport(link.dataset.reportId);
+            loadDiagnostics();
           }
         });
       });
@@ -1296,6 +1367,108 @@ def get_dashboard_html() -> str:
           `;
           comparisonTableBody.appendChild(row);
         });
+      }
+
+      // Load Operational Diagnostics
+      async function loadDiagnostics() {
+        try {
+          const res = await fetch('/api/diagnostics?limit=15');
+          if (!res.ok) return;
+          const data = await res.json();
+          renderDiagnostics(data);
+        } catch (err) {
+          // Graceful fault isolation: diagnostic load failure must never break main dashboard
+          console.debug('Failed to load diagnostics:', err);
+        }
+      }
+
+      // Render Operational Diagnostics Panel
+      function renderDiagnostics(data) {
+        if (!data || !data.snapshot) return;
+        const snap = data.snapshot;
+        const counts = snap.counts || {};
+        const lc = snap.dashboard_lifecycle || {};
+
+        if (valDiagServerState) {
+          valDiagServerState.textContent = escapeHtml(lc.state || (lc.is_running ? 'RUNNING' : 'OFFLINE'));
+          valDiagServerState.style.color = lc.is_running ? 'var(--accent-green)' : 'var(--accent-amber)';
+        }
+        if (footDiagServer) {
+          footDiagServer.textContent = `${escapeHtml(lc.url || 'http://127.0.0.1:8080')} (Loopback)`;
+        }
+        if (valDiagEventsCount) {
+          valDiagEventsCount.textContent = `${counts.total_recorded || 0} Recorded`;
+        }
+        if (footDiagEviction) {
+          footDiagEviction.textContent = `${counts.total_evicted || 0} evicted • FIFO (${counts.max_history_limit || 100} max)`;
+        }
+        if (diagStatusBadge) {
+          if (lc.is_running) {
+            diagStatusBadge.textContent = 'OPERATIONAL';
+            diagStatusBadge.className = 'badge badge-valid';
+          } else {
+            diagStatusBadge.textContent = 'STANDBY';
+            diagStatusBadge.className = 'badge badge-neu';
+          }
+        }
+
+        const latestGen = snap.latest_report_generation;
+        if (valDiagLatestReport) {
+          if (latestGen) {
+            const outColor = latestGen.outcome === 'SUCCESS' ? 'var(--accent-green)' : 'var(--accent-red)';
+            valDiagLatestReport.innerHTML = `<span style="color: ${outColor};">${escapeHtml(latestGen.outcome)}</span> <span style="font-size: 0.85rem; font-family: monospace;">[${escapeHtml(latestGen.report_id || latestGen.run_id || '-')}]</span>`;
+          } else {
+            valDiagLatestReport.textContent = 'None';
+          }
+        }
+        if (footDiagLatestReport) {
+          if (latestGen && latestGen.duration_ms !== undefined && latestGen.duration_ms !== null) {
+            footDiagLatestReport.textContent = `Duration: ${latestGen.duration_ms}ms • ${escapeHtml(latestGen.timestamp_iso || '')}`;
+          } else {
+            footDiagLatestReport.textContent = 'Duration: N/A';
+          }
+        }
+
+        const events = data.events || [];
+        if (diagEventsCountMeta) {
+          diagEventsCountMeta.textContent = `Showing ${events.length} of ${counts.current_history_size || 0} buffered`;
+        }
+        if (diagEventsTableBody) {
+          diagEventsTableBody.innerHTML = '';
+          if (events.length === 0) {
+            diagEventsTableBody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-dim);">No operational diagnostic events recorded yet.</td></tr>`;
+            return;
+          }
+
+          events.forEach(e => {
+            const row = document.createElement('tr');
+            let outBadge = 'badge-neu';
+            if (e.outcome === 'SUCCESS') outBadge = 'badge-valid';
+            else if (e.outcome === 'FAILURE') outBadge = 'badge-unavailable';
+            else if (e.outcome === 'WARNING' || e.outcome === 'INVALID') outBadge = 'badge-stale';
+
+            let detailsSummary = '';
+            if (e.details && Object.keys(e.details).length > 0) {
+              detailsSummary = Object.entries(e.details)
+                .map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}`)
+                .join(', ');
+            } else if (e.error_category) {
+              detailsSummary = `Error: ${escapeHtml(e.error_category)}`;
+            } else {
+              detailsSummary = '-';
+            }
+
+            row.innerHTML = `
+              <td style="font-family: monospace; font-size: 0.78rem;">${escapeHtml(e.timestamp_iso || '-')}</td>
+              <td><span class="badge badge-neu" style="font-size: 0.72rem;">${escapeHtml(e.event_type || '-')}</span></td>
+              <td><span class="badge ${outBadge}" style="font-size: 0.72rem;">${escapeHtml(e.outcome || '-')}</span></td>
+              <td style="font-family: monospace; font-size: 0.78rem; color: var(--accent-cyan);">${escapeHtml(e.report_id || e.run_id || e.correlation_id || '-')}</td>
+              <td><span class="badge badge-neu" style="font-size: 0.72rem;">${escapeHtml(e.data_status || '-')}</span></td>
+              <td style="font-size: 0.78rem; color: var(--text-muted); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(detailsSummary)}">${detailsSummary}</td>
+            `;
+            diagEventsTableBody.appendChild(row);
+          });
+        }
       }
 
       // Expose to window for external invocation

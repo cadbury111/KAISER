@@ -50,6 +50,7 @@ from app.backtesting import (
 from app.portfolio import (
     PortfolioAttributionService,
     PortfolioDashboardServer,
+    PortfolioDiagnosticsService,
     PortfolioReportingService,
     register_portfolio_handlers,
     register_reporting_handlers,
@@ -94,6 +95,7 @@ class SystemStatus:
     portfolio_attribution_service: Optional[PortfolioAttributionService] = None
     portfolio_reporting_service: Optional[PortfolioReportingService] = None
     portfolio_dashboard_server: Optional[PortfolioDashboardServer] = None
+    portfolio_diagnostics_service: Optional[PortfolioDiagnosticsService] = None
 
 
 
@@ -328,12 +330,20 @@ def bootstrap_system(
     )
     register_portfolio_handlers(orchestrator=orchestrator, service=portfolio_attribution_service)
 
+    # Initialize Portfolio Analytics Observability & Operational Diagnostics Foundation (Phase 2, Step 15)
+    portfolio_diagnostics_service = PortfolioDiagnosticsService(
+        max_history=100,
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+
     # Initialize Portfolio Analytics Reporting & Dashboard Data API Foundation
     portfolio_reporting_service = PortfolioReportingService(
         event_bus=event_bus,
         state_store=state_store,
         attribution_service=portfolio_attribution_service,
         risk_monitor=portfolio_risk_monitor,
+        diagnostics_service=portfolio_diagnostics_service,
     )
 
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
@@ -341,6 +351,7 @@ def bootstrap_system(
         reporting_service=portfolio_reporting_service,
         host=active_settings.dashboard_host,
         port=active_settings.dashboard_port,
+        diagnostics_service=portfolio_diagnostics_service,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -421,6 +432,7 @@ def bootstrap_system(
         portfolio_attribution_service=portfolio_attribution_service,
         portfolio_reporting_service=portfolio_reporting_service,
         portfolio_dashboard_server=portfolio_dashboard_server,
+        portfolio_diagnostics_service=portfolio_diagnostics_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -438,6 +450,7 @@ def bootstrap_system(
     logger.info("Portfolio risk monitor: ready")
     logger.info("Portfolio attribution engine: ready")
     logger.info("Portfolio reporting & dashboard API: ready")
+    logger.info("Portfolio diagnostics & audit: ready (max_history=100, retention=bounded_in_memory)")
     dash_status = f"running at {portfolio_dashboard_server.url}" if portfolio_dashboard_server.is_running else "ready (offline)"
     logger.info("Portfolio analytics dashboard UI: %s", dash_status)
     logger.info("Trading engine: %s", status.trading_engine)

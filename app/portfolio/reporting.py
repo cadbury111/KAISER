@@ -46,6 +46,12 @@ from app.portfolio.report_models import (
     sanitize_dict_for_export,
     sanitize_numeric,
 )
+from app.portfolio.diagnostics import (
+    DiagnosticEventType,
+    DiagnosticOutcome,
+    PortfolioDiagnosticsService,
+    sanitize_diagnostic_error_category,
+)
 from app.risk.models import AlertState, PortfolioRiskReport
 from app.risk.monitor import PortfolioRiskMonitor
 
@@ -69,6 +75,7 @@ class PortfolioReportingService:
         state_store: Optional[StateStore] = None,
         attribution_service: Optional[PortfolioAttributionService] = None,
         risk_monitor: Optional[PortfolioRiskMonitor] = None,
+        diagnostics_service: Optional[PortfolioDiagnosticsService] = None,
         max_history_size: int = 50,
         engine_version: str = "1.0.0",
     ) -> None:
@@ -79,6 +86,7 @@ class PortfolioReportingService:
             state_store: Optional StateStore for persistence and caching.
             attribution_service: Optional attribution service for computing attribution if needed.
             risk_monitor: Optional risk monitor for evaluating snapshot risk status.
+            diagnostics_service: Optional diagnostics service for auditing operational events.
             max_history_size: Maximum number of historical reports retained in memory.
             engine_version: Version identifier of the analytics reporting engine.
         """
@@ -92,9 +100,47 @@ class PortfolioReportingService:
         self.max_history_size = max_history_size
         self.engine_version = engine_version
 
+        # Operational diagnostics service (with fallback)
+        self.diagnostics_service = diagnostics_service or PortfolioDiagnosticsService(
+            event_bus=event_bus,
+            state_store=state_store,
+        )
+
         # In-memory bounded cache
         self._reports: Dict[str, UnifiedPortfolioReport] = {}
         self._run_to_report_map: Dict[str, str] = {}
+
+    def _safe_record_diagnostic(
+        self,
+        event_type: DiagnosticEventType,
+        outcome: DiagnosticOutcome,
+        correlation_id: Optional[str] = None,
+        report_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        data_status: Optional[str] = None,
+        error_category: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Safely record an operational diagnostic event with absolute fault isolation.
+
+        Diagnostic failures must NEVER crash or alter financial reporting operations.
+        """
+        try:
+            if getattr(self, "diagnostics_service", None) is not None:
+                self.diagnostics_service.record_event(
+                    event_type=event_type,
+                    outcome=outcome,
+                    correlation_id=correlation_id,
+                    report_id=report_id,
+                    run_id=run_id,
+                    data_status=data_status,
+                    error_category=error_category,
+                    duration_ms=duration_ms,
+                    details=details,
+                )
+        except Exception as diag_err:
+            logger.warning("PortfolioReportingService: diagnostic event recording failed safely: %s", diag_err)
 
     def generate_unified_report(
         self,
@@ -121,12 +167,24 @@ class PortfolioReportingService:
             UnifiedPortfolioReport: Typed, immutable unified report.
         """
         now = time.time()
+        start_perf = time.perf_counter()
         report_id = f"report_{uuid.uuid4().hex[:12]}"
+        corr_id = f"gen_{uuid.uuid4().hex[:8]}"
 
         try:
             # 1. Resolve source identifiers and type
             source_id, source_type = self._extract_source_meta(source_result)
             report_title = title or f"Portfolio Analytics Report [{source_id}]"
+
+            # Record generation started event
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_GENERATION_STARTED,
+                outcome=DiagnosticOutcome.INFO,
+                correlation_id=corr_id,
+                report_id=report_id,
+                run_id=source_id,
+                details={"source_type": source_type},
+            )
 
             # 2. Extract or compute attribution report
             attr = attribution_report
@@ -331,11 +389,39 @@ class PortfolioReportingService:
                     )
                 )
 
+            duration_ms = (time.perf_counter() - start_perf) * 1000.0
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_GENERATION_SUCCEEDED,
+                outcome=DiagnosticOutcome.SUCCESS,
+                correlation_id=corr_id,
+                report_id=report.report_id,
+                run_id=source_id,
+                data_status=report.status.value,
+                duration_ms=duration_ms,
+                details={
+                    "source_type": source_type,
+                    "strategies_count": len(report.strategy_attributions),
+                    "active_alerts": report.active_alerts_count,
+                },
+            )
+
             logger.info("Generated unified portfolio report: %s", report.summary_text)
             return report
 
         except Exception as exc:
+            duration_ms = (time.perf_counter() - start_perf) * 1000.0
+            err_cat = sanitize_diagnostic_error_category(exc)
             logger.error("Failed to generate unified portfolio report: %s", exc, exc_info=True)
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_GENERATION_FAILED,
+                outcome=DiagnosticOutcome.FAILURE,
+                correlation_id=corr_id if "corr_id" in locals() else None,
+                report_id=report_id,
+                run_id=source_id if "source_id" in locals() else None,
+                error_category=err_cat,
+                duration_ms=duration_ms,
+                details={"error_category": err_cat},
+            )
             if self.event_bus is not None:
                 self.event_bus.publish(
                     Event.create(
@@ -351,18 +437,33 @@ class PortfolioReportingService:
 
     def get_latest_unified_report(self) -> Optional[UnifiedPortfolioReport]:
         """Retrieve the most recently generated unified report."""
+        report: Optional[UnifiedPortfolioReport] = None
         if self._reports:
             # Return newest by insertion
             latest_id = list(self._reports.keys())[-1]
-            return self._reports[latest_id]
-
-        # Check StateStore
-        if self.state_store is not None:
+            report = self._reports[latest_id]
+        elif self.state_store is not None:
             latest_dict = self.state_store.get(self.STATE_LATEST_KEY)
             if latest_dict and isinstance(latest_dict, dict):
-                return self._deserialize_report(latest_dict)
+                report = self._deserialize_report(latest_dict)
 
-        return None
+        if report is not None:
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_SUCCEEDED,
+                outcome=DiagnosticOutcome.SUCCESS,
+                report_id=report.report_id,
+                run_id=report.provenance.source_run_id if report.provenance else None,
+                data_status=report.status.value,
+                details={"query": "latest"},
+            )
+        else:
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_UNAVAILABLE,
+                outcome=DiagnosticOutcome.UNAVAILABLE,
+                details={"query": "latest", "reason": "No reports available"},
+            )
+
+        return report
 
     def get_report_by_id(self, report_id: str) -> Optional[UnifiedPortfolioReport]:
         """Retrieve a unified report by its unique report identifier.
@@ -374,20 +475,42 @@ class PortfolioReportingService:
             Optional[UnifiedPortfolioReport]: Report if found, else None.
         """
         if not report_id or not isinstance(report_id, str) or not report_id.strip():
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_INVALID,
+                outcome=DiagnosticOutcome.INVALID,
+                error_category="ValidationError",
+                details={"reason": "Invalid or empty report_id"},
+            )
             raise ValidationError("report_id must be a non-empty string.")
 
         clean_id = report_id.strip()
+        report: Optional[UnifiedPortfolioReport] = None
         if clean_id in self._reports:
-            return self._reports[clean_id]
-
-        if self.state_store is not None:
+            report = self._reports[clean_id]
+        elif self.state_store is not None:
             raw = self.state_store.get(f"{self.STATE_REPORTS_PREFIX}{clean_id}")
             if raw and isinstance(raw, dict):
                 report = self._deserialize_report(raw)
                 self._reports[clean_id] = report
-                return report
 
-        return None
+        if report is not None:
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_SUCCEEDED,
+                outcome=DiagnosticOutcome.SUCCESS,
+                report_id=clean_id,
+                run_id=report.provenance.source_run_id if report.provenance else None,
+                data_status=report.status.value,
+                details={"lookup": "by_report_id"},
+            )
+        else:
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_UNAVAILABLE,
+                outcome=DiagnosticOutcome.UNAVAILABLE,
+                report_id=clean_id,
+                details={"lookup": "by_report_id", "reason": "Report not found"},
+            )
+
+        return report
 
     def get_report_by_run_id(self, run_id: str) -> Optional[UnifiedPortfolioReport]:
         """Retrieve the report generated for a specific source simulation or backtest run ID.
@@ -399,6 +522,12 @@ class PortfolioReportingService:
             Optional[UnifiedPortfolioReport]: Report if found, else None.
         """
         if not run_id or not isinstance(run_id, str) or not run_id.strip():
+            self._safe_record_diagnostic(
+                event_type=DiagnosticEventType.REPORT_RETRIEVAL_INVALID,
+                outcome=DiagnosticOutcome.INVALID,
+                error_category="ValidationError",
+                details={"reason": "Invalid or empty run_id"},
+            )
             raise ValidationError("run_id must be a non-empty string.")
 
         clean_run_id = run_id.strip()
@@ -409,8 +538,22 @@ class PortfolioReportingService:
         # Scan cached reports
         for rep in reversed(list(self._reports.values())):
             if rep.provenance.source_run_id == clean_run_id:
+                self._safe_record_diagnostic(
+                    event_type=DiagnosticEventType.REPORT_RETRIEVAL_SUCCEEDED,
+                    outcome=DiagnosticOutcome.SUCCESS,
+                    report_id=rep.report_id,
+                    run_id=clean_run_id,
+                    data_status=rep.status.value,
+                    details={"lookup": "by_run_id"},
+                )
                 return rep
 
+        self._safe_record_diagnostic(
+            event_type=DiagnosticEventType.REPORT_RETRIEVAL_UNAVAILABLE,
+            outcome=DiagnosticOutcome.UNAVAILABLE,
+            run_id=clean_run_id,
+            details={"lookup": "by_run_id", "reason": "Run not found"},
+        )
         return None
 
     def list_historical_reports(

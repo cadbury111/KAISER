@@ -165,6 +165,9 @@ class EventType(str, Enum):
     PORTFOLIO_REPORT_GENERATED = "PORTFOLIO_REPORT_GENERATED"
     PORTFOLIO_REPORT_FAILED = "PORTFOLIO_REPORT_FAILED"
 
+    # Portfolio Analytics Observability & Operational Diagnostics (Phase 2, Step 15)
+    PORTFOLIO_DIAGNOSTIC_RECORDED = "PORTFOLIO_DIAGNOSTIC_RECORDED"
+
 
 
 

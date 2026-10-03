@@ -296,6 +296,52 @@ def register_reporting_handlers(
         allow_override=True,
     )
 
+    def handle_get_portfolio_diagnostics(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'get_portfolio_diagnostics' command."""
+        p = dict(getattr(req, "context", {}) or getattr(req, "parameters", {}) or getattr(req, "payload", {}) or {})
+        try:
+            limit = int(p.get("limit", 20))
+            offset = int(p.get("offset", 0))
+        except (ValueError, TypeError):
+            raise ValidationError("limit and offset parameters must be integers.")
+
+        ev_type = p.get("event_type")
+        ev_outcome = p.get("outcome")
+
+        diag_svc = getattr(service, "diagnostics_service", None)
+        if diag_svc is None and server is not None:
+            diag_svc = getattr(server, "diagnostics_service", None)
+
+        if diag_svc is None:
+            return {
+                "status": "unavailable",
+                "message": "Portfolio diagnostics service not available.",
+                "snapshot": None,
+                "events": [],
+            }
+
+        snapshot = diag_svc.get_snapshot()
+        events = diag_svc.get_history(
+            limit=limit,
+            offset=offset,
+            event_type=ev_type,
+            outcome=ev_outcome,
+        )
+        return {
+            "status": "success",
+            "snapshot": snapshot,
+            "count": len(events),
+            "events": [e.to_dict() for e in events],
+        }
+
+    orchestrator.register_handler(
+        command="get_portfolio_diagnostics",
+        handler=handle_get_portfolio_diagnostics,
+        capability="portfolio_analytics",
+        description="Retrieve operational diagnostics snapshot and bounded audit history",
+        allow_override=True,
+    )
+
     if server is not None:
         def handle_start_portfolio_dashboard(req: OrchestratorRequest) -> Dict[str, Any]:
             """Handler for 'start_portfolio_dashboard' command."""

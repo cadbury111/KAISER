@@ -24,6 +24,12 @@ from urllib.parse import parse_qs, urlparse
 
 from app.core.exceptions import ValidationError
 from app.portfolio.dashboard.template import get_dashboard_html
+from app.portfolio.diagnostics import (
+    DiagnosticEventType,
+    DiagnosticOutcome,
+    PortfolioDiagnosticsService,
+    sanitize_diagnostic_error_category,
+)
 from app.portfolio.report_models import sanitize_dict_for_export
 from app.portfolio.reporting import PortfolioReportingService
 
@@ -209,6 +215,52 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 8. Operational Diagnostics Snapshot & Bounded History Endpoint (/api/diagnostics)
+            if path == "/api/diagnostics":
+                diagnostics: Optional[PortfolioDiagnosticsService] = getattr(self.server, "diagnostics_service", None)
+                if diagnostics is None and service is not None:
+                    diagnostics = getattr(service, "diagnostics_service", None)
+
+                if diagnostics is None:
+                    self._send_json_response(
+                        {"error": "Internal Error", "message": "Diagnostics service not attached."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["20"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    self._send_json_response(
+                        {"error": "Bad Request", "message": "Limit and offset query parameters must be integers."},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                ev_type = query.get("type", [None])[0]
+                ev_outcome = query.get("outcome", [None])[0]
+
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                snapshot = diagnostics.get_snapshot()
+                events = diagnostics.get_history(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                    event_type=ev_type,
+                    outcome=ev_outcome,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "snapshot": snapshot,
+                    "count": len(events),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "events": [e.to_dict() for e in events],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -304,6 +356,7 @@ class PortfolioDashboardServer:
         reporting_service: PortfolioReportingService,
         host: str = "127.0.0.1",
         port: int = 8080,
+        diagnostics_service: Optional[PortfolioDiagnosticsService] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -311,6 +364,7 @@ class PortfolioDashboardServer:
             reporting_service: PortfolioReportingService instance providing data.
             host: Network interface host to bind to (strictly loopback by default).
             port: Port number to bind to (0 for dynamic free port).
+            diagnostics_service: Optional diagnostics service for auditing server lifecycle.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -326,6 +380,11 @@ class PortfolioDashboardServer:
         self.reporting_service = reporting_service
         self.host = clean_host
         self.port = port
+        self.diagnostics_service = (
+            diagnostics_service
+            or getattr(reporting_service, "diagnostics_service", None)
+            or PortfolioDiagnosticsService()
+        )
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -351,20 +410,39 @@ class PortfolioDashboardServer:
             logger.warning("Portfolio dashboard server is already running at %s", self.url)
             return
 
-        # Bind server to host and port
-        self._server = ThreadingHTTPServer((self.host, self.port), DashboardHTTPRequestHandler)
-        self._server.daemon_threads = True
-        self._server.allow_reuse_address = True
+        try:
+            # Bind server to host and port
+            self._server = ThreadingHTTPServer((self.host, self.port), DashboardHTTPRequestHandler)
+            self._server.daemon_threads = True
+            self._server.allow_reuse_address = True
 
-        # Attach reporting service to server instance for handler access
-        setattr(self._server, "reporting_service", self.reporting_service)
+            # Attach reporting service and diagnostics to server instance for handler access
+            setattr(self._server, "reporting_service", self.reporting_service)
+            setattr(self._server, "diagnostics_service", self.diagnostics_service)
 
-        # In case dynamic port 0 was passed, update to bound port
-        actual_port = self._server.server_port
-        self.port = actual_port
+            # In case dynamic port 0 was passed, update to bound port
+            actual_port = self._server.server_port
+            self.port = actual_port
 
-        self._is_running = True
-        logger.info("Portfolio Analytics Dashboard started at %s", self.url)
+            self._is_running = True
+            logger.info("Portfolio Analytics Dashboard started at %s", self.url)
+
+            self.diagnostics_service.record_event(
+                event_type=DiagnosticEventType.DASHBOARD_SERVER_STARTED,
+                outcome=DiagnosticOutcome.SUCCESS,
+                details={"host": self.host, "port": self.port, "url": self.url},
+            )
+
+        except Exception as exc:
+            err_cat = sanitize_diagnostic_error_category(exc)
+            logger.error("Failed to start Portfolio Analytics Dashboard server: %s", exc)
+            self.diagnostics_service.record_event(
+                event_type=DiagnosticEventType.DASHBOARD_SERVER_START_FAILED,
+                outcome=DiagnosticOutcome.FAILURE,
+                error_category=err_cat,
+                details={"host": self.host, "port": self.port},
+            )
+            raise
 
         if blocking:
             try:
@@ -401,4 +479,10 @@ class PortfolioDashboardServer:
 
         self._server = None
         self._thread = None
+
+        self.diagnostics_service.record_event(
+            event_type=DiagnosticEventType.DASHBOARD_SERVER_STOPPED,
+            outcome=DiagnosticOutcome.INFO,
+            details={"host": self.host, "port": self.port},
+        )
         logger.info("Portfolio Analytics Dashboard stopped.")
