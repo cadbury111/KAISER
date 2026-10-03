@@ -251,8 +251,8 @@ Graceful shutdown confirmed: process terminated cleanly, socket released immedia
 
 ### 8. Git Commit Log
 
-- Feature Commit Hash: `d605f51`
-- Commit Message: `feat(portfolio): complete Phase 2 Step 15 portfolio analytics observability & operational diagnostics`
+- Feature Commit: `d605f51` (`feat(portfolio): complete Phase 2 Step 15 portfolio analytics observability & operational diagnostics`)
+- Documentation Commit: `63ec1df` (`docs(portfolio): add Phase 2 Step 15 implementation report`)
 
 ---
 
