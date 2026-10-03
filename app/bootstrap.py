@@ -39,6 +39,12 @@ from app.market.historical import (
     register_historical_handlers,
 )
 from app.market.models import Bar
+from app.backtesting import (
+    BacktestEngine,
+    StrategyRegistry,
+    WalkForwardValidator,
+    register_backtest_handlers,
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,9 @@ class SystemStatus:
     historical_replay_engine: Optional[HistoricalReplayEngine] = None
     audio_capture: Optional[AudioCaptureService] = None
     audio_playback: Optional[AudioPlaybackService] = None
+    backtest_engine: Optional[BacktestEngine] = None
+    strategy_registry: Optional[StrategyRegistry] = None
+    walk_forward_validator: Optional[WalkForwardValidator] = None
 
 
 def bootstrap_system(
@@ -237,6 +246,33 @@ def bootstrap_system(
         replay_engine=historical_replay_engine,
     )
 
+    # Initialize Backtesting & Strategy Evaluation Foundation
+    strategy_registry = StrategyRegistry()
+    backtest_engine = BacktestEngine(
+        repository=historical_repository,
+        quality_engine=market_service.quality_engine,
+        analysis_engine=analysis_engine,
+        strategy_registry=strategy_registry,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_backtest_engine",
+    )
+    walk_forward_validator = WalkForwardValidator(
+        engine=backtest_engine,
+        repository=historical_repository,
+        quality_engine=market_service.quality_engine,
+        strategy_registry=strategy_registry,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_walk_forward_validator",
+    )
+    register_backtest_handlers(
+        orchestrator=orchestrator,
+        engine=backtest_engine,
+        strategy_registry=strategy_registry,
+        validator=walk_forward_validator,
+    )
+
     def _on_market_bar_updated(event: Event) -> None:
         try:
             p = event.payload
@@ -296,6 +332,9 @@ def bootstrap_system(
         historical_replay_engine=historical_replay_engine,
         audio_capture=voice_service.audio_capture if voice_service else None,
         audio_playback=voice_service.audio_playback if voice_service else None,
+        backtest_engine=backtest_engine,
+        strategy_registry=strategy_registry,
+        walk_forward_validator=walk_forward_validator,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -306,6 +345,8 @@ def bootstrap_system(
     logger.info("Historical repository: ready (db=%s)", db_path)
     logger.info("Historical cache: ready (max_size=200)")
     logger.info("Historical replay engine: ready")
+    logger.info("Backtest engine: ready (strategies=%s)", [s["name"] for s in strategy_registry.list_strategies()])
+    logger.info("Walk-forward validator: ready")
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 

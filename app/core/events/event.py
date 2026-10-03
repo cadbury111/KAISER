@@ -124,6 +124,20 @@ class EventType(str, Enum):
     PORTFOLIO_UPDATED = "PORTFOLIO_UPDATED"
     LEDGER_ENTRY_RECORDED = "LEDGER_ENTRY_RECORDED"
 
+    # Backtesting & Strategy Evaluation (Phase 2, Step 05)
+    BACKTEST_STARTED = "BACKTEST_STARTED"
+    BACKTEST_PROGRESS = "BACKTEST_PROGRESS"
+    BACKTEST_COMPLETED = "BACKTEST_COMPLETED"
+    BACKTEST_CANCELLED = "BACKTEST_CANCELLED"
+    BACKTEST_FAILED = "BACKTEST_FAILED"
+
+    # Walk-Forward Validation & Out-of-Sample Evaluation (Phase 2, Step 06)
+    WALK_FORWARD_STARTED = "WALK_FORWARD_STARTED"
+    WALK_FORWARD_PROGRESS = "WALK_FORWARD_PROGRESS"
+    WALK_FORWARD_COMPLETED = "WALK_FORWARD_COMPLETED"
+    WALK_FORWARD_CANCELLED = "WALK_FORWARD_CANCELLED"
+    WALK_FORWARD_FAILED = "WALK_FORWARD_FAILED"
+
 
 def _freeze_container(data: Any) -> Any:
     """Recursively freeze dictionaries and lists into immutable containers."""
