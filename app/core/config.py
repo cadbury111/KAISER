@@ -162,6 +162,19 @@ class Settings:
             )
         object.__setattr__(self, "log_level", norm_log)
 
+        norm_host = self.dashboard_host.strip().lower()
+        if norm_host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ConfigurationError(
+                f"Invalid DASHBOARD_HOST: '{self.dashboard_host}'. Dashboard must bind strictly "
+                f"to loopback interfaces ('127.0.0.1', 'localhost', '::1')."
+            )
+        object.__setattr__(self, "dashboard_host", norm_host)
+
+        if not isinstance(self.dashboard_port, int) or self.dashboard_port < 0 or self.dashboard_port > 65535:
+            raise ConfigurationError(
+                f"Invalid DASHBOARD_PORT: {self.dashboard_port}. Port must be an integer between 0 and 65535."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {

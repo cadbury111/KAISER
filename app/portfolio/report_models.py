@@ -217,16 +217,16 @@ class HistoricalReportSummary:
     source_type: str
     created_at: float
     created_at_iso: str
-    initial_equity: float
-    final_equity: float
-    net_pnl: float
-    net_return_pct: float
-    max_drawdown_pct: float
-    sharpe_ratio: Optional[float]
-    risk_state: str
-    is_reconciled: bool
-    status: ReportDataStatus
-    title: str
+    initial_equity: Optional[float] = None
+    final_equity: Optional[float] = None
+    net_pnl: Optional[float] = None
+    net_return_pct: Optional[float] = None
+    max_drawdown_pct: Optional[float] = None
+    sharpe_ratio: Optional[float] = None
+    risk_state: str = "UNKNOWN"
+    is_reconciled: bool = True
+    status: ReportDataStatus = ReportDataStatus.VALID
+    title: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert historical summary to dictionary."""
@@ -236,11 +236,11 @@ class HistoricalReportSummary:
             "source_type": self.source_type,
             "created_at": self.created_at,
             "created_at_iso": self.created_at_iso,
-            "initial_equity": sanitize_numeric(self.initial_equity, 2, default=0.0) or 0.0,
-            "final_equity": sanitize_numeric(self.final_equity, 2, default=0.0) or 0.0,
-            "net_pnl": sanitize_numeric(self.net_pnl, 2, default=0.0) or 0.0,
-            "net_return_pct": sanitize_numeric(self.net_return_pct, 2, default=0.0) or 0.0,
-            "max_drawdown_pct": sanitize_numeric(self.max_drawdown_pct, 2, default=0.0) or 0.0,
+            "initial_equity": sanitize_numeric(self.initial_equity, 2, default=None),
+            "final_equity": sanitize_numeric(self.final_equity, 2, default=None),
+            "net_pnl": sanitize_numeric(self.net_pnl, 2, default=None),
+            "net_return_pct": sanitize_numeric(self.net_return_pct, 2, default=None),
+            "max_drawdown_pct": sanitize_numeric(self.max_drawdown_pct, 2, default=None),
             "sharpe_ratio": sanitize_numeric(self.sharpe_ratio, 2, default=None),
             "risk_state": self.risk_state,
             "is_reconciled": self.is_reconciled,
@@ -264,32 +264,32 @@ class UnifiedPortfolioReport:
     data_warnings: Tuple[str, ...] = field(default_factory=tuple)
 
     # Performance & Capital
-    initial_equity: float = 0.0
-    final_equity: float = 0.0
-    gross_pnl: float = 0.0
-    net_pnl: float = 0.0
-    gross_return_pct: float = 0.0
-    net_return_pct: float = 0.0
+    initial_equity: Optional[float] = None
+    final_equity: Optional[float] = None
+    gross_pnl: Optional[float] = None
+    net_pnl: Optional[float] = None
+    gross_return_pct: Optional[float] = None
+    net_return_pct: Optional[float] = None
     realized_pnl: Optional[float] = None
     unrealized_pnl: Optional[float] = None
 
     # Cash & Exposure Summaries
-    cash_balance: float = 0.0
-    gross_exposure: float = 0.0
-    gross_exposure_pct: float = 0.0
-    net_exposure: float = 0.0
-    net_exposure_pct: float = 0.0
-    cash_reserve_pct: float = 0.0
+    cash_balance: Optional[float] = None
+    gross_exposure: Optional[float] = None
+    gross_exposure_pct: Optional[float] = None
+    net_exposure: Optional[float] = None
+    net_exposure_pct: Optional[float] = None
+    cash_reserve_pct: Optional[float] = None
 
     # Costs Breakdown
-    total_transaction_costs: float = 0.0
+    total_transaction_costs: Optional[float] = None
     cost_breakdown: Dict[str, float] = field(default_factory=dict)
 
     # Time Series & Drawdown
     equity_curve: Tuple[DashboardSeriesPoint, ...] = field(default_factory=tuple)
-    max_drawdown_pct: float = 0.0
-    max_drawdown_amount: float = 0.0
-    max_drawdown_duration_bars: int = 0
+    max_drawdown_pct: Optional[float] = None
+    max_drawdown_amount: Optional[float] = None
+    max_drawdown_duration_bars: Optional[int] = None
 
     # Risk-Adjusted Metrics (Serialized MetricValues)
     risk_adjusted_metrics: Dict[str, Any] = field(default_factory=dict)
@@ -321,15 +321,21 @@ class UnifiedPortfolioReport:
     @property
     def summary_text(self) -> str:
         """Formatted human-readable report overview."""
-        sign = "+" if self.net_pnl >= 0 else ""
+        sign = "+" if (self.net_pnl is not None and self.net_pnl >= 0) else ""
+        init_str = f"${self.initial_equity:,.2f}" if self.initial_equity is not None else "N/A"
+        final_str = f"${self.final_equity:,.2f}" if self.final_equity is not None else "N/A"
+        pnl_str = f"{sign}${self.net_pnl:,.2f}" if self.net_pnl is not None else "N/A"
+        ret_str = f"{sign}{self.net_return_pct:.2f}%" if self.net_return_pct is not None else "N/A"
+        dd_str = f"{self.max_drawdown_pct:.2f}%" if self.max_drawdown_pct is not None else "N/A"
+        costs_str = f"${self.total_transaction_costs:,.2f}" if self.total_transaction_costs is not None else "N/A"
         risk_str = self.risk_status.get("overall_state", "UNKNOWN") if self.risk_status else "UNKNOWN"
         return (
             f"Unified Portfolio Report [{self.report_id}] ({self.status.value}): "
-            f"Initial=${self.initial_equity:,.2f} -> Final=${self.final_equity:,.2f} | "
-            f"Net PnL={sign}${self.net_pnl:,.2f} ({sign}{self.net_return_pct:.2f}%) | "
-            f"MaxDD={self.max_drawdown_pct:.2f}% | "
+            f"Initial={init_str} -> Final={final_str} | "
+            f"Net PnL={pnl_str} ({ret_str}) | "
+            f"MaxDD={dd_str} | "
             f"Risk={risk_str} ({self.active_alerts_count} alerts) | "
-            f"Costs=${self.total_transaction_costs:,.2f} | "
+            f"Costs={costs_str} | "
             f"Strategies={len(self.strategy_attributions)} | "
             f"Warnings={len(self.data_warnings)}"
         )
@@ -342,26 +348,26 @@ class UnifiedPortfolioReport:
             "provenance": self.provenance.to_dict(),
             "status": self.status.value,
             "data_warnings": list(self.data_warnings),
-            "initial_equity": sanitize_numeric(self.initial_equity, 2, default=0.0) or 0.0,
-            "final_equity": sanitize_numeric(self.final_equity, 2, default=0.0) or 0.0,
-            "gross_pnl": sanitize_numeric(self.gross_pnl, 2, default=0.0) or 0.0,
-            "net_pnl": sanitize_numeric(self.net_pnl, 2, default=0.0) or 0.0,
-            "gross_return_pct": sanitize_numeric(self.gross_return_pct, 4, default=0.0) or 0.0,
-            "net_return_pct": sanitize_numeric(self.net_return_pct, 4, default=0.0) or 0.0,
+            "initial_equity": sanitize_numeric(self.initial_equity, 2, default=None),
+            "final_equity": sanitize_numeric(self.final_equity, 2, default=None),
+            "gross_pnl": sanitize_numeric(self.gross_pnl, 2, default=None),
+            "net_pnl": sanitize_numeric(self.net_pnl, 2, default=None),
+            "gross_return_pct": sanitize_numeric(self.gross_return_pct, 4, default=None),
+            "net_return_pct": sanitize_numeric(self.net_return_pct, 4, default=None),
             "realized_pnl": sanitize_numeric(self.realized_pnl, 2, default=None),
             "unrealized_pnl": sanitize_numeric(self.unrealized_pnl, 2, default=None),
-            "cash_balance": sanitize_numeric(self.cash_balance, 2, default=0.0) or 0.0,
-            "gross_exposure": sanitize_numeric(self.gross_exposure, 2, default=0.0) or 0.0,
-            "gross_exposure_pct": sanitize_numeric(self.gross_exposure_pct, 2, default=0.0) or 0.0,
-            "net_exposure": sanitize_numeric(self.net_exposure, 2, default=0.0) or 0.0,
-            "net_exposure_pct": sanitize_numeric(self.net_exposure_pct, 2, default=0.0) or 0.0,
-            "cash_reserve_pct": sanitize_numeric(self.cash_reserve_pct, 2, default=0.0) or 0.0,
-            "total_transaction_costs": sanitize_numeric(self.total_transaction_costs, 4, default=0.0) or 0.0,
-            "cost_breakdown": {k: sanitize_numeric(v, 4, default=0.0) or 0.0 for k, v in self.cost_breakdown.items()},
+            "cash_balance": sanitize_numeric(self.cash_balance, 2, default=None),
+            "gross_exposure": sanitize_numeric(self.gross_exposure, 2, default=None),
+            "gross_exposure_pct": sanitize_numeric(self.gross_exposure_pct, 2, default=None),
+            "net_exposure": sanitize_numeric(self.net_exposure, 2, default=None),
+            "net_exposure_pct": sanitize_numeric(self.net_exposure_pct, 2, default=None),
+            "cash_reserve_pct": sanitize_numeric(self.cash_reserve_pct, 2, default=None),
+            "total_transaction_costs": sanitize_numeric(self.total_transaction_costs, 4, default=None),
+            "cost_breakdown": {k: sanitize_numeric(v, 4, default=None) for k, v in self.cost_breakdown.items()},
             "equity_curve_points_count": len(self.equity_curve),
             "equity_curve": [p.to_dict() for p in self.equity_curve],
-            "max_drawdown_pct": sanitize_numeric(self.max_drawdown_pct, 2, default=0.0) or 0.0,
-            "max_drawdown_amount": sanitize_numeric(self.max_drawdown_amount, 2, default=0.0) or 0.0,
+            "max_drawdown_pct": sanitize_numeric(self.max_drawdown_pct, 2, default=None),
+            "max_drawdown_amount": sanitize_numeric(self.max_drawdown_amount, 2, default=None),
             "max_drawdown_duration_bars": self.max_drawdown_duration_bars,
             "risk_adjusted_metrics": sanitize_dict_for_export(self.risk_adjusted_metrics),
             "strategy_attributions": sanitize_dict_for_export(list(self.strategy_attributions)),

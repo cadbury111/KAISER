@@ -657,26 +657,26 @@ class PortfolioReportingService:
         List[Dict[str, Any]], List[Dict[str, Any]], bool,
     ]:
         """Extract core financial amounts, curve points, and attributions."""
-        initial_equity = 0.0
-        final_equity = 0.0
-        gross_pnl = 0.0
-        net_pnl = 0.0
-        gross_return_pct = 0.0
-        net_return_pct = 0.0
+        initial_equity: Optional[float] = None
+        final_equity: Optional[float] = None
+        gross_pnl: Optional[float] = None
+        net_pnl: Optional[float] = None
+        gross_return_pct: Optional[float] = None
+        net_return_pct: Optional[float] = None
         realized_pnl: Optional[float] = None
         unrealized_pnl: Optional[float] = None
-        cash_balance = 0.0
-        gross_exposure = 0.0
-        gross_exposure_pct = 0.0
-        net_exposure = 0.0
-        net_exposure_pct = 0.0
-        cash_reserve_pct = 0.0
-        total_costs = 0.0
+        cash_balance: Optional[float] = None
+        gross_exposure: Optional[float] = None
+        gross_exposure_pct: Optional[float] = None
+        net_exposure: Optional[float] = None
+        net_exposure_pct: Optional[float] = None
+        cash_reserve_pct: Optional[float] = None
+        total_costs: Optional[float] = None
         cost_breakdown: Dict[str, float] = {}
         raw_equity_points: Sequence[Any] = ()
-        max_dd_pct = 0.0
-        max_dd_amt = 0.0
-        max_dd_duration = 0
+        max_dd_pct: Optional[float] = None
+        max_dd_amt: Optional[float] = None
+        max_dd_duration: Optional[int] = None
         raw_strat_attrs: List[Dict[str, Any]] = []
         raw_inst_attrs: List[Dict[str, Any]] = []
         inst_available = False
@@ -757,18 +757,29 @@ class PortfolioReportingService:
             })
 
         elif isinstance(source, dict):
-            initial_equity = sanitize_numeric(source.get("initial_equity"), 2, default=100000.0) or 100000.0
-            final_equity = sanitize_numeric(source.get("final_equity"), 2, default=initial_equity) or initial_equity
-            gross_pnl = sanitize_numeric(source.get("gross_pnl"), 2, default=0.0) or 0.0
-            net_pnl = sanitize_numeric(source.get("net_pnl"), 2, default=final_equity - initial_equity) or 0.0
-            gross_return_pct = sanitize_numeric(source.get("gross_return_pct"), 4, default=(gross_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0) or 0.0
-            net_return_pct = sanitize_numeric(source.get("net_return_pct"), 4, default=(net_pnl / initial_equity * 100.0) if initial_equity > 0 else 0.0) or 0.0
-            total_costs = sanitize_numeric(source.get("total_transaction_costs"), 4, default=0.0) or 0.0
+            initial_equity = sanitize_numeric(source.get("initial_equity"), 2, default=None)
+            final_equity = sanitize_numeric(source.get("final_equity"), 2, default=None)
+            gross_pnl = sanitize_numeric(source.get("gross_pnl"), 2, default=None)
+            net_pnl = sanitize_numeric(source.get("net_pnl"), 2, default=None)
+            if net_pnl is None and final_equity is not None and initial_equity is not None and "net_pnl" not in source:
+                net_pnl = round(final_equity - initial_equity, 2)
+            gross_return_pct = sanitize_numeric(source.get("gross_return_pct"), 4, default=None)
+            if gross_return_pct is None and gross_pnl is not None and initial_equity is not None and initial_equity > 0 and "gross_return_pct" not in source:
+                gross_return_pct = round(gross_pnl / initial_equity * 100.0, 4)
+            net_return_pct = sanitize_numeric(source.get("net_return_pct"), 4, default=None)
+            if net_return_pct is None and net_pnl is not None and initial_equity is not None and initial_equity > 0 and "net_return_pct" not in source:
+                net_return_pct = round(net_pnl / initial_equity * 100.0, 4)
+            total_costs = sanitize_numeric(source.get("total_transaction_costs"), 4, default=None)
             cost_breakdown = dict(source.get("cost_breakdown", {}))
-            cash_balance = sanitize_numeric(source.get("cash_balance"), 2, default=final_equity) or final_equity
-            max_dd_pct = sanitize_numeric(source.get("max_drawdown_pct"), 2, default=0.0) or 0.0
-            max_dd_amt = sanitize_numeric(source.get("max_drawdown_amount"), 2, default=0.0) or 0.0
-            max_dd_duration = int(source.get("max_drawdown_duration_bars", 0))
+            cash_balance = sanitize_numeric(source.get("cash_balance"), 2, default=None)
+            gross_exposure = sanitize_numeric(source.get("gross_exposure"), 2, default=None)
+            gross_exposure_pct = sanitize_numeric(source.get("gross_exposure_pct"), 2, default=None)
+            net_exposure = sanitize_numeric(source.get("net_exposure"), 2, default=None)
+            net_exposure_pct = sanitize_numeric(source.get("net_exposure_pct"), 2, default=None)
+            cash_reserve_pct = sanitize_numeric(source.get("cash_reserve_pct"), 2, default=None)
+            max_dd_pct = sanitize_numeric(source.get("max_drawdown_pct"), 2, default=None)
+            max_dd_amt = sanitize_numeric(source.get("max_drawdown_amount"), 2, default=None)
+            max_dd_duration = int(source["max_drawdown_duration_bars"]) if source.get("max_drawdown_duration_bars") is not None else None
             raw_equity_points = source.get("equity_curve", ())
             raw_strat_attrs = list(source.get("strategy_attributions", []))
             raw_inst_attrs = list(source.get("instrument_attributions", []))
@@ -833,7 +844,7 @@ class PortfolioReportingService:
                 dd_pct = float(p.get("drawdown_pct", 0.0))
                 dd_amt = float(p.get("drawdown_amount", 0.0))
 
-            cum_ret = ((equity - initial_equity) / initial_equity * 100.0) if initial_equity > 0 else 0.0
+            cum_ret = ((equity - initial_equity) / initial_equity * 100.0) if (initial_equity is not None and initial_equity > 0) else 0.0
 
             points.append(
                 DashboardSeriesPoint(
@@ -855,34 +866,44 @@ class PortfolioReportingService:
     def _synthesize_voice_summary(
         self,
         source_id: str,
-        net_pnl: float,
-        net_return_pct: float,
-        max_dd_pct: float,
-        max_dd_amt: float,
-        max_dd_duration: int,
+        net_pnl: Optional[float],
+        net_return_pct: Optional[float],
+        max_dd_pct: Optional[float],
+        max_dd_amt: Optional[float],
+        max_dd_duration: Optional[int],
         risk_report: Optional[PortfolioRiskReport],
         data_warnings: Sequence[str],
         attr: Optional[PortfolioAttributionReport],
     ) -> VoiceSummary:
         """Formulate concise structured speech fields for voice synthesis."""
-        pnl_sign = "profit" if net_pnl >= 0 else "loss"
-        abs_pnl = abs(net_pnl)
-        sign_word = "plus" if net_return_pct >= 0 else "minus"
-        abs_ret = abs(net_return_pct)
+        if net_pnl is not None:
+            pnl_sign = "profit" if net_pnl >= 0 else "loss"
+            abs_pnl = abs(net_pnl)
+            pnl_text = f"net {pnl_sign} of ${abs_pnl:,.2f}"
+            net_pnl_speech = f"Net performance is a {pnl_sign} of {abs_pnl:,.0f} dollars"
+        else:
+            pnl_text = "an unavailable net P and L"
+            net_pnl_speech = "Net performance figure is unavailable"
 
-        headline = (
-            f"Portfolio evaluation for run {source_id} concluded with a net {pnl_sign} of "
-            f"${abs_pnl:,.2f}, representing a {sign_word} {abs_ret:.1f} percent return."
-        )
+        if net_return_pct is not None:
+            sign_word = "plus" if net_return_pct >= 0 else "minus"
+            abs_ret = abs(net_return_pct)
+            ret_text = f", representing a {sign_word} {abs_ret:.1f} percent return."
+            net_pnl_speech += f", or {net_return_pct:.2f} percent."
+        else:
+            ret_text = ", with percentage return unavailable."
+            net_pnl_speech += "."
 
-        net_pnl_speech = (
-            f"Net performance is a {pnl_sign} of {abs_pnl:,.0f} dollars, or {net_return_pct:.2f} percent."
-        )
+        headline = f"Portfolio evaluation for run {source_id} concluded with {pnl_text}{ret_text}"
 
-        drawdown_speech = (
-            f"Maximum peak-to-trough drawdown reached {max_dd_pct:.1f} percent, "
-            f"or {max_dd_amt:,.0f} dollars, over a span of {max_dd_duration} bars."
-        )
+        if max_dd_pct is not None and max_dd_amt is not None:
+            dur_str = f", over a span of {max_dd_duration} bars" if max_dd_duration is not None else ""
+            drawdown_speech = (
+                f"Maximum peak-to-trough drawdown reached {max_dd_pct:.1f} percent, "
+                f"or {max_dd_amt:,.0f} dollars{dur_str}."
+            )
+        else:
+            drawdown_speech = "Maximum drawdown metrics are unavailable for this run."
 
         if risk_report is not None:
             if risk_report.overall_state == AlertState.NORMAL:
@@ -999,26 +1020,26 @@ class PortfolioReportingService:
             provenance=provenance,
             status=status,
             data_warnings=tuple(data.get("data_warnings", ())),
-            initial_equity=float(data.get("initial_equity", 0.0)),
-            final_equity=float(data.get("final_equity", 0.0)),
-            gross_pnl=float(data.get("gross_pnl", 0.0)),
-            net_pnl=float(data.get("net_pnl", 0.0)),
-            gross_return_pct=float(data.get("gross_return_pct", 0.0)),
-            net_return_pct=float(data.get("net_return_pct", 0.0)),
-            realized_pnl=data.get("realized_pnl"),
-            unrealized_pnl=data.get("unrealized_pnl"),
-            cash_balance=float(data.get("cash_balance", 0.0)),
-            gross_exposure=float(data.get("gross_exposure", 0.0)),
-            gross_exposure_pct=float(data.get("gross_exposure_pct", 0.0)),
-            net_exposure=float(data.get("net_exposure", 0.0)),
-            net_exposure_pct=float(data.get("net_exposure_pct", 0.0)),
-            cash_reserve_pct=float(data.get("cash_reserve_pct", 0.0)),
-            total_transaction_costs=float(data.get("total_transaction_costs", 0.0)),
+            initial_equity=sanitize_numeric(data.get("initial_equity"), 2, default=None),
+            final_equity=sanitize_numeric(data.get("final_equity"), 2, default=None),
+            gross_pnl=sanitize_numeric(data.get("gross_pnl"), 2, default=None),
+            net_pnl=sanitize_numeric(data.get("net_pnl"), 2, default=None),
+            gross_return_pct=sanitize_numeric(data.get("gross_return_pct"), 4, default=None),
+            net_return_pct=sanitize_numeric(data.get("net_return_pct"), 4, default=None),
+            realized_pnl=sanitize_numeric(data.get("realized_pnl"), 2, default=None),
+            unrealized_pnl=sanitize_numeric(data.get("unrealized_pnl"), 2, default=None),
+            cash_balance=sanitize_numeric(data.get("cash_balance"), 2, default=None),
+            gross_exposure=sanitize_numeric(data.get("gross_exposure"), 2, default=None),
+            gross_exposure_pct=sanitize_numeric(data.get("gross_exposure_pct"), 2, default=None),
+            net_exposure=sanitize_numeric(data.get("net_exposure"), 2, default=None),
+            net_exposure_pct=sanitize_numeric(data.get("net_exposure_pct"), 2, default=None),
+            cash_reserve_pct=sanitize_numeric(data.get("cash_reserve_pct"), 2, default=None),
+            total_transaction_costs=sanitize_numeric(data.get("total_transaction_costs"), 4, default=None),
             cost_breakdown=dict(data.get("cost_breakdown", {})),
             equity_curve=tuple(points),
-            max_drawdown_pct=float(data.get("max_drawdown_pct", 0.0)),
-            max_drawdown_amount=float(data.get("max_drawdown_amount", 0.0)),
-            max_drawdown_duration_bars=int(data.get("max_drawdown_duration_bars", 0)),
+            max_drawdown_pct=sanitize_numeric(data.get("max_drawdown_pct"), 2, default=None),
+            max_drawdown_amount=sanitize_numeric(data.get("max_drawdown_amount"), 2, default=None),
+            max_drawdown_duration_bars=int(data["max_drawdown_duration_bars"]) if data.get("max_drawdown_duration_bars") is not None else None,
             risk_adjusted_metrics=dict(data.get("risk_adjusted_metrics", {})),
             strategy_attributions=tuple(data.get("strategy_attributions", ())),
             instrument_attributions=tuple(data.get("instrument_attributions", ())),

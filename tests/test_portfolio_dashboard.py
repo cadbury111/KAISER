@@ -15,6 +15,7 @@ Comprehensive verification of:
 12. No JUJU files are modified.
 """
 
+import concurrent.futures
 import json
 import urllib.error
 import urllib.request
@@ -32,6 +33,7 @@ from app.backtesting.portfolio_simulation.models import (
 )
 from app.core.config import Settings
 from app.core.events.bus import EventBus
+from app.core.exceptions import ConfigurationError, ValidationError
 from app.core.state.store import StateStore
 from app.orchestrator.master import MasterOrchestrator
 from app.orchestrator.models import OrchestratorRequest
@@ -507,3 +509,225 @@ def test_safety_invariants_strictly_maintained(
     # Confirm dashboard server has no broker or trade execution methods
     for forbidden in ["place_order", "cancel_order", "execute_trade", "liquidate_positions", "broker"]:
         assert not hasattr(dashboard_server, forbidden)
+
+
+# ------------------------------------------------------------------------------
+# Phase 2 Step 13: Hardening & Data Integrity Tests
+# ------------------------------------------------------------------------------
+
+def test_genuine_zero_versus_missing_metrics(
+    dashboard_server: PortfolioDashboardServer,
+    reporting_service: PortfolioReportingService,
+):
+    """Step 13: Preserve genuine 0.0 metrics while serializing missing metrics as null."""
+    # 1. Report with genuine zero values
+    zero_dict = {
+        "simulation_id": "sim_zero_01",
+        "initial_equity": 100_000.0,
+        "final_equity": 100_000.0,
+        "gross_pnl": 0.0,
+        "net_pnl": 0.0,
+        "net_return_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "cash_balance": 100_000.0,
+        "gross_exposure": 0.0,
+        "total_transaction_costs": 0.0,
+    }
+    rep_zero = reporting_service.generate_unified_report(zero_dict)
+    api_req = urllib.request.Request(f"{dashboard_server.url}/api/report/{rep_zero.report_id}")
+    with urllib.request.urlopen(api_req) as response:
+        data = json.loads(response.read().decode("utf-8"))
+        assert data["net_pnl"] == 0.0
+        assert data["gross_pnl"] == 0.0
+        assert data["net_return_pct"] == 0.0
+        assert data["max_drawdown_pct"] == 0.0
+        assert data["gross_exposure"] == 0.0
+
+    # 2. Report with explicitly missing/unavailable metrics
+    missing_dict = {
+        "simulation_id": "sim_missing_01",
+        "initial_equity": 100_000.0,
+        "final_equity": 105_000.0,
+        "gross_pnl": None,
+        "net_pnl": None,
+        "net_return_pct": None,
+        "max_drawdown_pct": None,
+        "cash_balance": None,
+        "gross_exposure": None,
+        "total_transaction_costs": None,
+    }
+    rep_missing = reporting_service.generate_unified_report(missing_dict)
+    api_req2 = urllib.request.Request(f"{dashboard_server.url}/api/report/{rep_missing.report_id}")
+    with urllib.request.urlopen(api_req2) as response:
+        data2 = json.loads(response.read().decode("utf-8"))
+        assert data2["net_pnl"] is None
+        assert data2["gross_pnl"] is None
+        assert data2["net_return_pct"] is None
+        assert data2["max_drawdown_pct"] is None
+        assert data2["cash_balance"] is None
+        assert data2["gross_exposure"] is None
+
+
+def test_security_headers_present_on_all_responses(
+    dashboard_server: PortfolioDashboardServer,
+    reporting_service: PortfolioReportingService,
+):
+    """Step 13: Verify defense-in-depth security headers on HTML and JSON endpoints."""
+    sim = _create_mock_simulation_result(simulation_id="sim_sec_01")
+    rep = reporting_service.generate_unified_report(sim)
+
+    # 1. HTML Root
+    req_html = urllib.request.Request(f"{dashboard_server.url}/")
+    with urllib.request.urlopen(req_html) as resp:
+        headers = dict(resp.headers)
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+        assert headers.get("X-Frame-Options") == "DENY"
+        assert headers.get("Referrer-Policy") == "no-referrer"
+        assert "default-src 'self'" in headers.get("Content-Security-Policy", "")
+        assert "no-store" in headers.get("Cache-Control", "")
+
+    # 2. JSON API
+    req_json = urllib.request.Request(f"{dashboard_server.url}/api/report/{rep.report_id}")
+    with urllib.request.urlopen(req_json) as resp:
+        headers = dict(resp.headers)
+        assert headers.get("X-Content-Type-Options") == "nosniff"
+        assert headers.get("X-Frame-Options") == "DENY"
+        assert headers.get("Referrer-Policy") == "no-referrer"
+        assert "application/json" in headers.get("Content-Type", "")
+
+
+def test_loopback_binding_and_invalid_host_port_rejected(
+    reporting_service: PortfolioReportingService,
+):
+    """Step 13: Disallow binding to public interfaces or out-of-range ports."""
+    # Host validation
+    for invalid_host in ["0.0.0.0", "192.168.1.100", "example.com"]:
+        with pytest.raises(ValidationError, match="Security constraint violation"):
+            PortfolioDashboardServer(reporting_service=reporting_service, host=invalid_host)
+
+    # Port validation
+    for invalid_port in [-1, 70000, 100000]:
+        with pytest.raises(ValidationError, match="Invalid port"):
+            PortfolioDashboardServer(reporting_service=reporting_service, host="127.0.0.1", port=invalid_port)
+
+    # Settings validation
+    with pytest.raises(ConfigurationError, match="Invalid DASHBOARD_HOST"):
+        Settings(dashboard_host="0.0.0.0")
+
+    with pytest.raises(ConfigurationError, match="Invalid DASHBOARD_PORT"):
+        Settings(dashboard_port=99999)
+
+
+def test_safe_http_errors_and_malformed_path_rejection(
+    dashboard_server: PortfolioDashboardServer,
+):
+    """Step 13: Malformed paths, traversal, and invalid IDs are rejected safely with 400/404."""
+    # Traversal attempts
+    try:
+        req = urllib.request.Request(f"{dashboard_server.url}/api/report/..%2f..%2fpasswd")
+        with urllib.request.urlopen(req) as resp:
+            assert False, "Expected 400 Bad Request"
+    except urllib.error.HTTPError as err:
+        assert err.code == 400
+        data = json.loads(err.read().decode("utf-8"))
+        assert "prohibited" in data["message"].lower() or "invalid" in data["message"].lower()
+
+    # Script injection in report ID
+    try:
+        req = urllib.request.Request(f"{dashboard_server.url}/api/report/<script>alert(1)</script>")
+        with urllib.request.urlopen(req) as resp:
+            assert False, "Expected 400 Bad Request"
+    except urllib.error.HTTPError as err:
+        assert err.code in (400, 404)
+
+    # Unknown route returns clean 404
+    try:
+        req = urllib.request.Request(f"{dashboard_server.url}/unrecognized_path")
+        with urllib.request.urlopen(req) as resp:
+            assert False, "Expected 404 Not Found"
+    except urllib.error.HTTPError as err:
+        assert err.code == 404
+        data = json.loads(err.read().decode("utf-8"))
+        assert data["error"] == "Not Found"
+
+
+def test_head_method_handling(
+    dashboard_server: PortfolioDashboardServer,
+):
+    """Step 13: HEAD requests return valid headers and zero-length body."""
+    # 1. Root HEAD
+    req = urllib.request.Request(f"{dashboard_server.url}/", method="HEAD")
+    with urllib.request.urlopen(req) as resp:
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "text/html; charset=utf-8"
+        assert resp.read() == b""
+
+    # 2. API HEAD
+    req2 = urllib.request.Request(f"{dashboard_server.url}/api/status", method="HEAD")
+    with urllib.request.urlopen(req2) as resp:
+        assert resp.status == 200
+        assert resp.headers.get("Content-Type") == "application/json; charset=utf-8"
+        assert resp.read() == b""
+
+
+def test_concurrent_dashboard_requests(
+    dashboard_server: PortfolioDashboardServer,
+    reporting_service: PortfolioReportingService,
+):
+    """Step 13: Multiple concurrent read-only queries execute without state corruption."""
+    sim = _create_mock_simulation_result(simulation_id="sim_concurrent_01")
+    rep = reporting_service.generate_unified_report(sim)
+
+    urls = [
+        f"{dashboard_server.url}/",
+        f"{dashboard_server.url}/api/status",
+        f"{dashboard_server.url}/api/report/latest",
+        f"{dashboard_server.url}/api/report/{rep.report_id}",
+        f"{dashboard_server.url}/api/reports?limit=10",
+        f"{dashboard_server.url}/api/series/{rep.report_id}",
+    ] * 5  # 30 concurrent requests
+
+    def fetch_url(target: str) -> int:
+        req = urllib.request.Request(target)
+        with urllib.request.urlopen(req) as resp:
+            return resp.status
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(fetch_url, u) for u in urls]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    assert len(results) == 30
+    assert all(status == 200 for status in results)
+
+
+def test_clean_startup_shutdown_repeated_cycles(
+    reporting_service: PortfolioReportingService,
+):
+    """Step 13: Starting and stopping the dashboard repeatedly does not leak threads or ports."""
+    server = PortfolioDashboardServer(
+        reporting_service=reporting_service,
+        host="127.0.0.1",
+        port=0,
+    )
+
+    for _ in range(3):
+        assert not server.is_running
+        server.start(blocking=False)
+        assert server.is_running
+        # Simple health check
+        req = urllib.request.Request(f"{server.url}/api/status")
+        with urllib.request.urlopen(req) as resp:
+            assert resp.status == 200
+        server.stop()
+        assert not server.is_running
+
+
+def test_html_escaping_in_dashboard_template():
+    """Step 13: Dashboard template embeds escapeHtml and applies it to dynamic data."""
+    html = get_dashboard_html()
+    assert "function escapeHtml" in html
+    assert "function isNumeric" in html
+    assert "escapeHtml(s.strategy_name" in html
+    assert "escapeHtml(a.message" in html
+    assert "data-report-id" in html
+

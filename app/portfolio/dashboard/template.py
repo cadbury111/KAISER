@@ -800,11 +800,46 @@ def get_dashboard_html() -> str:
       const provVersion = document.getElementById('provVersion');
       const provWarnings = document.getElementById('provWarnings');
 
+      // Utilities: Number check & HTML escaping
+      function isNumeric(val) {
+        return val !== null && val !== undefined && typeof val === 'number' && !isNaN(val) && isFinite(val);
+      }
+
+      function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function fmtCurrency(val) {
+        if (!isNumeric(val)) return 'N/A';
+        const sign = val < 0 ? '-' : '';
+        return `${sign}$${Math.abs(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      }
+
+      function fmtPercent(val, showPlus = true) {
+        if (!isNumeric(val)) return 'N/A';
+        const sign = (showPlus && val > 0) ? '+' : '';
+        return `${sign}${val.toFixed(2)}%`;
+      }
+
       // Initialize
       window.addEventListener('DOMContentLoaded', () => {
         loadReportList();
         btnRefresh.addEventListener('click', () => loadReport(reportSelect.value || 'latest'));
         reportSelect.addEventListener('change', () => loadReport(reportSelect.value));
+
+        // Delegated click handler for comparison table links
+        comparisonTableBody.addEventListener('click', (evt) => {
+          const link = evt.target.closest('.report-link');
+          if (link && link.dataset.reportId) {
+            loadReport(link.dataset.reportId);
+          }
+        });
       });
 
       // Fetch historical list
@@ -825,8 +860,9 @@ def get_dashboard_html() -> str:
           historicalSummaries.forEach((rep, idx) => {
             const opt = document.createElement('option');
             opt.value = rep.report_id;
-            const sign = rep.net_pnl >= 0 ? '+' : '';
-            opt.textContent = `${rep.title || rep.report_id} (${sign}$${rep.net_pnl.toFixed(0)})`;
+            const sign = (isNumeric(rep.net_pnl) && rep.net_pnl >= 0) ? '+' : '';
+            const pnlStr = isNumeric(rep.net_pnl) ? `${sign}$${rep.net_pnl.toFixed(0)}` : 'N/A';
+            opt.textContent = `${rep.title || rep.report_id} (${pnlStr})`;
             if (idx === 0) opt.selected = true;
             reportSelect.appendChild(opt);
           });
@@ -876,13 +912,6 @@ def get_dashboard_html() -> str:
         contentContainer.style.display = show ? 'none' : 'grid';
       }
 
-      // Format currency
-      function fmtCurrency(val) {
-        if (val === null || val === undefined || isNaN(val)) return 'N/A';
-        const sign = val < 0 ? '-' : '';
-        return `${sign}$${Math.abs(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      }
-
       // Render Dashboard Data
       function renderDashboard(r) {
         // Status Badge
@@ -896,27 +925,51 @@ def get_dashboard_html() -> str:
           voiceText.textContent = r.summary_text || 'No speech script available.';
         }
 
-        // Overview Cards
-        const netPnl = r.net_pnl || 0;
-        valNetPnL.textContent = fmtCurrency(netPnl);
-        valNetPnL.className = `metric-value ${netPnl > 0 ? 'val-positive' : (netPnl < 0 ? 'val-negative' : 'val-neutral')}`;
+        // Overview Cards: Net PnL
+        if (isNumeric(r.net_pnl)) {
+          valNetPnL.textContent = fmtCurrency(r.net_pnl);
+          valNetPnL.className = `metric-value ${r.net_pnl > 0 ? 'val-positive' : (r.net_pnl < 0 ? 'val-negative' : 'val-neutral')}`;
+        } else {
+          valNetPnL.textContent = 'N/A';
+          valNetPnL.className = 'metric-value val-na';
+        }
 
-        const retPct = r.net_return_pct || 0;
-        badgeReturnPct.textContent = `${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%`;
-        badgeReturnPct.className = `metric-badge ${retPct >= 0 ? 'badge-pos' : 'badge-neg'}`;
+        if (isNumeric(r.net_return_pct)) {
+          badgeReturnPct.textContent = fmtPercent(r.net_return_pct, true);
+          badgeReturnPct.className = `metric-badge ${r.net_return_pct >= 0 ? 'badge-pos' : 'badge-neg'}`;
+        } else {
+          badgeReturnPct.textContent = 'N/A';
+          badgeReturnPct.className = 'metric-badge badge-neu';
+        }
 
-        footNetPnL.textContent = `Gross: ${fmtCurrency(r.gross_pnl)} • Costs: ${fmtCurrency(r.total_transaction_costs)}`;
+        const grossStr = isNumeric(r.gross_pnl) ? fmtCurrency(r.gross_pnl) : 'N/A';
+        const costStr = isNumeric(r.total_transaction_costs) ? fmtCurrency(r.total_transaction_costs) : 'N/A';
+        footNetPnL.textContent = `Gross: ${grossStr} • Costs: ${costStr}`;
 
         // Max DD
-        const ddPct = r.max_drawdown_pct || 0;
-        valMaxDDPct.textContent = `${ddPct.toFixed(2)}%`;
-        valMaxDDAmt.textContent = `-${fmtCurrency(r.max_drawdown_amount)}`;
-        footMaxDD.textContent = `Peak-to-trough: ${r.max_drawdown_duration_bars || 0} bars duration`;
+        if (isNumeric(r.max_drawdown_pct)) {
+          valMaxDDPct.textContent = `${r.max_drawdown_pct.toFixed(2)}%`;
+          valMaxDDPct.className = `metric-value ${r.max_drawdown_pct > 0 ? 'val-negative' : 'val-neutral'}`;
+        } else {
+          valMaxDDPct.textContent = 'N/A';
+          valMaxDDPct.className = 'metric-value val-na';
+        }
+
+        if (isNumeric(r.max_drawdown_amount)) {
+          valMaxDDAmt.textContent = `-${fmtCurrency(r.max_drawdown_amount)}`;
+        } else {
+          valMaxDDAmt.textContent = 'N/A';
+        }
+
+        const durStr = (r.max_drawdown_duration_bars !== null && r.max_drawdown_duration_bars !== undefined)
+          ? `${r.max_drawdown_duration_bars} bars duration`
+          : 'Duration N/A';
+        footMaxDD.textContent = `Peak-to-trough: ${durStr}`;
 
         // Sharpe / Sortino
         const rMetrics = r.risk_adjusted_metrics || {};
         const sh = rMetrics.sharpe_ratio;
-        if (sh && sh.is_available && sh.value !== null) {
+        if (sh && sh.is_available && isNumeric(sh.value)) {
           valSharpe.textContent = sh.value.toFixed(2);
           valSharpe.className = 'metric-value val-neutral';
           footSharpe.textContent = 'Annualized excess return';
@@ -927,35 +980,58 @@ def get_dashboard_html() -> str:
         }
 
         const so = rMetrics.sortino_ratio;
-        if (so && so.is_available && so.value !== null) {
+        if (so && so.is_available && isNumeric(so.value)) {
           badgeSortino.textContent = `Sortino: ${so.value.toFixed(2)}`;
         } else {
           badgeSortino.textContent = 'Sortino: N/A';
         }
 
         // Cash & Exposure
-        valCashReserve.textContent = `${(r.cash_reserve_pct || 100).toFixed(1)}%`;
-        badgeGrossExp.textContent = `Exp: ${(r.gross_exposure_pct || 0).toFixed(1)}%`;
-        footCash.textContent = `Cash: ${fmtCurrency(r.cash_balance)} • Gross Exp: ${fmtCurrency(r.gross_exposure)}`;
+        if (isNumeric(r.cash_reserve_pct)) {
+          valCashReserve.textContent = `${r.cash_reserve_pct.toFixed(1)}%`;
+          valCashReserve.className = 'metric-value val-neutral';
+        } else {
+          valCashReserve.textContent = 'N/A';
+          valCashReserve.className = 'metric-value val-na';
+        }
+
+        if (isNumeric(r.gross_exposure_pct)) {
+          badgeGrossExp.textContent = `Exp: ${r.gross_exposure_pct.toFixed(1)}%`;
+        } else {
+          badgeGrossExp.textContent = 'Exp: N/A';
+        }
+
+        const cashStr = isNumeric(r.cash_balance) ? fmtCurrency(r.cash_balance) : 'N/A';
+        const expStr = isNumeric(r.gross_exposure) ? fmtCurrency(r.gross_exposure) : 'N/A';
+        footCash.textContent = `Cash: ${cashStr} • Gross Exp: ${expStr}`;
 
         // Strategies & Trades
-        const strats = r.strategy_attributions || [];
+        const strats = Array.isArray(r.strategy_attributions) ? r.strategy_attributions : [];
         valStrategies.textContent = strats.length.toString();
         let totalTrades = 0;
-        let winRate = 0;
-        strats.forEach(s => { totalTrades += (s.trades_count || 0); });
-        if (rMetrics.win_rate && rMetrics.win_rate.is_available && rMetrics.win_rate.value !== null) {
-          winRate = rMetrics.win_rate.value;
+        let hasTrades = false;
+        strats.forEach(s => {
+          const tc = s.trades_count !== undefined ? s.trades_count : s.total_trades;
+          if (isNumeric(tc)) {
+            totalTrades += tc;
+            hasTrades = true;
+          }
+        });
+
+        if (rMetrics.win_rate && rMetrics.win_rate.is_available && isNumeric(rMetrics.win_rate.value)) {
+          badgeWinRate.textContent = `WinRate: ${rMetrics.win_rate.value.toFixed(1)}%`;
+        } else {
+          badgeWinRate.textContent = 'WinRate: N/A';
         }
-        badgeWinRate.textContent = `WinRate: ${winRate.toFixed(1)}%`;
-        footTrades.textContent = `${totalTrades} total closed round-trip trades`;
+        footTrades.textContent = hasTrades ? `${totalTrades} total closed round-trip trades` : 'Trades count N/A';
 
         // Reconciliation
         if (r.reconciliation) {
           const rec = r.reconciliation;
           valReconStatus.textContent = rec.status || 'EXACT';
           valReconStatus.className = `metric-value ${rec.is_reconciled ? 'val-positive' : 'val-negative'}`;
-          footRecon.textContent = rec.is_reconciled ? 'Reconciled within tolerance' : `Discrepancy: $${(rec.strategy_discrepancy || 0).toFixed(2)}`;
+          const discStr = isNumeric(rec.strategy_discrepancy) ? `$${rec.strategy_discrepancy.toFixed(2)}` : 'N/A';
+          footRecon.textContent = rec.is_reconciled ? 'Reconciled within tolerance' : `Discrepancy: ${discStr}`;
         } else {
           valReconStatus.textContent = 'N/A';
           valReconStatus.className = 'metric-value val-na';
@@ -963,7 +1039,8 @@ def get_dashboard_html() -> str:
         }
 
         // Render Charts
-        renderEquityChart(r.equity_curve || [], r.initial_equity || 100000);
+        const initEq = isNumeric(r.initial_equity) ? r.initial_equity : 100000;
+        renderEquityChart(r.equity_curve || [], initEq);
         renderDrawdownChart(r.equity_curve || []);
 
         // Render Strategies
@@ -979,7 +1056,7 @@ def get_dashboard_html() -> str:
         provVersion.textContent = `${prov.engine_version || '1.0.0'} (${prov.git_commit || 'master'})`;
         const warns = r.data_warnings || [];
         if (warns.length > 0) {
-          provWarnings.innerHTML = `<span style="color: var(--accent-amber);">⚠️ ${warns.length} Warnings:</span> ${warns.join('; ')}`;
+          provWarnings.innerHTML = `<span style="color: var(--accent-amber);">⚠️ ${warns.length} Warnings:</span> ${warns.map(w => escapeHtml(w)).join('; ')}`;
         } else {
           provWarnings.textContent = '✓ No accounting, freshness, or integrity warnings.';
         }
@@ -987,7 +1064,10 @@ def get_dashboard_html() -> str:
 
       // Render Equity SVG Chart
       function renderEquityChart(points, initialEquity) {
-        metaEquity.textContent = `Initial: ${fmtCurrency(initialEquity)} → Final: ${fmtCurrency(points.length ? points[points.length - 1].total_equity : initialEquity)}`;
+        const finalVal = (points.length && isNumeric(points[points.length - 1].total_equity))
+          ? points[points.length - 1].total_equity
+          : initialEquity;
+        metaEquity.textContent = `Initial: ${fmtCurrency(initialEquity)} → Final: ${fmtCurrency(finalVal)}`;
         equitySvg.innerHTML = '';
 
         if (!points || points.length === 0) {
@@ -1004,16 +1084,17 @@ def get_dashboard_html() -> str:
         const padX = 60;
         const padY = 30;
 
-        const equities = points.map(p => p.total_equity);
-        let minEq = Math.min(...equities, initialEquity);
-        let maxEq = Math.max(...equities, initialEquity);
+        const validEquities = points.map(p => isNumeric(p.total_equity) ? p.total_equity : initialEquity);
+        let minEq = Math.min(...validEquities, initialEquity);
+        let maxEq = Math.max(...validEquities, initialEquity);
         if (minEq === maxEq) { minEq *= 0.95; maxEq *= 1.05; }
         const range = maxEq - minEq || 1;
 
         // Coordinates
         const coords = points.map((p, idx) => {
+          const eqVal = isNumeric(p.total_equity) ? p.total_equity : initialEquity;
           const x = padX + (idx / (points.length - 1 || 1)) * (width - 2 * padX);
-          const y = height - padY - ((p.total_equity - minEq) / range) * (height - 2 * padY);
+          const y = height - padY - ((eqVal - minEq) / range) * (height - 2 * padY);
           return { x, y, pt: p };
         });
 
@@ -1067,13 +1148,14 @@ def get_dashboard_html() -> str:
         const padX = 50;
         const padY = 30;
 
-        const dds = points.map(p => p.drawdown_pct || 0);
+        const dds = points.map(p => isNumeric(p.drawdown_pct) ? p.drawdown_pct : 0.0);
         const maxDd = Math.max(...dds, 5.0);
         metaDrawdown.textContent = `Peak Drawdown: ${Math.max(...dds).toFixed(2)}%`;
 
         const coords = points.map((p, idx) => {
+          const ddVal = isNumeric(p.drawdown_pct) ? p.drawdown_pct : 0.0;
           const x = padX + (idx / (points.length - 1 || 1)) * (width - 2 * padX);
-          const y = padY + ((p.drawdown_pct || 0) / maxDd) * (height - 2 * padY);
+          const y = padY + (ddVal / maxDd) * (height - 2 * padY);
           return { x, y, pt: p };
         });
 
@@ -1112,18 +1194,25 @@ def get_dashboard_html() -> str:
 
         strategies.forEach(s => {
           const row = document.createElement('tr');
-          const netSign = (s.net_pnl || 0) >= 0 ? '+' : '';
-          const pnlColor = (s.net_pnl || 0) >= 0 ? 'val-positive' : 'val-negative';
+          const netSign = (isNumeric(s.net_pnl) && s.net_pnl > 0) ? '+' : '';
+          const pnlColor = isNumeric(s.net_pnl) ? (s.net_pnl > 0 ? 'val-positive' : (s.net_pnl < 0 ? 'val-negative' : 'val-neutral')) : 'val-na';
+          const pnlStr = isNumeric(s.net_pnl) ? fmtCurrency(s.net_pnl) : 'N/A';
+          const grossStr = isNumeric(s.gross_pnl) ? fmtCurrency(s.gross_pnl) : 'N/A';
+          const weightStr = isNumeric(s.weight_pct) ? `${s.weight_pct.toFixed(1)}%` : (isNumeric(s.weight) ? `${(s.weight * 100).toFixed(1)}%` : 'N/A');
+          const shareStr = isNumeric(s.portfolio_pnl_share_pct) ? `${s.portfolio_pnl_share_pct.toFixed(1)}%` : 'N/A';
+          const tc = s.trades_count !== undefined ? s.trades_count : s.total_trades;
+          const tradesStr = isNumeric(tc) ? tc.toString() : 'N/A';
+          const winRateStr = isNumeric(s.win_rate) ? `${s.win_rate.toFixed(1)}%` : 'N/A';
 
           row.innerHTML = `
-            <td style="font-weight: 600;">${s.strategy_name || s.strategy_id || '-'}</td>
-            <td><code>${s.symbol || '-'}</code></td>
-            <td>${(s.weight_pct !== undefined ? s.weight_pct.toFixed(1) : ((s.weight || 0) * 100).toFixed(1))}%</td>
-            <td>${fmtCurrency(s.gross_pnl)}</td>
-            <td class="${pnlColor}">${fmtCurrency(s.net_pnl)}</td>
-            <td>${(s.portfolio_pnl_share_pct || 0).toFixed(1)}%</td>
-            <td>${s.trades_count || s.total_trades || 0}</td>
-            <td>${(s.win_rate || 0).toFixed(1)}%</td>
+            <td style="font-weight: 600;">${escapeHtml(s.strategy_name || s.strategy_id || '-')}</td>
+            <td><code>${escapeHtml(s.symbol || '-')}</code></td>
+            <td>${weightStr}</td>
+            <td>${grossStr}</td>
+            <td class="${pnlColor}">${netSign}${pnlStr}</td>
+            <td>${shareStr}</td>
+            <td>${tradesStr}</td>
+            <td>${winRateStr}</td>
           `;
           strategyTableBody.appendChild(row);
         });
@@ -1160,15 +1249,15 @@ def get_dashboard_html() -> str:
 
         alerts.forEach(a => {
           const div = document.createElement('div');
-          const sev = (a.severity || 'WARNING').toLowerCase();
+          const sev = escapeHtml((a.severity || 'WARNING').toLowerCase());
           div.className = `alert-item ${sev === 'critical' ? 'crit' : (sev === 'warning' ? 'warn' : 'info')}`;
           div.innerHTML = `
             <div>
-              <div class="alert-headline">${a.message || `${a.rule_id} Breached`}</div>
-              <div class="alert-meta">Target: <code>${a.target || 'portfolio'}</code> • Observed: <strong>${a.observed_value} ${a.unit || ''}</strong> (Threshold: ${a.threshold_value} ${a.unit || ''})</div>
+              <div class="alert-headline">${escapeHtml(a.message || `${a.rule_id} Breached`)}</div>
+              <div class="alert-meta">Target: <code>${escapeHtml(a.target || 'portfolio')}</code> • Observed: <strong>${escapeHtml(String(a.observed_value))} ${escapeHtml(a.unit || '')}</strong> (Threshold: ${escapeHtml(String(a.threshold_value))} ${escapeHtml(a.unit || '')})</div>
             </div>
             <div>
-              <span class="badge ${sev === 'critical' ? 'badge-unavailable' : 'badge-stale'}">${a.severity}</span>
+              <span class="badge ${sev === 'critical' ? 'badge-unavailable' : 'badge-stale'}">${escapeHtml(a.severity || 'WARNING')}</span>
             </div>
           `;
           alertsContainer.appendChild(div);
@@ -1185,25 +1274,31 @@ def get_dashboard_html() -> str:
 
         summaries.slice(0, 8).forEach(s => {
           const row = document.createElement('tr');
-          const retSign = (s.net_return_pct || 0) >= 0 ? '+' : '';
-          const pnlColor = (s.net_pnl || 0) >= 0 ? 'val-positive' : 'val-negative';
+          const retSign = (isNumeric(s.net_return_pct) && s.net_return_pct > 0) ? '+' : '';
+          const pnlColor = isNumeric(s.net_pnl) ? (s.net_pnl > 0 ? 'val-positive' : (s.net_pnl < 0 ? 'val-negative' : 'val-neutral')) : 'val-na';
+          const pnlStr = isNumeric(s.net_pnl) ? fmtCurrency(s.net_pnl) : 'N/A';
+          const retStr = isNumeric(s.net_return_pct) ? `${retSign}${s.net_return_pct.toFixed(2)}%` : 'N/A';
+          const maxDdStr = isNumeric(s.max_drawdown_pct) ? `-${s.max_drawdown_pct.toFixed(2)}%` : 'N/A';
+          const sharpeStr = isNumeric(s.sharpe_ratio) ? s.sharpe_ratio.toFixed(2) : 'N/A';
 
           row.innerHTML = `
-            <td style="font-family: monospace; font-weight: 600;"><a href="javascript:void(0)" onclick="loadReport('${s.report_id}')" style="color: var(--accent-cyan); text-decoration: none;">${s.report_id}</a></td>
-            <td><span class="badge badge-neu">${s.source_type}</span></td>
+            <td style="font-family: monospace; font-weight: 600;">
+              <a href="javascript:void(0)" class="report-link" data-report-id="${escapeHtml(s.report_id)}" style="color: var(--accent-cyan); text-decoration: none;">${escapeHtml(s.report_id)}</a>
+            </td>
+            <td><span class="badge badge-neu">${escapeHtml(s.source_type)}</span></td>
             <td>${fmtCurrency(s.initial_equity)}</td>
             <td>${fmtCurrency(s.final_equity)}</td>
-            <td class="${pnlColor}">${fmtCurrency(s.net_pnl)}</td>
-            <td class="${pnlColor}">${retSign}${(s.net_return_pct || 0).toFixed(2)}%</td>
-            <td class="val-negative">-${(s.max_drawdown_pct || 0).toFixed(2)}%</td>
-            <td>${s.sharpe_ratio !== null && s.sharpe_ratio !== undefined ? s.sharpe_ratio.toFixed(2) : 'N/A'}</td>
-            <td><span class="badge badge-${(s.status || 'valid').toLowerCase()}">${s.risk_state || 'NORMAL'}</span></td>
+            <td class="${pnlColor}">${pnlStr}</td>
+            <td class="${pnlColor}">${retStr}</td>
+            <td class="val-negative">${maxDdStr}</td>
+            <td>${sharpeStr}</td>
+            <td><span class="badge badge-${escapeHtml((s.status || 'valid').toLowerCase())}">${escapeHtml(s.risk_state || 'NORMAL')}</span></td>
           `;
           comparisonTableBody.appendChild(row);
         });
       }
 
-      // Expose to window for inline onclick
+      // Expose to window for external invocation
       window.loadReport = loadReport;
 
     })();

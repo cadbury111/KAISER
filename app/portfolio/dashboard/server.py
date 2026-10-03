@@ -8,12 +8,14 @@ SAFETY & RESEARCH INVARIANTS:
 2. Strictly read-only: all POST, PUT, DELETE, and PATCH methods are rejected with HTTP 405.
 3. Binds strictly to local interfaces (default: 127.0.0.1), preventing external network exposure.
 4. Preserves Settings.execution_locked = True; zero trading, order, or broker paths exist.
+5. Strict path validation and defense-in-depth security headers.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,17 +29,57 @@ from app.portfolio.reporting import PortfolioReportingService
 
 logger = logging.getLogger("kaiser.portfolio.dashboard")
 
+ALLOWED_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+MAX_URI_LENGTH = 2048
+
 
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
     """Read-only HTTP request handler for the Portfolio Analytics Command Center."""
 
     server: ThreadingHTTPServer  # Attached server instance
 
+    def do_HEAD(self) -> None:
+        """Handle read-only HEAD requests safely without sending body."""
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
+        if path in ("/", "/index.html"):
+            html = get_dashboard_html()
+            encoded = html.encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self._add_security_headers()
+            self.end_headers()
+        else:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self._add_security_headers()
+            self.end_headers()
+
     def do_GET(self) -> None:
         """Handle incoming read-only GET requests."""
+        if len(self.path) > MAX_URI_LENGTH:
+            self._send_json_response(
+                {
+                    "error": "URI Too Long",
+                    "message": f"Request URI exceeds maximum allowable limit of {MAX_URI_LENGTH} characters.",
+                },
+                status=HTTPStatus.REQUEST_URI_TOO_LONG,
+            )
+            return
+
         parsed_url = urlparse(self.path)
         path = parsed_url.path
         query = parse_qs(parsed_url.query)
+
+        # Path traversal and injection checks
+        if "\x00" in self.path or "/../" in path or path.endswith("/..") or "\\.." in path:
+            self._send_json_response(
+                {"error": "Bad Request", "message": "Invalid request path containing prohibited traversal sequences."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
 
         service: PortfolioReportingService = getattr(self.server, "reporting_service", None)
         if service is None:
@@ -72,8 +114,14 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             # 3. Report by ID Endpoint (/api/report/<report_id>)
             if path.startswith("/api/report/"):
                 report_id = path.split("/api/report/", 1)[1].strip()
-                if not report_id:
-                    self._send_json_response({"error": "Missing report_id"}, status=HTTPStatus.BAD_REQUEST)
+                if not report_id or not SAFE_ID_PATTERN.match(report_id):
+                    self._send_json_response(
+                        {
+                            "error": "Bad Request",
+                            "message": "Invalid report_id format. Must contain only alphanumeric characters, dashes, underscores, and dots.",
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
                     return
                 report = service.get_report_by_id(report_id) or service.get_report_by_run_id(report_id)
                 if report is None:
@@ -105,6 +153,15 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             # 5. Timeline Series Endpoint (/api/series/<report_id>)
             if path.startswith("/api/series/"):
                 report_id = path.split("/api/series/", 1)[1].strip()
+                if not report_id or not SAFE_ID_PATTERN.match(report_id):
+                    self._send_json_response(
+                        {
+                            "error": "Bad Request",
+                            "message": "Invalid report_id format for series.",
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
                 limit_str = query.get("limit", [None])[0]
                 limit_val = int(limit_str) if limit_str is not None else None
                 offset_val = int(query.get("offset", ["0"])[0])
@@ -129,6 +186,13 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                         status=HTTPStatus.BAD_REQUEST,
                     )
                     return
+                for rid in run_ids:
+                    if not SAFE_ID_PATTERN.match(rid):
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": f"Invalid run ID format: '{rid}'."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
                 comp = service.compare_simulation_runs(run_ids)
                 self._send_json_response({"status": "success", "comparison": comp.to_dict()})
                 return
@@ -177,14 +241,34 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self._send_method_not_allowed()
 
     def _send_method_not_allowed(self) -> None:
-        """Helper to return read-only 405 status."""
-        self._send_json_response(
+        """Helper to return read-only 405 status with Allow header."""
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+        self.send_header("Allow", "GET, HEAD")
+        clean_data = sanitize_dict_for_export(
             {
                 "error": "Method Not Allowed",
                 "message": "The KAISER Portfolio Analytics Dashboard is strictly read-only. Modification operations are prohibited.",
-            },
-            status=HTTPStatus.METHOD_NOT_ALLOWED,
+            }
         )
+        encoded = json.dumps(clean_data, indent=2).encode("utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self._add_security_headers()
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _add_security_headers(self) -> None:
+        """Inject defense-in-depth security headers into all HTTP responses."""
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        )
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, private")
+        self.send_header("Pragma", "no-cache")
 
     def _send_html_response(self, html_content: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         """Send an HTML HTTP response with security headers."""
@@ -192,9 +276,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self._add_security_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -205,9 +287,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self._add_security_headers()
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -229,11 +309,22 @@ class PortfolioDashboardServer:
 
         Args:
             reporting_service: PortfolioReportingService instance providing data.
-            host: Network interface host to bind to (strictly 127.0.0.1 by default).
+            host: Network interface host to bind to (strictly loopback by default).
             port: Port number to bind to (0 for dynamic free port).
         """
+        clean_host = (host or "").strip().lower()
+        if clean_host not in ALLOWED_LOOPBACK_HOSTS:
+            raise ValidationError(
+                f"Security constraint violation: The Portfolio Analytics Dashboard must bind strictly "
+                f"to loopback interfaces ({', '.join(sorted(ALLOWED_LOOPBACK_HOSTS))}). "
+                f"Host '{host}' is prohibited."
+            )
+
+        if not isinstance(port, int) or port < 0 or port > 65535:
+            raise ValidationError(f"Invalid port: {port}. Port must be an integer between 0 and 65535.")
+
         self.reporting_service = reporting_service
-        self.host = host
+        self.host = clean_host
         self.port = port
 
         self._server: Optional[ThreadingHTTPServer] = None
@@ -262,6 +353,9 @@ class PortfolioDashboardServer:
 
         # Bind server to host and port
         self._server = ThreadingHTTPServer((self.host, self.port), DashboardHTTPRequestHandler)
+        self._server.daemon_threads = True
+        self._server.allow_reuse_address = True
+
         # Attach reporting service to server instance for handler access
         setattr(self._server, "reporting_service", self.reporting_service)
 
@@ -287,13 +381,20 @@ class PortfolioDashboardServer:
 
     def stop(self) -> None:
         """Stop the dashboard HTTP server cleanly."""
-        if not self.is_running or self._server is None:
+        if not self._is_running and self._server is None:
             return
 
         logger.info("Stopping Portfolio Analytics Dashboard server...")
         self._is_running = False
-        self._server.shutdown()
-        self._server.server_close()
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+            except Exception as exc:
+                logger.debug("Server shutdown exception (ignored): %s", exc)
+            try:
+                self._server.server_close()
+            except Exception as exc:
+                logger.debug("Server close exception (ignored): %s", exc)
 
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=3.0)
