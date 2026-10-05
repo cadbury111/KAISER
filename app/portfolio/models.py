@@ -332,6 +332,7 @@ class PortfolioAttributionReport:
         "and evaluate hypothetical historical simulations. They do NOT guarantee future profitability, "
         "protect against drawdown, or predict live execution outcomes."
     )
+    run_id: Optional[str] = None
 
     @property
     def summary_text(self) -> str:
@@ -386,6 +387,7 @@ class PortfolioAttributionReport:
             "reconciliation": self.reconciliation.to_dict() if self.reconciliation else None,
             "summary_text": self.summary_text,
             "disclaimer": self.disclaimer,
+            "run_id": self.run_id,
         }
 
 

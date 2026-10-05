@@ -73,6 +73,7 @@ class PortfolioSimulationEngine:
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
         provenance_tracker: Optional[Any] = None,
+        run_registry: Optional[Any] = None,
         name: str = "portfolio_simulation_engine",
     ) -> None:
         self.repository = repository
@@ -82,6 +83,7 @@ class PortfolioSimulationEngine:
         self.event_bus = event_bus
         self.state_store = state_store
         self.provenance_tracker = provenance_tracker
+        self.run_registry = run_registry
         self.name = name
 
         self._active_simulations: Dict[str, threading.Event] = {}
@@ -112,12 +114,40 @@ class PortfolioSimulationEngine:
         with self._lock:
             self._active_simulations[sim_id] = stop_event
 
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                symbols = list(config.symbols) if hasattr(config, "symbols") and config.symbols else [alloc.symbol for alloc in config.allocations]
+                parent_ids = []
+                if getattr(self, "provenance_tracker", None) is not None:
+                    for s in symbols:
+                        p = self.provenance_tracker.get_latest(s, getattr(config, "timeframe", "1m"))
+                        if p:
+                            parent_ids.append(p.provenance_id)
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.PORTFOLIO_SIMULATION,
+                    configuration=config,
+                    input_provenance_ids=parent_ids,
+                    symbol_universe=tuple(symbols),
+                    timeframe_universe=(getattr(config, "timeframe", "1m"),),
+                    data_start=config.start_time,
+                    data_end=config.end_time,
+                    execution_metadata={"simulation_id": sim_id},
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize analysis run for portfolio simulation [%s]: %s", sim_id, exc)
+                analysis_run = None
+
         if stop_event.is_set():
             return self._build_terminal_result(
                 config=config,
                 status=PortfolioSimulationStatus.CANCELLED,
                 error_message="Simulation cancelled before execution started.",
                 duration_ms=0.0,
+                analysis_run_id=analysis_run.run_id if analysis_run else None,
             )
 
         # 2. State Isolation & Reset
@@ -143,6 +173,7 @@ class PortfolioSimulationEngine:
                     status=PortfolioSimulationStatus.FAILED,
                     error_message=msg,
                     duration_ms=(time.perf_counter() - start_time_perf) * 1000.0,
+                    analysis_run_id=analysis_run.run_id if analysis_run else None,
                 )
 
         # 4. Publish Started Event
@@ -184,6 +215,7 @@ class PortfolioSimulationEngine:
                     status=PortfolioSimulationStatus.FAILED,
                     error_message=msg,
                     duration_ms=(time.perf_counter() - start_time_perf) * 1000.0,
+                    analysis_run_id=analysis_run.run_id if analysis_run else None,
                 )
 
         # Check that we have bars
@@ -194,6 +226,7 @@ class PortfolioSimulationEngine:
                 status=PortfolioSimulationStatus.FAILED,
                 error_message="No historical bars found within requested date range.",
                 duration_ms=(time.perf_counter() - start_time_perf) * 1000.0,
+                analysis_run_id=analysis_run.run_id if analysis_run else None,
             )
 
         # 6. Quality Filter & Build Chronological Timeline
@@ -247,6 +280,7 @@ class PortfolioSimulationEngine:
                 status=PortfolioSimulationStatus.FAILED,
                 error_message="All historical bars were quarantined or invalid.",
                 duration_ms=(time.perf_counter() - start_time_perf) * 1000.0,
+                analysis_run_id=analysis_run.run_id if analysis_run else None,
             )
 
         # 7. Initialize Central Portfolio State
@@ -856,6 +890,7 @@ class PortfolioSimulationEngine:
             cid=cid,
             liquidate_remaining=True,
             last_known_prices=last_known_prices,
+            analysis_run_id=analysis_run.run_id if analysis_run else None,
         )
 
     def _finalize_simulation(
@@ -890,6 +925,7 @@ class PortfolioSimulationEngine:
         cid: str,
         liquidate_remaining: bool = True,
         last_known_prices: Optional[Dict[str, float]] = None,
+        analysis_run_id: Optional[str] = None,
     ) -> PortfolioSimulationResult:
         """Close open positions, assemble strategy contributions, compute metrics, and publish events."""
         final_cash = cash
@@ -1056,6 +1092,7 @@ class PortfolioSimulationEngine:
             start_timestamp=start_ts,
             end_timestamp=end_ts,
             duration_ms=duration_ms,
+            run_id=analysis_run_id,
         )
 
         # Cleanup active simulation registry
@@ -1098,6 +1135,29 @@ class PortfolioSimulationEngine:
             except Exception as e:
                 logger.warning("Failed to store portfolio simulation in state store: %s", e)
 
+        # Finalize Analysis Run in Registry
+        if getattr(self, "run_registry", None) is not None and getattr(result, "run_id", None):
+            try:
+                if status == PortfolioSimulationStatus.SUCCESS:
+                    self.run_registry.complete_run(
+                        run_id=result.run_id,
+                        result_id=result.simulation_id,
+                        result_type="PortfolioSimulationResult",
+                    )
+                elif status == PortfolioSimulationStatus.CANCELLED:
+                    self.run_registry.cancel_run(
+                        run_id=result.run_id,
+                        cancellation_reason="Simulation cancelled by operator or token",
+                    )
+                else:
+                    self.run_registry.fail_run(
+                        run_id=result.run_id,
+                        error_category="PORTFOLIO_SIMULATION_ERROR",
+                        error_message=result.error_message or "Portfolio simulation failure",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finalize analysis run in portfolio simulation: %s", exc)
+
         # Publish Completion / Cancellation Event
         if self.event_bus:
             ev_type = (
@@ -1136,10 +1196,27 @@ class PortfolioSimulationEngine:
         status: PortfolioSimulationStatus,
         error_message: str,
         duration_ms: float,
+        analysis_run_id: Optional[str] = None,
     ) -> PortfolioSimulationResult:
         """Construct an immediate terminal failed or cancelled result."""
         with self._lock:
             self._active_simulations.pop(config.simulation_id, None)
+
+        if getattr(self, "run_registry", None) is not None and analysis_run_id:
+            try:
+                if status == PortfolioSimulationStatus.CANCELLED:
+                    self.run_registry.cancel_run(
+                        run_id=analysis_run_id,
+                        cancellation_reason=error_message,
+                    )
+                else:
+                    self.run_registry.fail_run(
+                        run_id=analysis_run_id,
+                        error_category="PORTFOLIO_SIMULATION_ERROR",
+                        error_message=error_message,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finalize terminal analysis run: %s", exc)
 
         empty_contribs = tuple(
             StrategyContribution(
@@ -1191,6 +1268,7 @@ class PortfolioSimulationEngine:
             strategy_contributions=empty_contribs,
             duration_ms=duration_ms,
             error_message=error_message,
+            run_id=analysis_run_id,
         )
 
         if self.event_bus:

@@ -62,6 +62,7 @@ class WalkForwardValidator:
         strategy_registry: Optional[StrategyRegistry] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        run_registry: Optional[Any] = None,
         name: str = "walk_forward_validator",
     ) -> None:
         self.name = name
@@ -71,6 +72,7 @@ class WalkForwardValidator:
         self.strategy_registry = strategy_registry or getattr(engine, "strategy_registry", StrategyRegistry())
         self.event_bus = event_bus
         self.state_store = state_store
+        self.run_registry = run_registry
 
         self._lock = threading.RLock()
         self._active_validations: Dict[str, threading.Event] = {}
@@ -125,6 +127,30 @@ class WalkForwardValidator:
         with self._lock:
             self._active_validations[val_id] = stop_event
 
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.WALK_FORWARD,
+                    configuration=config,
+                    strategy_id=resolved_strategy.name,
+                    strategy_version=resolved_strategy.version,
+                    symbol_universe=(config.symbol,),
+                    timeframe_universe=(config.timeframe,),
+                    data_start=config.start_time,
+                    data_end=config.end_time,
+                    execution_metadata={
+                        "validation_id": val_id,
+                        "window_mode": getattr(config, "window_mode", "rolling"),
+                    },
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize analysis run for walk-forward [%s]: %s", val_id, exc)
+                analysis_run = None
+
         # 2. Generate Chronological Windows
         try:
             windows = generate_walk_forward_windows(config)
@@ -141,6 +167,7 @@ class WalkForwardValidator:
                 summary=empty_summary,
                 error_message=str(err),
                 duration_ms=duration_ms,
+                run_id=analysis_run.run_id if analysis_run else None,
             )
             self._cleanup_and_finish(result, cid)
             return result
@@ -414,6 +441,7 @@ class WalkForwardValidator:
             warnings=tuple(warnings),
             data_quality_summary=quality_summary,
             duration_ms=duration_ms,
+            run_id=analysis_run.run_id if analysis_run else None,
         )
 
         self._cleanup_and_finish(result, cid)
@@ -566,6 +594,29 @@ class WalkForwardValidator:
                     "duration_ms": result.duration_ms,
                 },
             )
+
+        if getattr(self, "run_registry", None) is not None and getattr(result, "run_id", None):
+            try:
+                if result.status == WalkForwardStatus.COMPLETED:
+                    self.run_registry.complete_run(
+                        run_id=result.run_id,
+                        result_id=result.validation_id,
+                        result_type="WalkForwardResult",
+                    )
+                elif result.status == WalkForwardStatus.CANCELLED:
+                    reason = result.warnings[0].message if result.warnings else "Walk-forward cancelled"
+                    self.run_registry.cancel_run(
+                        run_id=result.run_id,
+                        cancellation_reason=str(reason),
+                    )
+                else:
+                    self.run_registry.fail_run(
+                        run_id=result.run_id,
+                        error_category="WALK_FORWARD_ERROR",
+                        error_message=result.error_message or "Walk-forward validation failure",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finalize analysis run in walk-forward cleanup: %s", exc)
 
         if self.event_bus:
             evt_type = (

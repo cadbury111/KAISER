@@ -474,6 +474,124 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 12. Analysis Run Registry Endpoint (/api/analysis-runs or /api/analysis-runs/<run_id>)
+            if path == "/api/analysis-runs" or path.startswith("/api/analysis-runs/"):
+                registry = getattr(self.server, "run_registry", None)
+                if registry is None:
+                    # Fallback to state store if available
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        latest = state_store.get("analysis_runs.latest", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "runs": latest if isinstance(latest, list) else [latest] if latest else [],
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "unavailable",
+                            "message": "Analysis run registry not attached.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                run_id = None
+                if path.startswith("/api/analysis-runs/"):
+                    run_id = path[len("/api/analysis-runs/"):].strip()
+
+                if run_id:
+                    if ".." in run_id or not SAFE_ID_PATTERN.match(run_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid run_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    run_rec = registry.get_run(run_id)
+                    if not run_rec:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Analysis run '{run_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "run": run_rec.to_dict(),
+                    })
+                    return
+
+                # Query listing
+                repro_id = query.get("reproducibility_id", [None])[0]
+                limit_val = int(query.get("limit", ["50"])[0])
+                offset_val = int(query.get("offset", ["0"])[0])
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                if repro_id:
+                    if ".." in repro_id or not SAFE_ID_PATTERN.match(repro_id.strip()):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid reproducibility_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    matched = registry.get_runs_by_reproducibility(
+                        reproducibility_id=repro_id.strip(),
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "reproducibility_id": repro_id.strip(),
+                        "count": len(matched),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "runs": [r.to_dict() for r in matched],
+                    })
+                    return
+
+                runs = registry.query_runs(
+                    operation_type=query.get("operation_type", [None])[0],
+                    status=query.get("status", [None])[0],
+                    symbol=query.get("symbol", [None])[0],
+                    strategy_id=query.get("strategy_id", [None])[0],
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(runs),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "runs": [r.to_dict() for r in runs],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -572,6 +690,7 @@ class PortfolioDashboardServer:
         diagnostics_service: Optional[PortfolioDiagnosticsService] = None,
         quality_monitor: Optional[Any] = None,
         provenance_tracker: Optional[Any] = None,
+        run_registry: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -582,6 +701,7 @@ class PortfolioDashboardServer:
             diagnostics_service: Optional diagnostics service for auditing server lifecycle.
             quality_monitor: Optional MarketDataQualityMonitor for data quality querying.
             provenance_tracker: Optional MarketDataProvenanceTracker for provenance/lineage queries.
+            run_registry: Optional AnalysisRunRegistry for reproducible experiment run queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -604,6 +724,7 @@ class PortfolioDashboardServer:
         )
         self.quality_monitor = quality_monitor
         self.provenance_tracker = provenance_tracker
+        self.run_registry = run_registry
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -635,11 +756,12 @@ class PortfolioDashboardServer:
             self._server.daemon_threads = True
             self._server.allow_reuse_address = True
 
-            # Attach reporting service, diagnostics, quality monitor, and provenance tracker to server instance
+            # Attach reporting service, diagnostics, quality monitor, provenance tracker, and run registry to server instance
             setattr(self._server, "reporting_service", self.reporting_service)
             setattr(self._server, "diagnostics_service", self.diagnostics_service)
             setattr(self._server, "quality_monitor", self.quality_monitor)
             setattr(self._server, "provenance_tracker", self.provenance_tracker)
+            setattr(self._server, "run_registry", self.run_registry)
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port

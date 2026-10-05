@@ -62,6 +62,7 @@ class RobustnessTestEngine:
         strategy_registry: Optional[StrategyRegistry] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        run_registry: Optional[Any] = None,
         name: str = "robustness_test_engine",
     ) -> None:
         self.name = name
@@ -71,6 +72,7 @@ class RobustnessTestEngine:
         self.strategy_registry = strategy_registry or getattr(engine, "strategy_registry", StrategyRegistry())
         self.event_bus = event_bus
         self.state_store = state_store
+        self.run_registry = run_registry
 
         self._lock = threading.RLock()
         self._active_tests: Dict[str, threading.Event] = {}
@@ -127,6 +129,27 @@ class RobustnessTestEngine:
 
         warnings: List[RobustnessWarning] = []
 
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.ROBUSTNESS,
+                    configuration=config,
+                    strategy_id=resolved_strategy.name,
+                    strategy_version=resolved_strategy.version,
+                    symbol_universe=(config.symbol,),
+                    timeframe_universe=(config.timeframe,),
+                    data_start=config.start_time,
+                    data_end=config.end_time,
+                    execution_metadata={"test_id": test_id},
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize analysis run for robustness [%s]: %s", test_id, exc)
+                analysis_run = None
+
         # 2. Publish Started Event
         if self.event_bus:
             self.event_bus.publish(
@@ -168,6 +191,7 @@ class RobustnessTestEngine:
                 summary=empty_summary,
                 error_message=msg,
                 duration_ms=duration_ms,
+                run_id=analysis_run.run_id if analysis_run else None,
             )
             self._cleanup_and_finish(result, cid)
             return result
@@ -461,6 +485,7 @@ class RobustnessTestEngine:
             window_results=tuple(window_results),
             warnings=tuple(warnings),
             duration_ms=duration_ms,
+            run_id=analysis_run.run_id if analysis_run else None,
         )
 
         self._cleanup_and_finish(final_result, cid)
@@ -715,6 +740,28 @@ class RobustnessTestEngine:
                     "duration_ms": result.duration_ms,
                 },
             )
+
+        if getattr(self, "run_registry", None) is not None and getattr(result, "run_id", None):
+            try:
+                if result.status == RobustnessStatus.COMPLETED:
+                    self.run_registry.complete_run(
+                        run_id=result.run_id,
+                        result_id=result.test_id,
+                        result_type="RobustnessTestResult",
+                    )
+                elif result.status == RobustnessStatus.CANCELLED:
+                    self.run_registry.cancel_run(
+                        run_id=result.run_id,
+                        cancellation_reason="Robustness test cancelled",
+                    )
+                else:
+                    self.run_registry.fail_run(
+                        run_id=result.run_id,
+                        error_category="ROBUSTNESS_ERROR",
+                        error_message=result.error_message or "Robustness test failure",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finalize analysis run in robustness cleanup: %s", exc)
 
         if self.event_bus:
             evt_type = (

@@ -60,6 +60,10 @@ from app.market.provenance import (
     MarketDataProvenanceTracker,
     register_provenance_handlers,
 )
+from app.analysis.runs import (
+    AnalysisRunRegistry,
+    register_run_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -103,6 +107,7 @@ class SystemStatus:
     portfolio_diagnostics_service: Optional[PortfolioDiagnosticsService] = None
     quality_monitor: Optional[MarketDataQualityMonitor] = None
     provenance_tracker: Optional[MarketDataProvenanceTracker] = None
+    run_registry: Optional[AnalysisRunRegistry] = None
 
 
 
@@ -217,10 +222,33 @@ def bootstrap_system(
             name="kaiser_main_voice_controller",
         )
 
+    # Initialize Historical Repository & Bounded Cache
+    db_path = "data/kaiser.db"
+    if active_settings.database_url.startswith("sqlite:///"):
+        db_path = active_settings.database_url.replace("sqlite:///", "")
+    elif active_settings.database_url.startswith("sqlite://"):
+        db_path = active_settings.database_url.replace("sqlite://", "")
+
+    historical_repository = SQLiteHistoricalBarRepository(db_path=db_path, name="sqlite_historical_repo")
+    historical_cache = HistoricalDataCache(max_size=200, ttl_seconds=300.0)
+
+    # Initialize Reproducible Analysis Run Registry (Phase 2, Step 21)
+    run_registry = AnalysisRunRegistry(
+        event_bus=event_bus,
+        state_store=state_store,
+        db_path=db_path,
+        name="kaiser_main_run_registry",
+    )
+    register_run_handlers(
+        orchestrator=orchestrator,
+        run_registry=run_registry,
+    )
+
     # Initialize Technical & Quantitative Analysis Engine
     analysis_engine = TechnicalAnalysisEngine(
         event_bus=event_bus,
         state_store=state_store,
+        run_registry=run_registry,
         name="kaiser_main_analysis_engine",
     )
     register_analysis_handlers(orchestrator=orchestrator, engine=analysis_engine)
@@ -234,16 +262,6 @@ def bootstrap_system(
         name="kaiser_main_technical_agent",
     )
     register_technical_agent_handlers(orchestrator=orchestrator, agent=technical_agent)
-
-    # Initialize Historical Repository & Bounded Cache
-    db_path = "data/kaiser.db"
-    if active_settings.database_url.startswith("sqlite:///"):
-        db_path = active_settings.database_url.replace("sqlite:///", "")
-    elif active_settings.database_url.startswith("sqlite://"):
-        db_path = active_settings.database_url.replace("sqlite://", "")
-
-    historical_repository = SQLiteHistoricalBarRepository(db_path=db_path, name="sqlite_historical_repo")
-    historical_cache = HistoricalDataCache(max_size=200, ttl_seconds=300.0)
 
     # Initialize Market Data Provenance & Lineage Tracker (Phase 2, Step 20)
     provenance_tracker = MarketDataProvenanceTracker(
@@ -299,6 +317,7 @@ def bootstrap_system(
         event_bus=event_bus,
         state_store=state_store,
         provenance_tracker=provenance_tracker,
+        run_registry=run_registry,
         name="kaiser_main_backtest_engine",
     )
     walk_forward_validator = WalkForwardValidator(
@@ -308,6 +327,7 @@ def bootstrap_system(
         strategy_registry=strategy_registry,
         event_bus=event_bus,
         state_store=state_store,
+        run_registry=run_registry,
         name="kaiser_main_walk_forward_validator",
     )
     robustness_test_engine = RobustnessTestEngine(
@@ -317,6 +337,7 @@ def bootstrap_system(
         strategy_registry=strategy_registry,
         event_bus=event_bus,
         state_store=state_store,
+        run_registry=run_registry,
         name="kaiser_main_robustness_test_engine",
     )
     portfolio_simulation_engine = PortfolioSimulationEngine(
@@ -327,6 +348,7 @@ def bootstrap_system(
         event_bus=event_bus,
         state_store=state_store,
         provenance_tracker=provenance_tracker,
+        run_registry=run_registry,
         name="kaiser_main_portfolio_simulation_engine",
     )
     register_backtest_handlers(
@@ -350,6 +372,7 @@ def bootstrap_system(
     portfolio_attribution_service = PortfolioAttributionService(
         event_bus=event_bus,
         state_store=state_store,
+        run_registry=run_registry,
     )
     register_portfolio_handlers(orchestrator=orchestrator, service=portfolio_attribution_service)
 
@@ -392,6 +415,7 @@ def bootstrap_system(
         diagnostics_service=portfolio_diagnostics_service,
         quality_monitor=quality_monitor,
         provenance_tracker=provenance_tracker,
+        run_registry=run_registry,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -475,12 +499,14 @@ def bootstrap_system(
         portfolio_diagnostics_service=portfolio_diagnostics_service,
         quality_monitor=quality_monitor,
         provenance_tracker=provenance_tracker,
+        run_registry=run_registry,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
     logger.info("Voice-first architecture: %s", status.voice_architecture)
     logger.info("Market data quality monitor: ready")
     logger.info("Market data provenance & lineage tracker: ready")
+    logger.info("Reproducible analysis run registry: ready (max_history=1000)")
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

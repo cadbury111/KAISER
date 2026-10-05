@@ -60,6 +60,7 @@ class BacktestEngine:
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
         provenance_tracker: Optional[Any] = None,
+        run_registry: Optional[Any] = None,
         name: str = "backtest_engine",
     ) -> None:
         self.name = name
@@ -70,6 +71,7 @@ class BacktestEngine:
         self.event_bus = event_bus
         self.state_store = state_store
         self.provenance_tracker = provenance_tracker
+        self.run_registry = run_registry
 
         self._lock = threading.RLock()
         self._active_backtests: Dict[str, threading.Event] = {}
@@ -123,6 +125,33 @@ class BacktestEngine:
         stop_event = cancellation_token or threading.Event()
         with self._lock:
             self._active_backtests[bt_id] = stop_event
+
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                parent_ids = ()
+                if getattr(self, "provenance_tracker", None) is not None:
+                    p = self.provenance_tracker.get_latest(config.symbol, config.timeframe)
+                    if p:
+                        parent_ids = (p.provenance_id,)
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.BACKTEST,
+                    configuration=config,
+                    input_provenance_ids=parent_ids,
+                    strategy_id=resolved_strategy.name,
+                    strategy_version=resolved_strategy.version,
+                    symbol_universe=(config.symbol,),
+                    timeframe_universe=(config.timeframe,),
+                    data_start=config.start_time,
+                    data_end=config.end_time,
+                    execution_metadata={"backtest_id": bt_id},
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize analysis run for backtest [%s]: %s", bt_id, exc)
+                analysis_run = None
 
         # 2. State Isolation
         if config.reset_state_between_runs:
@@ -182,6 +211,7 @@ class BacktestEngine:
                 metrics=empty_metrics,
                 error_message=str(err),
                 duration_ms=duration_ms,
+                run_id=analysis_run.run_id if analysis_run else None,
             )
             self._cleanup_and_finish(result, cid)
             return result
@@ -205,6 +235,7 @@ class BacktestEngine:
                 total_bars_available=0,
                 duration_ms=duration_ms,
                 warnings=("No historical bars found in repository matching criteria.",),
+                run_id=analysis_run.run_id if analysis_run else None,
             )
             self._cleanup_and_finish(result, cid)
             return result
@@ -533,6 +564,7 @@ class BacktestEngine:
             start_timestamp=stored_bars[0].timestamp if stored_bars else None,
             end_timestamp=stored_bars[-1].timestamp if stored_bars else None,
             duration_ms=duration_ms,
+            run_id=analysis_run.run_id if analysis_run else None,
         )
 
         self._cleanup_and_finish(result, cid)
@@ -582,6 +614,29 @@ class BacktestEngine:
                     object.__setattr__(result, "provenance_id", prov.provenance_id)
             except Exception as exc:
                 logger.warning("Failed to record backtest provenance: %s", exc)
+
+        if getattr(self, "run_registry", None) is not None and getattr(result, "run_id", None):
+            try:
+                if result.status == BacktestStatus.COMPLETED:
+                    self.run_registry.complete_run(
+                        run_id=result.run_id,
+                        result_id=result.backtest_id,
+                        result_type="BacktestResult",
+                    )
+                elif result.status == BacktestStatus.CANCELLED:
+                    reason = result.warnings[0] if result.warnings else "Backtest cancelled by operator"
+                    self.run_registry.cancel_run(
+                        run_id=result.run_id,
+                        cancellation_reason=str(reason),
+                    )
+                else:
+                    self.run_registry.fail_run(
+                        run_id=result.run_id,
+                        error_category="BACKTEST_ERROR",
+                        error_message=result.error_message or "Backtest execution failure",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to finalize analysis run in backtest cleanup: %s", exc)
 
         if self.event_bus:
             evt_type = (

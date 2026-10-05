@@ -534,6 +534,7 @@ class RobustnessTestResult:
         "It does NOT guarantee future market profitability, predict actual future costs, "
         "or execute live orders."
     )
+    run_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "scenario_results", tuple(self.scenario_results or ()))
@@ -583,4 +584,5 @@ class RobustnessTestResult:
             "error_message": self.error_message,
             "summary_text": self.summary_text,
             "disclaimer": self.disclaimer,
+            "run_id": self.run_id,
         }

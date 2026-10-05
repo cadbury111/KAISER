@@ -64,10 +64,12 @@ class PortfolioAttributionService:
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
         clock_fn: Optional[Callable[[], float]] = None,
+        run_registry: Optional[Any] = None,
     ) -> None:
         self.event_bus = event_bus
         self.state_store = state_store
         self._clock_fn = clock_fn or time.time
+        self.run_registry = run_registry
         self._latest_report: Optional[PortfolioAttributionReport] = None
         self._latest_comparison: Optional[ComparisonReport] = None
 
@@ -97,6 +99,29 @@ class PortfolioAttributionService:
         now = self._clock_fn()
 
         report_id = f"attr_{uuid.uuid4().hex[:10]}"
+
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                parents = [result.run_id] if getattr(result, "run_id", None) else []
+                prov_ids = [result.provenance_id] if getattr(result, "provenance_id", None) else []
+                symbols = [a.symbol for a in result.strategy_contributions] if result.strategy_contributions else []
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.PORTFOLIO_ATTRIBUTION,
+                    configuration=cfg,
+                    input_provenance_ids=prov_ids,
+                    parent_run_ids=parents,
+                    symbol_universe=tuple(symbols),
+                    data_start=result.start_timestamp,
+                    data_end=result.end_timestamp,
+                    execution_metadata={"source_id": result.simulation_id, "source_type": "portfolio_simulation"},
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize attribution run: %s", exc)
+                analysis_run = None
 
         try:
             # 1. Transaction cost attribution
@@ -261,7 +286,18 @@ class PortfolioAttributionService:
                 strategy_attributions=tuple(strat_attributions),
                 instrument_attributions=tuple(inst_attributions),
                 reconciliation=reconciliation,
+                run_id=analysis_run.run_id if analysis_run else None,
             )
+
+            if getattr(self, "run_registry", None) is not None and analysis_run:
+                try:
+                    self.run_registry.complete_run(
+                        run_id=analysis_run.run_id,
+                        result_id=report.report_id,
+                        result_type="PortfolioAttributionReport",
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to complete attribution run in registry: %s", exc)
 
             self._latest_report = report
             self._persist_report(report)
@@ -271,6 +307,15 @@ class PortfolioAttributionService:
             return report
 
         except Exception as e:
+            if getattr(self, "run_registry", None) is not None and analysis_run:
+                try:
+                    self.run_registry.fail_run(
+                        run_id=analysis_run.run_id,
+                        error_category="ATTRIBUTION_ERROR",
+                        error_message=str(e),
+                    )
+                except Exception:
+                    pass
             logger.error("Portfolio attribution failed: %s", str(e), exc_info=True)
             self._publish_failed_event(result.simulation_id, "portfolio_simulation", str(e), cid)
             raise
@@ -299,6 +344,30 @@ class PortfolioAttributionService:
         now = self._clock_fn()
 
         report_id = f"attr_{uuid.uuid4().hex[:10]}"
+
+        # Setup Analysis Run Registry
+        analysis_run = None
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                parents = [result.run_id] if getattr(result, "run_id", None) else []
+                prov_ids = [result.provenance_id] if getattr(result, "provenance_id", None) else []
+                sym = [result.config.symbol] if getattr(result, "config", None) and hasattr(result.config, "symbol") else []
+                analysis_run = self.run_registry.create_run(
+                    operation_type=OperationType.PORTFOLIO_ATTRIBUTION,
+                    configuration=cfg,
+                    input_provenance_ids=prov_ids,
+                    parent_run_ids=parents,
+                    symbol_universe=tuple(sym),
+                    data_start=result.start_timestamp,
+                    data_end=result.end_timestamp,
+                    execution_metadata={"source_id": result.backtest_id, "source_type": "backtest"},
+                )
+                self.run_registry.start_run(analysis_run.run_id)
+            except Exception as exc:
+                logger.warning("Failed to initialize attribution run for backtest: %s", exc)
+                analysis_run = None
+
         m = result.metrics
 
         total_costs = TransactionCostAttribution(
@@ -421,7 +490,18 @@ class PortfolioAttributionService:
             strategy_attributions=(strat_attr,),
             instrument_attributions=(inst_attr,),
             reconciliation=reconciliation,
+            run_id=analysis_run.run_id if analysis_run else None,
         )
+
+        if getattr(self, "run_registry", None) is not None and analysis_run:
+            try:
+                self.run_registry.complete_run(
+                    run_id=analysis_run.run_id,
+                    result_id=report.report_id,
+                    result_type="PortfolioAttributionReport",
+                )
+            except Exception as exc:
+                logger.warning("Failed to complete attribution run in registry: %s", exc)
 
         self._latest_report = report
         self._persist_report(report)

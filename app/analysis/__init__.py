@@ -39,6 +39,16 @@ from app.analysis.models import (
     normalize_timeframe,
 )
 from app.analysis.series import RollingBarSeries
+from app.analysis.runs import (
+    AnalysisRun,
+    AnalysisRunRegistry,
+    OperationType,
+    RunStatus,
+    generate_configuration_fingerprint,
+    generate_reproducibility_id,
+    register_run_handlers,
+    validate_lifecycle_transition,
+)
 
 __all__ = [
     # Domain Models & Timeframe Constants
@@ -70,4 +80,13 @@ __all__ = [
     # Technical Engine & Handlers
     "TechnicalAnalysisEngine",
     "register_analysis_handlers",
+    # Reproducible Analysis Runs & Experiment Tracking (Phase 2 Step 21)
+    "AnalysisRun",
+    "AnalysisRunRegistry",
+    "OperationType",
+    "RunStatus",
+    "generate_configuration_fingerprint",
+    "generate_reproducibility_id",
+    "register_run_handlers",
+    "validate_lifecycle_transition",
 ]

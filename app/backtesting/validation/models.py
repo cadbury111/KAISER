@@ -460,6 +460,7 @@ class WalkForwardResult:
         "evaluation to reduce curve-fitting risk. It does NOT eliminate overfitting, guarantee "
         "future market profitability, or execute live orders."
     )
+    run_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "windows", tuple(self.windows or ()))
@@ -502,4 +503,5 @@ class WalkForwardResult:
             "error_message": self.error_message,
             "summary_text": self.summary_text,
             "disclaimer": self.disclaimer,
+            "run_id": self.run_id,
         }

@@ -56,12 +56,16 @@ class TechnicalAnalysisEngine:
         config: Optional[AnalysisConfig] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        provenance_tracker: Optional[Any] = None,
+        run_registry: Optional[Any] = None,
         name: str = "technical_analysis_engine",
     ) -> None:
         self.name = name
         self.config = config or AnalysisConfig()
         self.event_bus = event_bus
         self.state_store = state_store
+        self.provenance_tracker = provenance_tracker
+        self.run_registry = run_registry
 
         self._lock = threading.RLock()
         self._series: Dict[Tuple[str, str], RollingBarSeries] = {}
@@ -185,6 +189,37 @@ class TechnicalAnalysisEngine:
 
         self._sync_state_store(vector)
         self._publish_events(vector, cid)
+
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                prov_ids = ()
+                if getattr(self, "provenance_tracker", None) is not None:
+                    p = self.provenance_tracker.get_latest(vector.symbol, vector.timeframe)
+                    if p:
+                        prov_ids = (p.provenance_id,)
+                bars = self.get_history(vector.symbol, vector.timeframe)
+                d_start = bars[0].timestamp if bars else None
+                d_end = bars[-1].timestamp if bars else None
+                run = self.run_registry.create_run(
+                    operation_type=OperationType.TECHNICAL_ANALYSIS,
+                    configuration=self.config,
+                    input_provenance_ids=prov_ids,
+                    symbol_universe=(vector.symbol,),
+                    timeframe_universe=(vector.timeframe,),
+                    input_record_count=vector.bar_count,
+                    data_start=d_start,
+                    data_end=d_end,
+                )
+                self.run_registry.start_run(run.run_id)
+                self.run_registry.complete_run(
+                    run.run_id,
+                    result_id=f"vec_{vector.symbol}_{vector.timeframe}_{int(vector.timestamp)}",
+                    result_type="TechnicalFeatureVector",
+                )
+            except Exception as exc:
+                logger.warning("Failed to record analysis run in evaluate_feature_vector: %s", exc)
+
         return vector
 
     def get_feature_vector(
@@ -423,7 +458,7 @@ class TechnicalAnalysisEngine:
             degraded_count = sum(1 for h in tf_health_map.values() if h.status == TimeframeHealthStatus.DEGRADED)
             quality = max(0.0, min(1.0, (healthy_count * 1.0 + degraded_count * 0.6) / len(target_tfs)))
 
-        return MultiTimeframeSyncState(
+        sync_state = MultiTimeframeSyncState(
             symbol=sym_upper,
             reference_timestamp=now,
             timeframes=tf_health_map,
@@ -435,6 +470,33 @@ class TechnicalAnalysisEngine:
             sync_quality=quality,
             warnings=tuple(cross_warnings),
         )
+
+        if getattr(self, "run_registry", None) is not None:
+            try:
+                from app.analysis.runs.models import OperationType
+                prov_ids = []
+                if getattr(self, "provenance_tracker", None) is not None:
+                    for tf in target_tfs:
+                        p = self.provenance_tracker.get_latest(sym_upper, tf)
+                        if p:
+                            prov_ids.append(p.provenance_id)
+                run = self.run_registry.create_run(
+                    operation_type=OperationType.MULTI_TIMEFRAME_ANALYSIS,
+                    configuration={"target_timeframes": list(target_tfs)},
+                    input_provenance_ids=prov_ids,
+                    symbol_universe=(sym_upper,),
+                    timeframe_universe=tuple(target_tfs),
+                )
+                self.run_registry.start_run(run.run_id)
+                self.run_registry.complete_run(
+                    run.run_id,
+                    result_id=f"sync_{sym_upper}_{int(now)}",
+                    result_type="MultiTimeframeSyncState",
+                )
+            except Exception as exc:
+                logger.warning("Failed to record analysis run in synchronize_timeframes: %s", exc)
+
+        return sync_state
 
     def reset(self, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> None:
         """Reset historical series and cached vectors."""

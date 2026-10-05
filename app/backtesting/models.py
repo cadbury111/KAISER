@@ -612,6 +612,7 @@ class BacktestResult:
         "Hypothetical backtest using historical data without live broker execution."
     )
     provenance_id: Optional[str] = None
+    run_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trades", tuple(self.trades or ()))
@@ -669,4 +670,5 @@ class BacktestResult:
             "summary": self.summary_text,
             "disclaimer": self.disclaimer,
             "provenance_id": self.provenance_id,
+            "run_id": self.run_id,
         }
