@@ -592,6 +592,89 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 14. Analysis Comparisons Endpoint (/api/analysis-comparisons)
+            if path == "/api/analysis-comparisons" or path.startswith("/api/analysis-comparisons/"):
+                comp_engine = getattr(self.server, "comparison_engine", None)
+                if comp_engine is None:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Analysis comparison engine not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                comp_id = None
+                if path.startswith("/api/analysis-comparisons/"):
+                    comp_id = path[len("/api/analysis-comparisons/"):].strip()
+
+                if comp_id:
+                    if ".." in comp_id or not SAFE_ID_PATTERN.match(comp_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid comparison_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    comparison = comp_engine.get_comparison(comp_id)
+                    if not comparison:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Comparison '{comp_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    c_dict = comparison.to_dict() if hasattr(comparison, "to_dict") else comparison
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "comparison": c_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/analysis-comparisons
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                comps: List[Dict[str, Any]] = []
+                if comp_engine.state_store:
+                    comps = comp_engine.state_store.get("analysis_comparisons:history", [])
+                if not comps and hasattr(comp_engine, "_cache"):
+                    with comp_engine._lock:
+                        comps = [c.to_dict() for c in comp_engine._cache.values()]
+
+                sliced = comps[offset_clamped : offset_clamped + limit_clamped]
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(sliced),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "comparisons": sliced,
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -691,6 +774,7 @@ class PortfolioDashboardServer:
         quality_monitor: Optional[Any] = None,
         provenance_tracker: Optional[Any] = None,
         run_registry: Optional[Any] = None,
+        comparison_engine: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -702,6 +786,7 @@ class PortfolioDashboardServer:
             quality_monitor: Optional MarketDataQualityMonitor for data quality querying.
             provenance_tracker: Optional MarketDataProvenanceTracker for provenance/lineage queries.
             run_registry: Optional AnalysisRunRegistry for reproducible experiment run queries.
+            comparison_engine: Optional RunComparisonEngine for experiment comparison queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -725,6 +810,7 @@ class PortfolioDashboardServer:
         self.quality_monitor = quality_monitor
         self.provenance_tracker = provenance_tracker
         self.run_registry = run_registry
+        self.comparison_engine = comparison_engine
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -756,12 +842,13 @@ class PortfolioDashboardServer:
             self._server.daemon_threads = True
             self._server.allow_reuse_address = True
 
-            # Attach reporting service, diagnostics, quality monitor, provenance tracker, and run registry to server instance
+            # Attach services, monitors, trackers, registries, and engines to server instance
             setattr(self._server, "reporting_service", self.reporting_service)
             setattr(self._server, "diagnostics_service", self.diagnostics_service)
             setattr(self._server, "quality_monitor", self.quality_monitor)
             setattr(self._server, "provenance_tracker", self.provenance_tracker)
             setattr(self._server, "run_registry", self.run_registry)
+            setattr(self._server, "comparison_engine", self.comparison_engine)
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port

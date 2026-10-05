@@ -246,6 +246,23 @@ class AnalysisRunRegistry:
         self._update_state_store(run)
         return run
 
+    def register_run(self, run: AnalysisRun) -> AnalysisRun:
+        """Register a pre-constructed AnalysisRun instance in the registry."""
+        if not isinstance(run, AnalysisRun):
+            raise ValidationError(f"Expected AnalysisRun instance, got {type(run)}")
+
+        with self._lock:
+            if run.run_id in self._by_id:
+                raise ValidationError(f"AnalysisRun with run_id '{run.run_id}' already exists in registry.")
+
+            self._record_run_in_memory(run)
+            self._total_runs_created += 1
+            self._persist_to_sqlite(run)
+
+        self._publish_event(EventType.ANALYSIS_RUN_CREATED, run)
+        self._update_state_store(run)
+        return run
+
     def start_run(
         self,
         run_id: str,

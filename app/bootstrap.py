@@ -64,6 +64,10 @@ from app.analysis.runs import (
     AnalysisRunRegistry,
     register_run_handlers,
 )
+from app.analysis.comparison import (
+    RunComparisonEngine,
+    register_comparison_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -108,6 +112,7 @@ class SystemStatus:
     quality_monitor: Optional[MarketDataQualityMonitor] = None
     provenance_tracker: Optional[MarketDataProvenanceTracker] = None
     run_registry: Optional[AnalysisRunRegistry] = None
+    comparison_engine: Optional[RunComparisonEngine] = None
 
 
 
@@ -407,6 +412,19 @@ def bootstrap_system(
         repository=historical_repository,
     )
 
+    # Initialize Experiment Comparison & Run Comparison Foundation (Phase 2, Step 22)
+    comparison_engine = RunComparisonEngine(
+        run_registry=run_registry,
+        provenance_tracker=provenance_tracker,
+        quality_monitor=quality_monitor,
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_comparison_handlers(
+        orchestrator=orchestrator,
+        comparison_engine=comparison_engine,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -416,6 +434,7 @@ def bootstrap_system(
         quality_monitor=quality_monitor,
         provenance_tracker=provenance_tracker,
         run_registry=run_registry,
+        comparison_engine=comparison_engine,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -500,6 +519,7 @@ def bootstrap_system(
         quality_monitor=quality_monitor,
         provenance_tracker=provenance_tracker,
         run_registry=run_registry,
+        comparison_engine=comparison_engine,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -507,6 +527,7 @@ def bootstrap_system(
     logger.info("Market data quality monitor: ready")
     logger.info("Market data provenance & lineage tracker: ready")
     logger.info("Reproducible analysis run registry: ready (max_history=1000)")
+    logger.info("Run comparison & experiment evaluation engine: ready (cache=%s)", comparison_engine.max_cache_size)
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

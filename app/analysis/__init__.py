@@ -49,6 +49,27 @@ from app.analysis.runs import (
     register_run_handlers,
     validate_lifecycle_transition,
 )
+from app.analysis.comparison import (
+    ComparabilityStatus,
+    ComparisonDimension,
+    ConfigurationDifference,
+    DifferenceType,
+    MetricDifference,
+    MetricDirection,
+    MultiRunComparison,
+    ProvenanceDifference,
+    QualityDifference,
+    RunComparison,
+    RunComparisonEngine,
+    compare_metrics_dicts,
+    compute_metric_difference,
+    diff_configurations,
+    diff_provenance,
+    diff_quality,
+    extract_metrics_from_result,
+    register_comparison_handlers,
+    safe_float,
+)
 
 __all__ = [
     # Domain Models & Timeframe Constants
@@ -89,4 +110,24 @@ __all__ = [
     "generate_reproducibility_id",
     "register_run_handlers",
     "validate_lifecycle_transition",
+    # Experiment Comparison & Run Comparison (Phase 2 Step 22)
+    "ComparabilityStatus",
+    "ComparisonDimension",
+    "DifferenceType",
+    "MetricDirection",
+    "MetricDifference",
+    "ConfigurationDifference",
+    "ProvenanceDifference",
+    "QualityDifference",
+    "RunComparison",
+    "MultiRunComparison",
+    "RunComparisonEngine",
+    "diff_configurations",
+    "diff_provenance",
+    "diff_quality",
+    "compute_metric_difference",
+    "extract_metrics_from_result",
+    "compare_metrics_dicts",
+    "safe_float",
+    "register_comparison_handlers",
 ]
