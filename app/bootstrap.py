@@ -55,6 +55,7 @@ from app.portfolio import (
     register_portfolio_handlers,
     register_reporting_handlers,
 )
+from app.market.quality import MarketDataQualityMonitor, register_quality_handlers
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -96,6 +97,7 @@ class SystemStatus:
     portfolio_reporting_service: Optional[PortfolioReportingService] = None
     portfolio_dashboard_server: Optional[PortfolioDashboardServer] = None
     portfolio_diagnostics_service: Optional[PortfolioDiagnosticsService] = None
+    quality_monitor: Optional[MarketDataQualityMonitor] = None
 
 
 
@@ -346,12 +348,28 @@ def bootstrap_system(
         diagnostics_service=portfolio_diagnostics_service,
     )
 
+    # Initialize Market Data Quality Monitor & Handlers (Phase 2, Step 19)
+    quality_monitor = (
+        market_service.quality_engine.monitor
+        if market_service and hasattr(market_service.quality_engine, "monitor")
+        else MarketDataQualityMonitor(
+            event_bus=event_bus,
+            state_store=state_store,
+        )
+    )
+    register_quality_handlers(
+        orchestrator=orchestrator,
+        quality_monitor=quality_monitor,
+        repository=historical_repository,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
         host=active_settings.dashboard_host,
         port=active_settings.dashboard_port,
         diagnostics_service=portfolio_diagnostics_service,
+        quality_monitor=quality_monitor,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -433,10 +451,12 @@ def bootstrap_system(
         portfolio_reporting_service=portfolio_reporting_service,
         portfolio_dashboard_server=portfolio_dashboard_server,
         portfolio_diagnostics_service=portfolio_diagnostics_service,
+        quality_monitor=quality_monitor,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
     logger.info("Voice-first architecture: %s", status.voice_architecture)
+    logger.info("Market data quality monitor: ready")
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

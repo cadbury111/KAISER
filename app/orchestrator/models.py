@@ -138,6 +138,7 @@ class OrchestratorRequest:
         source: str = "system",
         created_at: Optional[float] = None,
         context: Optional[Mapping[str, Any]] = None,
+        parameters: Optional[Mapping[str, Any]] = None,
     ) -> OrchestratorRequest:
         """Factory method to construct an OrchestratorRequest with safe defaults.
 
@@ -149,6 +150,7 @@ class OrchestratorRequest:
             source: Source channel tag (default 'system').
             created_at: Optional creation timestamp (defaults to current time).
             context: Optional contextual parameters dictionary.
+            parameters: Optional alias for context dictionary.
 
         Returns:
             OrchestratorRequest: The validated, immutable request instance.
@@ -156,7 +158,8 @@ class OrchestratorRequest:
         resolved_request_id = (request_id or uuid.uuid4().hex).strip()
         resolved_correlation_id = (correlation_id or uuid.uuid4().hex).strip()
         resolved_created_at = time.time() if created_at is None else float(created_at)
-        clean_context = copy.deepcopy(dict(context or {}))
+        raw_ctx = context if context is not None else (parameters or {})
+        clean_context = copy.deepcopy(dict(raw_ctx))
 
         return cls(
             request_id=resolved_request_id,

@@ -261,6 +261,67 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 9. Market Data Quality Endpoint (/api/data-quality)
+            if path == "/api/data-quality":
+                monitor = getattr(self.server, "quality_monitor", None)
+                if monitor is None:
+                    # Fallback to state store if available
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        summary = state_store.get("data_quality_summary", {})
+                        assessments = state_store.get("market_data_quality", {})
+                        anomalies = state_store.get("market_data_anomalies", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "summary": summary,
+                            "assessments": assessments,
+                            "anomalies": anomalies,
+                        })
+                        return
+
+                if monitor is None:
+                    self._send_json_response(
+                        {
+                            "status": "unavailable",
+                            "message": "Market data quality monitor not attached.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                symbol_param = query.get("symbol", [None])[0]
+                timeframe_param = query.get("timeframe", [None])[0]
+                limit_val = int(query.get("limit", ["50"])[0])
+                limit_clamped = max(1, min(100, limit_val))
+
+                if symbol_param:
+                    assessment = monitor.get_latest_assessment(symbol_param, timeframe_param)
+                    anomalies = monitor.get_anomalies(symbol=symbol_param, limit=limit_clamped)
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "symbol": symbol_param,
+                        "assessment": assessment.to_dict() if assessment else None,
+                        "anomalies": [a.to_dict() for a in anomalies],
+                        "summary": monitor.get_quality_summary(),
+                    })
+                    return
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "summary": monitor.get_quality_summary(),
+                    "assessments": monitor.get_all_latest_assessments(),
+                    "anomalies": [a.to_dict() for a in monitor.get_anomalies(limit=limit_clamped)],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -357,6 +418,7 @@ class PortfolioDashboardServer:
         host: str = "127.0.0.1",
         port: int = 8080,
         diagnostics_service: Optional[PortfolioDiagnosticsService] = None,
+        quality_monitor: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -365,6 +427,7 @@ class PortfolioDashboardServer:
             host: Network interface host to bind to (strictly loopback by default).
             port: Port number to bind to (0 for dynamic free port).
             diagnostics_service: Optional diagnostics service for auditing server lifecycle.
+            quality_monitor: Optional MarketDataQualityMonitor for data quality querying.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -385,6 +448,7 @@ class PortfolioDashboardServer:
             or getattr(reporting_service, "diagnostics_service", None)
             or PortfolioDiagnosticsService()
         )
+        self.quality_monitor = quality_monitor
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -419,6 +483,7 @@ class PortfolioDashboardServer:
             # Attach reporting service and diagnostics to server instance for handler access
             setattr(self._server, "reporting_service", self.reporting_service)
             setattr(self._server, "diagnostics_service", self.diagnostics_service)
+            setattr(self._server, "quality_monitor", self.quality_monitor)
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port

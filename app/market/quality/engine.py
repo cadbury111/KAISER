@@ -17,6 +17,8 @@ from app.core.events import Event, EventBus, EventType
 from app.core.logging_config import get_logger
 from app.core.state import StateStore
 from app.market.models import Bar, OrderBookSnapshot, Quote
+from app.market.quality.models import MarketAnomaly, QualitySeverity
+from app.market.quality.monitor import MarketDataQualityMonitor
 from app.market.quality.policy import (
     MarketQualityConfig,
     evaluate_bar_completeness,
@@ -47,6 +49,11 @@ class MarketDataQualityEngine:
         self.event_bus = event_bus
         self.state_store = state_store
         self.source_tracker = SourceHealthTracker()
+        self.monitor = MarketDataQualityMonitor(
+            config=self.config,
+            event_bus=self.event_bus,
+            state_store=self.state_store,
+        )
         self._lock = threading.RLock()
 
         # Bounded duplicate detection cache: map fingerprint -> timestamp
@@ -336,12 +343,53 @@ class MarketDataQualityEngine:
                 )
             )
 
+    def evaluate_bar_series(
+        self,
+        bars: Sequence[Union[Bar, Dict[str, Any]]],
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        source: Optional[str] = None,
+        reference_time: Optional[float] = None,
+        correlation_id: Optional[str] = None,
+    ) -> DataQualityAssessment:
+        """Evaluate a sequence of bars against quality dimensions and detect anomalies."""
+        return self.monitor.evaluate_bar_series(
+            bars=bars,
+            symbol=symbol,
+            timeframe=timeframe,
+            source=source,
+            reference_time=reference_time,
+            correlation_id=correlation_id,
+        )
+
+    def get_latest_assessment(
+        self,
+        symbol: str,
+        timeframe: Optional[str] = None,
+    ) -> Optional[DataQualityAssessment]:
+        """Retrieve latest assessment from monitor."""
+        return self.monitor.get_latest_assessment(symbol=symbol, timeframe=timeframe)
+
+    def get_anomalies(
+        self,
+        symbol: Optional[str] = None,
+        severity: Optional[QualitySeverity] = None,
+        limit: int = 50,
+    ) -> List[MarketAnomaly]:
+        """Query bounded anomaly history from monitor."""
+        return self.monitor.get_anomalies(symbol=symbol, severity=severity, limit=limit)
+
+    def get_quality_summary(self) -> Dict[str, Any]:
+        """Return operational quality summary."""
+        return self.monitor.get_quality_summary()
+
     def reset(self) -> None:
         """Reset internal caches and tracking state."""
         with self._lock:
             self._seen_fingerprints.clear()
             self._latest_stream_timestamps.clear()
             self.source_tracker = SourceHealthTracker()
+            self.monitor.reset()
 
     def reset_stream(
         self,
