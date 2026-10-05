@@ -566,6 +566,7 @@ class PortfolioSimulationResult:
         "RESEARCH ONLY: Multi-strategy portfolio simulation results are hypothetical. "
         "They do NOT guarantee profitability, protect against loss, or predict actual future performance."
     )
+    provenance_id: Optional[str] = None
 
     @property
     def is_success(self) -> bool:
@@ -626,4 +627,5 @@ class PortfolioSimulationResult:
             "error_message": self.error_message,
             "summary_text": self.summary_text,
             "disclaimer": self.disclaimer,
+            "provenance_id": self.provenance_id,
         }

@@ -59,6 +59,7 @@ class BacktestEngine:
         strategy_registry: Optional[StrategyRegistry] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        provenance_tracker: Optional[Any] = None,
         name: str = "backtest_engine",
     ) -> None:
         self.name = name
@@ -68,6 +69,7 @@ class BacktestEngine:
         self.strategy_registry = strategy_registry or StrategyRegistry()
         self.event_bus = event_bus
         self.state_store = state_store
+        self.provenance_tracker = provenance_tracker
 
         self._lock = threading.RLock()
         self._active_backtests: Dict[str, threading.Event] = {}
@@ -558,6 +560,28 @@ class BacktestEngine:
                     "duration_ms": result.duration_ms,
                 },
             )
+
+        if getattr(self, "provenance_tracker", None) is not None:
+            try:
+                parent_prov = self.provenance_tracker.get_latest(result.config.symbol, result.config.timeframe)
+                parent_ids = (parent_prov.provenance_id,) if parent_prov else ()
+                prov = self.provenance_tracker.create_backtest_provenance(
+                    strategy_id=result.strategy_name,
+                    strategy_version=result.strategy_version,
+                    symbol=result.config.symbol,
+                    timeframe=result.config.timeframe,
+                    data_start=result.start_timestamp or result.config.start_time,
+                    data_end=result.end_timestamp or result.config.end_time,
+                    bars_evaluated=result.bars_processed,
+                    trades_simulated=len(result.trades),
+                    parent_provenance_ids=parent_ids,
+                    run_id=result.backtest_id,
+                    operation_id=cid,
+                )
+                if hasattr(result, "provenance_id"):
+                    object.__setattr__(result, "provenance_id", prov.provenance_id)
+            except Exception as exc:
+                logger.warning("Failed to record backtest provenance: %s", exc)
 
         if self.event_bus:
             evt_type = (

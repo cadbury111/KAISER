@@ -322,6 +322,158 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 10. Market Data Provenance Endpoint (/api/data-provenance)
+            if path == "/api/data-provenance":
+                tracker = getattr(self.server, "provenance_tracker", None)
+                if tracker is None:
+                    # Fallback to state store if available
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        summary = state_store.get("market_provenance_summary", {})
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "summary": summary,
+                            "records": [],
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "unavailable",
+                            "message": "Market data provenance tracker not attached.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                prov_id = query.get("provenance_id", [None])[0]
+                if prov_id:
+                    if ".." in prov_id or not SAFE_ID_PATTERN.match(prov_id.strip()):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Valid 'provenance_id' query parameter is required.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    prov = tracker.get_provenance(prov_id)
+                    if not prov:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Provenance record '{prov_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "provenance": prov.to_dict(),
+                    })
+                    return
+
+                symbol_param = query.get("symbol", [None])[0]
+                timeframe_param = query.get("timeframe", [None])[0]
+                source_type_param = query.get("source_type", [None])[0]
+                limit_val = int(query.get("limit", ["50"])[0])
+                offset_val = int(query.get("offset", ["0"])[0])
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                records = tracker.get_audit_history(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                    symbol=symbol_param,
+                    timeframe=timeframe_param,
+                    source_type=source_type_param,
+                )
+                summary = tracker.get_summary()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "summary": summary,
+                    "count": len(records),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "records": [r.to_dict() for r in records],
+                })
+                return
+
+            # 11. Market Data Lineage Endpoint (/api/data-lineage or /api/data-lineage/<provenance_id>)
+            if path == "/api/data-lineage" or path.startswith("/api/data-lineage/"):
+                tracker = getattr(self.server, "provenance_tracker", None)
+                if tracker is None:
+                    self._send_json_response(
+                        {
+                            "status": "unavailable",
+                            "message": "Market data provenance tracker not attached.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                prov_id = None
+                if path.startswith("/api/data-lineage/"):
+                    prov_id = path[len("/api/data-lineage/"):].strip()
+                if not prov_id:
+                    prov_id = query.get("provenance_id", [None])[0]
+
+                if not prov_id or ".." in prov_id or not SAFE_ID_PATTERN.match(prov_id.strip()):
+                    self._send_json_response(
+                        {
+                            "status": "invalid_request",
+                            "message": "Valid 'provenance_id' query parameter is required.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+
+                direction = query.get("direction", ["upstream"])[0]
+                depth_val = int(query.get("max_depth", ["10"])[0])
+                depth_clamped = max(1, min(20, depth_val))
+
+                graph = tracker.get_lineage(
+                    provenance_id=prov_id.strip(),
+                    max_depth=depth_clamped,
+                    direction=direction,
+                )
+                if not graph.nodes:
+                    self._send_json_response(
+                        {
+                            "status": "not_found",
+                            "message": f"Provenance record '{prov_id}' not found.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "provenance_id": prov_id.strip(),
+                    "lineage": graph.to_dict(),
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -414,20 +566,22 @@ class PortfolioDashboardServer:
 
     def __init__(
         self,
-        reporting_service: PortfolioReportingService,
+        reporting_service: Optional[PortfolioReportingService] = None,
         host: str = "127.0.0.1",
         port: int = 8080,
         diagnostics_service: Optional[PortfolioDiagnosticsService] = None,
         quality_monitor: Optional[Any] = None,
+        provenance_tracker: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
         Args:
-            reporting_service: PortfolioReportingService instance providing data.
+            reporting_service: Optional PortfolioReportingService instance providing data.
             host: Network interface host to bind to (strictly loopback by default).
             port: Port number to bind to (0 for dynamic free port).
             diagnostics_service: Optional diagnostics service for auditing server lifecycle.
             quality_monitor: Optional MarketDataQualityMonitor for data quality querying.
+            provenance_tracker: Optional MarketDataProvenanceTracker for provenance/lineage queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -440,15 +594,16 @@ class PortfolioDashboardServer:
         if not isinstance(port, int) or port < 0 or port > 65535:
             raise ValidationError(f"Invalid port: {port}. Port must be an integer between 0 and 65535.")
 
-        self.reporting_service = reporting_service
+        self.reporting_service = reporting_service or PortfolioReportingService()
         self.host = clean_host
         self.port = port
         self.diagnostics_service = (
             diagnostics_service
-            or getattr(reporting_service, "diagnostics_service", None)
+            or getattr(self.reporting_service, "diagnostics_service", None)
             or PortfolioDiagnosticsService()
         )
         self.quality_monitor = quality_monitor
+        self.provenance_tracker = provenance_tracker
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -480,10 +635,11 @@ class PortfolioDashboardServer:
             self._server.daemon_threads = True
             self._server.allow_reuse_address = True
 
-            # Attach reporting service and diagnostics to server instance for handler access
+            # Attach reporting service, diagnostics, quality monitor, and provenance tracker to server instance
             setattr(self._server, "reporting_service", self.reporting_service)
             setattr(self._server, "diagnostics_service", self.diagnostics_service)
             setattr(self._server, "quality_monitor", self.quality_monitor)
+            setattr(self._server, "provenance_tracker", self.provenance_tracker)
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port

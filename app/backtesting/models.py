@@ -611,6 +611,7 @@ class BacktestResult:
         "RESEARCH ONLY: Simulated performance does not guarantee future results. "
         "Hypothetical backtest using historical data without live broker execution."
     )
+    provenance_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "trades", tuple(self.trades or ()))
@@ -667,4 +668,5 @@ class BacktestResult:
             "error_message": self.error_message,
             "summary": self.summary_text,
             "disclaimer": self.disclaimer,
+            "provenance_id": self.provenance_id,
         }

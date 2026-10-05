@@ -52,6 +52,7 @@ class HistoricalDataLoader:
         state_store: Optional[StateStore] = None,
         repository: Optional[Any] = None,
         cache: Optional[Any] = None,
+        provenance_tracker: Optional[Any] = None,
         name: str = "historical_data_loader",
     ) -> None:
         self.name = name
@@ -62,6 +63,7 @@ class HistoricalDataLoader:
         self.state_store = state_store
         self.repository = repository
         self.cache = cache
+        self.provenance_tracker = provenance_tracker
         self.normalizer = MarketDataNormalizer()
 
     def set_provider(self, provider: HistoricalDataProvider) -> None:
@@ -102,6 +104,18 @@ class HistoricalDataLoader:
                     },
                 )
             )
+
+        if getattr(self, "provenance_tracker", None) is not None and stored_count > 0:
+            try:
+                self.provenance_tracker.create_repository_provenance(
+                    repository_name=getattr(self.repository, "name", "sqlite_repo"),
+                    symbol=bars[0].symbol,
+                    timeframe=bars[0].timeframe,
+                    bars=bars,
+                    operation_id=f"persist_{uuid.uuid4().hex[:8]}",
+                )
+            except Exception as exc:
+                logger.warning("Failed to record repository provenance: %s", exc)
 
         return stored_count
 
@@ -155,6 +169,19 @@ class HistoricalDataLoader:
                     provider_name=f"{self.provider.name}_cached",
                 )
                 self._publish_loaded_event(cached_resp, cid)
+                if getattr(self, "provenance_tracker", None) is not None:
+                    try:
+                        self.provenance_tracker.create_cache_provenance(
+                            cache_name=getattr(self.cache, "name", "memory_cache"),
+                            symbol=request.symbol,
+                            timeframe=request.timeframe,
+                            bars=cached_resp.bars,
+                            request_start=request.start_time,
+                            request_end=request.end_time,
+                            operation_id=cid,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to record cache provenance in load_bars: %s", exc)
                 return cached_resp
 
         initial_response = self.provider.get_historical_bars(request)
@@ -171,6 +198,21 @@ class HistoricalDataLoader:
                 )
                 self.cache.put(ckey, initial_response.bars, is_complete=True)
             self._publish_loaded_event(initial_response, cid)
+
+            if getattr(self, "provenance_tracker", None) is not None:
+                try:
+                    self.provenance_tracker.create_provider_provenance(
+                        provider_name=self.provider.name,
+                        symbol=request.symbol,
+                        timeframe=request.timeframe,
+                        bars=initial_response.bars,
+                        request_start=request.start_time,
+                        request_end=request.end_time,
+                        operation_id=cid,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to record provider provenance in load_bars: %s", exc)
+
             return initial_response
 
         # Follow pagination cursors
@@ -223,6 +265,21 @@ class HistoricalDataLoader:
             self.cache.put(ckey, final_response.bars, is_complete=True)
 
         self._publish_loaded_event(final_response, cid)
+
+        if getattr(self, "provenance_tracker", None) is not None:
+            try:
+                self.provenance_tracker.create_provider_provenance(
+                    provider_name=self.provider.name,
+                    symbol=request.symbol,
+                    timeframe=request.timeframe,
+                    bars=final_response.bars,
+                    request_start=request.start_time,
+                    request_end=request.end_time,
+                    operation_id=cid,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record provider provenance in load_bars: %s", exc)
+
         return final_response
 
     def load_and_ingest(

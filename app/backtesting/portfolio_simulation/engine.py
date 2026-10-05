@@ -72,6 +72,7 @@ class PortfolioSimulationEngine:
         strategy_registry: Optional[StrategyRegistry] = None,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        provenance_tracker: Optional[Any] = None,
         name: str = "portfolio_simulation_engine",
     ) -> None:
         self.repository = repository
@@ -80,6 +81,7 @@ class PortfolioSimulationEngine:
         self.strategy_registry = strategy_registry or StrategyRegistry()
         self.event_bus = event_bus
         self.state_store = state_store
+        self.provenance_tracker = provenance_tracker
         self.name = name
 
         self._active_simulations: Dict[str, threading.Event] = {}
@@ -1059,6 +1061,34 @@ class PortfolioSimulationEngine:
         # Cleanup active simulation registry
         with self._lock:
             self._active_simulations.pop(config.simulation_id, None)
+
+        # Record Portfolio Simulation Provenance
+        if getattr(self, "provenance_tracker", None) is not None:
+            try:
+                symbols = list(config.symbols) if hasattr(config, "symbols") and config.symbols else [alloc.symbol for alloc in config.allocations]
+                timeframes = [getattr(config, "timeframe", "1m")]
+                parent_ids = []
+                for s in symbols:
+                    p = self.provenance_tracker.get_latest(s, timeframes[0])
+                    if p:
+                        parent_ids.append(p.provenance_id)
+                strat_names = [alloc.strategy_name for alloc in config.allocations]
+                prov = self.provenance_tracker.create_portfolio_simulation_provenance(
+                    simulation_id=result.simulation_id,
+                    symbols=symbols,
+                    timeframes=timeframes,
+                    data_start=result.start_timestamp or config.start_time,
+                    data_end=result.end_timestamp or config.end_time,
+                    bars_evaluated=result.bars_processed,
+                    trades_simulated=result.total_trades,
+                    parent_provenance_ids=parent_ids,
+                    strategy_names=strat_names,
+                    operation_id=result.simulation_id,
+                )
+                if hasattr(result, "provenance_id"):
+                    object.__setattr__(result, "provenance_id", prov.provenance_id)
+            except Exception as exc:
+                logger.warning("Failed to record portfolio simulation provenance: %s", exc)
 
         # StateStore persistence
         if self.state_store:

@@ -194,6 +194,7 @@ class HistoricalReplayEngine:
         analysis_engine: TechnicalAnalysisEngine,
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
+        provenance_tracker: Optional[Any] = None,
         name: str = "historical_replay_engine",
     ) -> None:
         self.name = name
@@ -202,6 +203,7 @@ class HistoricalReplayEngine:
         self.analysis_engine = analysis_engine
         self.event_bus = event_bus
         self.state_store = state_store
+        self.provenance_tracker = provenance_tracker
 
         self._lock = threading.RLock()
         self._active_replays: Dict[str, threading.Event] = {}
@@ -353,6 +355,22 @@ class HistoricalReplayEngine:
                 )
                 self._cleanup_replay(replay_id)
                 self._publish_terminal_event(result, cid)
+
+                if getattr(self, "provenance_tracker", None) is not None:
+                    try:
+                        self.provenance_tracker.create_replay_provenance(
+                            replay_id=result.replay_id,
+                            symbol=result.request.symbol,
+                            timeframe=result.request.timeframe,
+                            bars_replayed=result.bars_replayed,
+                            start_timestamp=result.start_timestamp,
+                            end_timestamp=result.end_timestamp,
+                            operation_id=result.replay_id,
+                            metadata={"status": "CANCELLED", "cancellation_requested": True},
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to record cancelled replay provenance: %s", exc)
+
                 return result
 
             # Apply configurable replay pacing
@@ -460,6 +478,21 @@ class HistoricalReplayEngine:
         if self.state_store:
             self.state_store.set("last_replay_result", result.to_dict())
             self.state_store.update("replays_completed_count", lambda c: (c or 0) + 1, default=0)
+
+        # Record Market Data Lineage & Provenance
+        if getattr(self, "provenance_tracker", None) is not None:
+            try:
+                self.provenance_tracker.create_replay_provenance(
+                    replay_id=result.replay_id,
+                    symbol=result.request.symbol,
+                    timeframe=result.request.timeframe,
+                    bars_replayed=result.bars_replayed,
+                    start_timestamp=result.start_timestamp,
+                    end_timestamp=result.end_timestamp,
+                    operation_id=result.replay_id,
+                )
+            except Exception as exc:
+                logger.warning("Failed to record replay provenance: %s", exc)
 
         logger.info("Historical replay [%s] completed: %s", replay_id, result.summary_text)
         return result

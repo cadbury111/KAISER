@@ -56,6 +56,10 @@ from app.portfolio import (
     register_reporting_handlers,
 )
 from app.market.quality import MarketDataQualityMonitor, register_quality_handlers
+from app.market.provenance import (
+    MarketDataProvenanceTracker,
+    register_provenance_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -98,6 +102,7 @@ class SystemStatus:
     portfolio_dashboard_server: Optional[PortfolioDashboardServer] = None
     portfolio_diagnostics_service: Optional[PortfolioDiagnosticsService] = None
     quality_monitor: Optional[MarketDataQualityMonitor] = None
+    provenance_tracker: Optional[MarketDataProvenanceTracker] = None
 
 
 
@@ -240,6 +245,18 @@ def bootstrap_system(
     historical_repository = SQLiteHistoricalBarRepository(db_path=db_path, name="sqlite_historical_repo")
     historical_cache = HistoricalDataCache(max_size=200, ttl_seconds=300.0)
 
+    # Initialize Market Data Provenance & Lineage Tracker (Phase 2, Step 20)
+    provenance_tracker = MarketDataProvenanceTracker(
+        event_bus=event_bus,
+        state_store=state_store,
+        db_path=db_path,
+        name="kaiser_main_provenance_tracker",
+    )
+    register_provenance_handlers(
+        orchestrator=orchestrator,
+        provenance_tracker=provenance_tracker,
+    )
+
     # Initialize Historical Market Data Provider and Loader
     historical_provider = MockHistoricalDataProvider(name="mock_historical_provider")
     historical_loader = HistoricalDataLoader(
@@ -250,6 +267,7 @@ def bootstrap_system(
         state_store=state_store,
         repository=historical_repository,
         cache=historical_cache,
+        provenance_tracker=provenance_tracker,
         name="kaiser_main_historical_loader",
     )
 
@@ -260,6 +278,7 @@ def bootstrap_system(
         analysis_engine=analysis_engine,
         event_bus=event_bus,
         state_store=state_store,
+        provenance_tracker=provenance_tracker,
         name="kaiser_main_replay_engine",
     )
 
@@ -279,6 +298,7 @@ def bootstrap_system(
         strategy_registry=strategy_registry,
         event_bus=event_bus,
         state_store=state_store,
+        provenance_tracker=provenance_tracker,
         name="kaiser_main_backtest_engine",
     )
     walk_forward_validator = WalkForwardValidator(
@@ -306,6 +326,7 @@ def bootstrap_system(
         strategy_registry=strategy_registry,
         event_bus=event_bus,
         state_store=state_store,
+        provenance_tracker=provenance_tracker,
         name="kaiser_main_portfolio_simulation_engine",
     )
     register_backtest_handlers(
@@ -370,6 +391,7 @@ def bootstrap_system(
         port=active_settings.dashboard_port,
         diagnostics_service=portfolio_diagnostics_service,
         quality_monitor=quality_monitor,
+        provenance_tracker=provenance_tracker,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -452,11 +474,13 @@ def bootstrap_system(
         portfolio_dashboard_server=portfolio_dashboard_server,
         portfolio_diagnostics_service=portfolio_diagnostics_service,
         quality_monitor=quality_monitor,
+        provenance_tracker=provenance_tracker,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
     logger.info("Voice-first architecture: %s", status.voice_architecture)
     logger.info("Market data quality monitor: ready")
+    logger.info("Market data provenance & lineage tracker: ready")
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

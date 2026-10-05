@@ -45,6 +45,15 @@ from app.market.quality import (
     is_safe_for_downstream,
     resolve_quality_status,
 )
+from app.market.provenance import (
+    DataSourceType,
+    LineageGraph,
+    LineageNode,
+    MarketDataProvenance,
+    MarketDataProvenanceTracker,
+    generate_deterministic_provenance_id,
+    register_provenance_handlers,
+)
 from app.market.service import MarketDataService
 from app.market.validators import DataFreshnessStatus, check_freshness
 
@@ -90,4 +99,11 @@ __all__ = [
     "HistoricalReplayResult",
     "HistoricalReplayStatus",
     "HistoricalReplayEngine",
+    "DataSourceType",
+    "MarketDataProvenance",
+    "LineageNode",
+    "LineageGraph",
+    "generate_deterministic_provenance_id",
+    "MarketDataProvenanceTracker",
+    "register_provenance_handlers",
 ]
