@@ -96,6 +96,18 @@ from app.analysis.evidence import (
     evidence_priority_key,
     register_evidence_handlers,
 )
+from app.analysis.opportunities import (
+    DEFAULT_MAX_OPPORTUNITY_HISTORY,
+    ConfidenceState,
+    ObservationWindow,
+    OpportunityAssessmentEngine,
+    OpportunityCandidate,
+    OpportunityState,
+    OpportunityVoiceSummary,
+    PROHIBITED_RECOMMENDATION_FIELDS,
+    register_opportunity_handlers,
+    validate_no_prohibited_fields,
+)
 
 __all__ = [
     # Domain Models & Timeframe Constants
@@ -175,5 +187,17 @@ __all__ = [
     "EvidenceSynthesisEngine",
     "register_evidence_handlers",
     "evidence_priority_key",
+    # Opportunity Assessment & Decision Support (Phase 2 Step 24)
+    "OpportunityCandidate",
+    "OpportunityState",
+    "ConfidenceState",
+    "ObservationWindow",
+    "OpportunityVoiceSummary",
+    "OpportunityAssessmentEngine",
+    "register_opportunity_handlers",
+    "PROHIBITED_RECOMMENDATION_FIELDS",
+    "DEFAULT_MAX_OPPORTUNITY_HISTORY",
+    "validate_no_prohibited_fields",
 ]
+
 

@@ -72,6 +72,10 @@ from app.analysis.evidence import (
     EvidenceSynthesisEngine,
     register_evidence_handlers,
 )
+from app.analysis.opportunities import (
+    OpportunityAssessmentEngine,
+    register_opportunity_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -118,6 +122,8 @@ class SystemStatus:
     run_registry: Optional[AnalysisRunRegistry] = None
     comparison_engine: Optional[RunComparisonEngine] = None
     evidence_engine: Optional[EvidenceSynthesisEngine] = None
+    opportunity_engine: Optional[OpportunityAssessmentEngine] = None
+
 
 
 
@@ -444,6 +450,18 @@ def bootstrap_system(
         evidence_engine=evidence_engine,
     )
 
+    # Initialize Opportunity Assessment & Decision Support Engine (Phase 2, Step 24)
+    opportunity_engine = OpportunityAssessmentEngine(
+        evidence_engine=evidence_engine,
+        run_registry=run_registry,
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_opportunity_handlers(
+        orchestrator=orchestrator,
+        opportunity_engine=opportunity_engine,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -455,6 +473,7 @@ def bootstrap_system(
         run_registry=run_registry,
         comparison_engine=comparison_engine,
         evidence_engine=evidence_engine,
+        opportunity_engine=opportunity_engine,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -464,6 +483,7 @@ def bootstrap_system(
         service=portfolio_reporting_service,
         server=portfolio_dashboard_server,
     )
+
 
 
 
@@ -541,6 +561,7 @@ def bootstrap_system(
         run_registry=run_registry,
         comparison_engine=comparison_engine,
         evidence_engine=evidence_engine,
+        opportunity_engine=opportunity_engine,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -550,6 +571,8 @@ def bootstrap_system(
     logger.info("Reproducible analysis run registry: ready (max_history=1000)")
     logger.info("Run comparison & experiment evaluation engine: ready (cache=%s)", comparison_engine.max_cache_size)
     logger.info("Evidence synthesis & decision-support engine: ready (max_history=%s)", evidence_engine.max_history)
+    logger.info("Opportunity assessment & decision-support engine: ready (max_history=%s)", opportunity_engine.max_history)
+
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

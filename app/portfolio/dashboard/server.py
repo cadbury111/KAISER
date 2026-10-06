@@ -790,6 +790,118 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 16. Opportunity Assessments Endpoint (/api/opportunity-assessments or /api/opportunity-assessments/<candidate_id>)
+            if path == "/api/opportunity-assessments" or path.startswith("/api/opportunity-assessments/"):
+                opp_engine = getattr(self.server, "opportunity_engine", None)
+                if opp_engine is None:
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        latest = state_store.get("opportunity_assessment:latest", None)
+                        history = state_store.get("opportunity_assessment:history", [])
+                        if path.startswith("/api/opportunity-assessments/"):
+                            req_id = path[len("/api/opportunity-assessments/"):].strip()
+                            if latest and latest.get("candidate_id") == req_id:
+                                self._send_json_response({
+                                    "status": "success",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                    "assessment": latest,
+                                })
+                                return
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Opportunity assessment '{req_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "count": len(history),
+                            "assessments": history,
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Opportunity assessment engine not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                candidate_id = None
+                if path.startswith("/api/opportunity-assessments/"):
+                    candidate_id = path[len("/api/opportunity-assessments/"):].strip()
+
+                if candidate_id:
+                    if ".." in candidate_id or not SAFE_ID_PATTERN.match(candidate_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid candidate_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    cand = opp_engine.get_assessment(candidate_id)
+                    if not cand:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Opportunity candidate '{candidate_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    c_dict = cand.to_dict() if hasattr(cand, "to_dict") else cand
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "assessment": c_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/opportunity-assessments
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                assessments = opp_engine.list_assessments(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(assessments),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "assessments": [a.to_dict() if hasattr(a, "to_dict") else a for a in assessments],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -804,6 +916,14 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 {"error": "Internal Server Error", "message": "An error occurred generating dashboard data."},
                 status=HTTPStatus.INTERNAL_SERVER_ERROR,
             )
+
+    def do_HEAD(self) -> None:
+        """Handle HEAD requests identically to GET with headers only (no body)."""
+        self._is_head = True
+        try:
+            self.do_GET()
+        finally:
+            self._is_head = False
 
     def do_POST(self) -> None:
         """Reject POST requests with 405 Method Not Allowed (read-only safety constraint)."""
@@ -836,7 +956,8 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self._add_security_headers()
         self.end_headers()
-        self.wfile.write(encoded)
+        if not getattr(self, "_is_head", False):
+            self.wfile.write(encoded)
 
     def _add_security_headers(self) -> None:
         """Inject defense-in-depth security headers into all HTTP responses."""
@@ -859,7 +980,8 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self._add_security_headers()
         self.end_headers()
-        self.wfile.write(encoded)
+        if not getattr(self, "_is_head", False):
+            self.wfile.write(encoded)
 
     def _send_json_response(self, data: Dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         """Send a JSON HTTP response with security headers and sanitized numeric values."""
@@ -870,7 +992,9 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self._add_security_headers()
         self.end_headers()
-        self.wfile.write(encoded)
+        if not getattr(self, "_is_head", False):
+            self.wfile.write(encoded)
+
 
     def log_message(self, format: str, *args: Any) -> None:
         """Route HTTP server logs through standard logging rather than raw stderr."""
@@ -891,6 +1015,7 @@ class PortfolioDashboardServer:
         run_registry: Optional[Any] = None,
         comparison_engine: Optional[Any] = None,
         evidence_engine: Optional[Any] = None,
+        opportunity_engine: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -904,6 +1029,7 @@ class PortfolioDashboardServer:
             run_registry: Optional AnalysisRunRegistry for reproducible experiment run queries.
             comparison_engine: Optional RunComparisonEngine for experiment comparison queries.
             evidence_engine: Optional EvidenceSynthesisEngine for decision-support evidence queries.
+            opportunity_engine: Optional OpportunityAssessmentEngine for opportunity candidate queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -929,6 +1055,7 @@ class PortfolioDashboardServer:
         self.run_registry = run_registry
         self.comparison_engine = comparison_engine
         self.evidence_engine = evidence_engine
+        self.opportunity_engine = opportunity_engine
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -968,6 +1095,8 @@ class PortfolioDashboardServer:
             setattr(self._server, "run_registry", self.run_registry)
             setattr(self._server, "comparison_engine", self.comparison_engine)
             setattr(self._server, "evidence_engine", self.evidence_engine)
+            setattr(self._server, "opportunity_engine", self.opportunity_engine)
+
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port
