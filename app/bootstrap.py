@@ -78,10 +78,12 @@ from app.analysis.opportunities import (
     OpportunityPrioritizationEngine,
     InvestigationSessionManager,
     InvestigationReportingService,
+    InvestigationComparisonEngine,
     register_opportunity_handlers,
     register_prioritization_handlers,
     register_investigation_handlers,
     register_investigation_reporting_handlers,
+    register_investigation_comparison_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -134,6 +136,7 @@ class SystemStatus:
     investigation_queue: Optional[OpportunityInvestigationQueue] = None
     investigation_manager: Optional[InvestigationSessionManager] = None
     investigation_reporting_service: Optional[InvestigationReportingService] = None
+    investigation_comparison_engine: Optional[InvestigationComparisonEngine] = None
 
 
 
@@ -511,6 +514,18 @@ def bootstrap_system(
         session_manager=investigation_manager,
     )
 
+    # Initialize Cross-Investigation Evidence Comparison & Review Consistency (Phase 2, Step 28)
+    investigation_comparison_engine = InvestigationComparisonEngine(
+        state_store=state_store,
+        event_bus=event_bus,
+        reporting_service=investigation_reporting_service,
+    )
+    register_investigation_comparison_handlers(
+        orchestrator=orchestrator,
+        comparison_engine=investigation_comparison_engine,
+        reporting_service=investigation_reporting_service,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -527,6 +542,7 @@ def bootstrap_system(
         investigation_queue=investigation_queue,
         investigation_manager=investigation_manager,
         investigation_reporting_service=investigation_reporting_service,
+        investigation_comparison_engine=investigation_comparison_engine,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -619,6 +635,7 @@ def bootstrap_system(
         investigation_queue=investigation_queue,
         investigation_manager=investigation_manager,
         investigation_reporting_service=investigation_reporting_service,
+        investigation_comparison_engine=investigation_comparison_engine,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -633,6 +650,7 @@ def bootstrap_system(
     logger.info("Opportunity investigation queue: ready (capacity=%s)", investigation_queue.max_capacity)
     logger.info("Human investigation session manager: ready (max_history=%s)", investigation_manager.max_history)
     logger.info("Investigation reporting service: ready (max_history=%s)", investigation_reporting_service.max_history)
+    logger.info("Cross-investigation comparison engine: ready (max_history=%s)", investigation_comparison_engine.max_history)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

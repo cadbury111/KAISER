@@ -1385,6 +1385,143 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # 21. Cross-Investigation Comparisons Endpoint (/api/investigation-comparisons, /api/investigation-comparisons/<comparison_id>, /api/investigation-comparisons/<comparison_id>/discrepancies)
+            if path == "/api/investigation-comparisons" or path.startswith("/api/investigation-comparisons/"):
+                comp_engine = getattr(self.server, "investigation_comparison_engine", None)
+                state_store = getattr(service, "state_store", None)
+
+                if path.startswith("/api/investigation-comparisons/"):
+                    rest = path[len("/api/investigation-comparisons/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/discrepancies"):
+                        comp_id = rest[:-len("/discrepancies")].strip()
+                        sub_resource = "discrepancies"
+                    else:
+                        comp_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not comp_id
+                        or ".." in comp_id
+                        or "/" in comp_id
+                        or "\\" in comp_id
+                        or "\0" in comp_id
+                        or len(comp_id) > 128
+                        or not SAFE_ID_PATTERN.match(comp_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid comparison_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    c_dict = None
+                    if comp_engine is not None:
+                        cmp_obj = comp_engine.get_comparison(comp_id)
+                        if cmp_obj is not None:
+                            c_dict = cmp_obj.to_dict()
+
+                    if c_dict is None and state_store is not None:
+                        latest = state_store.get("investigation_comparison:latest", None)
+                        if isinstance(latest, dict) and latest.get("comparison_id") == comp_id:
+                            c_dict = latest
+                        else:
+                            item = state_store.get(f"investigation_comparison:{comp_id}", None)
+                            if isinstance(item, dict):
+                                c_dict = item
+
+                    if c_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Investigation comparison '{comp_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "discrepancies":
+                        discs = c_dict.get("discrepancy_summary", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "count": len(discs),
+                            "discrepancies": discs,
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "comparison": c_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/investigation-comparisons
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                rep_param = query.get("report_id", [None])[0]
+                state_param = query.get("comparability_state", [None])[0]
+
+                if comp_engine is not None:
+                    comparisons = comp_engine.list_comparisons(
+                        report_id=rep_param,
+                        comparability_state=state_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(comparisons),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "comparisons": [c.to_dict() if hasattr(c, "to_dict") else c for c in comparisons],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("investigation_comparison:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "comparisons": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Investigation comparison engine not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -1509,6 +1646,7 @@ class PortfolioDashboardServer:
         investigation_queue: Optional[Any] = None,
         investigation_manager: Optional[Any] = None,
         investigation_reporting_service: Optional[Any] = None,
+        investigation_comparison_engine: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1527,6 +1665,7 @@ class PortfolioDashboardServer:
             investigation_queue: Optional OpportunityInvestigationQueue for queue inspection queries.
             investigation_manager: Optional InvestigationSessionManager for human investigation session queries.
             investigation_reporting_service: Optional InvestigationReportingService for analytical investigation report queries.
+            investigation_comparison_engine: Optional InvestigationComparisonEngine for cross-investigation comparison queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1557,6 +1696,7 @@ class PortfolioDashboardServer:
         self.investigation_queue = investigation_queue
         self.investigation_manager = investigation_manager
         self.investigation_reporting_service = investigation_reporting_service
+        self.investigation_comparison_engine = investigation_comparison_engine
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1601,6 +1741,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "investigation_queue", self.investigation_queue)
             setattr(self._server, "investigation_manager", self.investigation_manager)
             setattr(self._server, "investigation_reporting_service", self.investigation_reporting_service)
+            setattr(self._server, "investigation_comparison_engine", self.investigation_comparison_engine)
 
 
 
