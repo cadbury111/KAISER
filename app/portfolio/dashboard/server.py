@@ -1224,6 +1224,167 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 20. Analytical Investigation Reports Endpoint (/api/investigation-reports, /api/investigation-reports/<report_id>, /api/investigation-reports/<report_id>/evidence, /api/investigation-reports/<report_id>/audit)
+            if path == "/api/investigation-reports" or path.startswith("/api/investigation-reports/"):
+                inv_rep_service = getattr(self.server, "investigation_reporting_service", None)
+                state_store = getattr(service, "state_store", None)
+
+                if path.startswith("/api/investigation-reports/"):
+                    rest = path[len("/api/investigation-reports/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/evidence"):
+                        report_id = rest[:-len("/evidence")].strip()
+                        sub_resource = "evidence"
+                    elif rest.endswith("/audit"):
+                        report_id = rest[:-len("/audit")].strip()
+                        sub_resource = "audit"
+                    else:
+                        report_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not report_id
+                        or ".." in report_id
+                        or "/" in report_id
+                        or "\\" in report_id
+                        or "\0" in report_id
+                        or len(report_id) > 128
+                        or not SAFE_ID_PATTERN.match(report_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid report_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    r_dict = None
+                    if inv_rep_service is not None:
+                        rep = inv_rep_service.get_report(report_id)
+                        if rep is not None:
+                            r_dict = rep.to_dict()
+
+                    if r_dict is None and state_store is not None:
+                        # Fallback to state store
+                        latest = state_store.get("investigation_report:latest", None)
+                        if isinstance(latest, dict) and latest.get("report_id") == report_id:
+                            r_dict = latest
+                        else:
+                            item = state_store.get(f"investigation_report:{report_id}", None)
+                            if isinstance(item, dict):
+                                r_dict = item
+                            else:
+                                history = state_store.get("investigation_report:history", [])
+                                if isinstance(history, list):
+                                    for h in history:
+                                        if isinstance(h, dict) and h.get("report_id") == report_id:
+                                            r_dict = h
+                                            break
+
+                    if r_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Investigation report '{report_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "evidence":
+                        ev_matrix = r_dict.get("evidence_matrix", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "count": len(ev_matrix),
+                            "evidence_matrix": ev_matrix,
+                        })
+                        return
+
+                    if sub_resource == "audit":
+                        audit_summary = r_dict.get("audit_summary", None)
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "audit_summary": audit_summary,
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "report": r_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/investigation-reports
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                cand_param = query.get("candidate_id", [None])[0]
+                sess_param = query.get("session_id", [None])[0]
+                status_param = query.get("status", [None])[0]
+
+                if inv_rep_service is not None:
+                    reports = inv_rep_service.list_reports(
+                        candidate_id=cand_param,
+                        session_id=sess_param,
+                        status=status_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(reports),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "reports": [r.to_dict() if hasattr(r, "to_dict") else r for r in reports],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("investigation_report:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "reports": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Investigation reporting service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -1347,6 +1508,7 @@ class PortfolioDashboardServer:
         prioritization_engine: Optional[Any] = None,
         investigation_queue: Optional[Any] = None,
         investigation_manager: Optional[Any] = None,
+        investigation_reporting_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1364,6 +1526,7 @@ class PortfolioDashboardServer:
             prioritization_engine: Optional OpportunityPrioritizationEngine for priority record queries.
             investigation_queue: Optional OpportunityInvestigationQueue for queue inspection queries.
             investigation_manager: Optional InvestigationSessionManager for human investigation session queries.
+            investigation_reporting_service: Optional InvestigationReportingService for analytical investigation report queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1393,6 +1556,7 @@ class PortfolioDashboardServer:
         self.prioritization_engine = prioritization_engine
         self.investigation_queue = investigation_queue
         self.investigation_manager = investigation_manager
+        self.investigation_reporting_service = investigation_reporting_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1436,6 +1600,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "prioritization_engine", self.prioritization_engine)
             setattr(self._server, "investigation_queue", self.investigation_queue)
             setattr(self._server, "investigation_manager", self.investigation_manager)
+            setattr(self._server, "investigation_reporting_service", self.investigation_reporting_service)
 
 
 

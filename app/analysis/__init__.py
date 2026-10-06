@@ -135,6 +135,19 @@ from app.analysis.opportunities import (
     register_prioritization_handlers,
     sanitize_reviewer_id,
     validate_no_prohibited_fields,
+    DEFAULT_MAX_REPORT_HISTORY,
+    AttributionType,
+    AuditSummary,
+    EvidenceMatrixEntry,
+    InvestigationReport,
+    InvestigationReportVoiceSummary,
+    InvestigationReportingService,
+    ObservationMatrixEntry,
+    ReportStatus,
+    ReproducibilityRecord,
+    compute_deterministic_report_id,
+    register_investigation_reporting_handlers,
+    validate_numerical_integrity,
 )
 
 __all__ = [
@@ -256,6 +269,19 @@ __all__ = [
     "register_investigation_handlers",
     "sanitize_reviewer_id",
     "DEFAULT_MAX_SESSION_HISTORY",
+    "DEFAULT_MAX_REPORT_HISTORY",
+    "AttributionType",
+    "AuditSummary",
+    "EvidenceMatrixEntry",
+    "InvestigationReport",
+    "InvestigationReportVoiceSummary",
+    "InvestigationReportingService",
+    "ObservationMatrixEntry",
+    "ReportStatus",
+    "ReproducibilityRecord",
+    "compute_deterministic_report_id",
+    "register_investigation_reporting_handlers",
+    "validate_numerical_integrity",
 ]
 
 

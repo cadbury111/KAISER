@@ -77,9 +77,11 @@ from app.analysis.opportunities import (
     OpportunityInvestigationQueue,
     OpportunityPrioritizationEngine,
     InvestigationSessionManager,
+    InvestigationReportingService,
     register_opportunity_handlers,
     register_prioritization_handlers,
     register_investigation_handlers,
+    register_investigation_reporting_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -131,6 +133,7 @@ class SystemStatus:
     prioritization_engine: Optional[OpportunityPrioritizationEngine] = None
     investigation_queue: Optional[OpportunityInvestigationQueue] = None
     investigation_manager: Optional[InvestigationSessionManager] = None
+    investigation_reporting_service: Optional[InvestigationReportingService] = None
 
 
 
@@ -497,6 +500,17 @@ def bootstrap_system(
         investigation_manager=investigation_manager,
     )
 
+    # Initialize Investigation Reporting & Evidence Review Audit (Phase 2, Step 27)
+    investigation_reporting_service = InvestigationReportingService(
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_investigation_reporting_handlers(
+        orchestrator=orchestrator,
+        reporting_service=investigation_reporting_service,
+        session_manager=investigation_manager,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -512,6 +526,7 @@ def bootstrap_system(
         prioritization_engine=prioritization_engine,
         investigation_queue=investigation_queue,
         investigation_manager=investigation_manager,
+        investigation_reporting_service=investigation_reporting_service,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -603,6 +618,7 @@ def bootstrap_system(
         prioritization_engine=prioritization_engine,
         investigation_queue=investigation_queue,
         investigation_manager=investigation_manager,
+        investigation_reporting_service=investigation_reporting_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -616,6 +632,7 @@ def bootstrap_system(
     logger.info("Opportunity prioritization engine: ready (max_history=%s)", prioritization_engine.max_history)
     logger.info("Opportunity investigation queue: ready (capacity=%s)", investigation_queue.max_capacity)
     logger.info("Human investigation session manager: ready (max_history=%s)", investigation_manager.max_history)
+    logger.info("Investigation reporting service: ready (max_history=%s)", investigation_reporting_service.max_history)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

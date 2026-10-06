@@ -110,6 +110,7 @@ def _create_mock_run(
     quality_status: Optional[DataQualityStatus] = DataQualityStatus.VALID,
     input_provenance_ids: Tuple[str, ...] = (),
     record_count: int = 500,
+    now: Optional[float] = None,
 ) -> AnalysisRun:
     """Helper to create valid AnalysisRun instances for testing."""
     cfg = {"symbol": symbols[0], "timeframe": "1h", "fast_period": 10, "slow_period": 30}
@@ -119,7 +120,7 @@ def _create_mock_run(
         input_provenance_ids=input_provenance_ids,
         configuration_fingerprint=fp,
     )
-    now = time.time()
+    now = now if now is not None else time.time()
     exec_meta = metrics or {
         "total_return_pct": 12.5,
         "net_profit": 1250.0,
@@ -820,8 +821,9 @@ def test_property_deterministic_reproducibility():
     engine1 = EvidenceSynthesisEngine(clock=clock_fixed)
     engine2 = EvidenceSynthesisEngine(clock=clock_fixed)
 
-    run1 = _create_mock_run("run_prop")
-    run2 = _create_mock_run("run_prop")
+    t_fixed = 1700000000.0
+    run1 = _create_mock_run("run_prop", now=t_fixed)
+    run2 = _create_mock_run("run_prop", now=t_fixed)
 
     rep1 = engine1.synthesize(subject="Prop Test", runs=[run1])
     rep2 = engine2.synthesize(subject="Prop Test", runs=[run2])

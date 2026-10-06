@@ -34,6 +34,21 @@ from app.analysis.opportunities.investigation.session import (
 from app.analysis.opportunities.investigation.handlers import (
     register_investigation_handlers,
 )
+from app.analysis.opportunities.investigation.reporting import (
+    DEFAULT_MAX_REPORT_HISTORY,
+    AttributionType,
+    AuditSummary,
+    EvidenceMatrixEntry,
+    InvestigationReport,
+    InvestigationReportVoiceSummary,
+    InvestigationReportingService,
+    ObservationMatrixEntry,
+    ReportStatus,
+    ReproducibilityRecord,
+    compute_deterministic_report_id,
+    register_investigation_reporting_handlers,
+    validate_numerical_integrity,
+)
 
 __all__ = [
     "DEFAULT_MAX_SESSION_HISTORY",
@@ -60,4 +75,17 @@ __all__ = [
     "VALID_SESSION_TRANSITIONS",
     "register_investigation_handlers",
     "sanitize_reviewer_id",
+    "DEFAULT_MAX_REPORT_HISTORY",
+    "AttributionType",
+    "AuditSummary",
+    "EvidenceMatrixEntry",
+    "InvestigationReport",
+    "InvestigationReportVoiceSummary",
+    "InvestigationReportingService",
+    "ObservationMatrixEntry",
+    "ReportStatus",
+    "ReproducibilityRecord",
+    "compute_deterministic_report_id",
+    "register_investigation_reporting_handlers",
+    "validate_numerical_integrity",
 ]
