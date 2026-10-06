@@ -76,8 +76,10 @@ from app.analysis.opportunities import (
     OpportunityAssessmentEngine,
     OpportunityInvestigationQueue,
     OpportunityPrioritizationEngine,
+    InvestigationSessionManager,
     register_opportunity_handlers,
     register_prioritization_handlers,
+    register_investigation_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -128,6 +130,7 @@ class SystemStatus:
     opportunity_engine: Optional[OpportunityAssessmentEngine] = None
     prioritization_engine: Optional[OpportunityPrioritizationEngine] = None
     investigation_queue: Optional[OpportunityInvestigationQueue] = None
+    investigation_manager: Optional[InvestigationSessionManager] = None
 
 
 
@@ -484,6 +487,16 @@ def bootstrap_system(
         opportunity_assessment_engine=opportunity_engine,
     )
 
+    # Initialize Human Investigation Session Workflow (Phase 2, Step 26)
+    investigation_manager = InvestigationSessionManager(
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_investigation_handlers(
+        orchestrator=orchestrator,
+        investigation_manager=investigation_manager,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -498,6 +511,7 @@ def bootstrap_system(
         opportunity_engine=opportunity_engine,
         prioritization_engine=prioritization_engine,
         investigation_queue=investigation_queue,
+        investigation_manager=investigation_manager,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -588,6 +602,7 @@ def bootstrap_system(
         opportunity_engine=opportunity_engine,
         prioritization_engine=prioritization_engine,
         investigation_queue=investigation_queue,
+        investigation_manager=investigation_manager,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -600,6 +615,7 @@ def bootstrap_system(
     logger.info("Opportunity assessment & decision-support engine: ready (max_history=%s)", opportunity_engine.max_history)
     logger.info("Opportunity prioritization engine: ready (max_history=%s)", prioritization_engine.max_history)
     logger.info("Opportunity investigation queue: ready (capacity=%s)", investigation_queue.max_capacity)
+    logger.info("Human investigation session manager: ready (max_history=%s)", investigation_manager.max_history)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

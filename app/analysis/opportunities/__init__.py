@@ -29,6 +29,28 @@ from app.analysis.opportunities.prioritization import (
     register_prioritization_handlers,
 )
 
+from app.analysis.opportunities.investigation import (
+    DEFAULT_MAX_SESSION_HISTORY,
+    AnalyticalConclusion,
+    ConclusionState,
+    EvidenceReviewDisposition,
+    EvidenceReviewRecord,
+    InvestigationAuditRecord,
+    InvestigationLimitation,
+    InvestigationObservation,
+    InvestigationReviewNote,
+    InvestigationSession,
+    InvestigationSessionManager,
+    InvestigationUncertainty,
+    InvestigationVoiceSummary,
+    ObservationType,
+    SessionState,
+    SourceType,
+    VALID_SESSION_TRANSITIONS,
+    register_investigation_handlers,
+    sanitize_reviewer_id,
+)
+
 __all__ = [
     "OpportunityAssessmentEngine",
     "register_opportunity_handlers",
@@ -50,5 +72,24 @@ __all__ = [
     "DEFAULT_MAX_PRIORITY_HISTORY",
     "DEFAULT_MAX_QUEUE_CAPACITY",
     "STATE_RANK",
+    "InvestigationSession",
+    "InvestigationSessionManager",
+    "SessionState",
+    "ObservationType",
+    "EvidenceReviewDisposition",
+    "EvidenceReviewRecord",
+    "InvestigationObservation",
+    "InvestigationUncertainty",
+    "InvestigationLimitation",
+    "InvestigationReviewNote",
+    "AnalyticalConclusion",
+    "ConclusionState",
+    "InvestigationVoiceSummary",
+    "InvestigationAuditRecord",
+    "SourceType",
+    "VALID_SESSION_TRANSITIONS",
+    "register_investigation_handlers",
+    "sanitize_reviewer_id",
+    "DEFAULT_MAX_SESSION_HISTORY",
 ]
 

@@ -1071,6 +1071,158 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 19. Human Investigation Sessions Endpoint (/api/investigation-sessions, /api/investigation-sessions/<session_id>, /api/investigation-sessions/<session_id>/events)
+            if path == "/api/investigation-sessions" or path.startswith("/api/investigation-sessions/"):
+                inv_manager = getattr(self.server, "investigation_manager", None)
+                if inv_manager is None:
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        latest = state_store.get("investigation_session:latest", None)
+                        history = state_store.get("investigation_session:history", [])
+                        if path.startswith("/api/investigation-sessions/"):
+                            rest = path[len("/api/investigation-sessions/"):].strip()
+                            if rest.endswith("/events"):
+                                sess_id = rest[:-len("/events")].strip()
+                                self._send_json_response({
+                                    "status": "success",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                    "session_id": sess_id,
+                                    "count": 0,
+                                    "audit_trail": [],
+                                })
+                                return
+                            req_id = rest
+                            if latest and latest.get("session_id") == req_id:
+                                self._send_json_response({
+                                    "status": "success",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                    "session": latest,
+                                })
+                                return
+                            for h in history:
+                                if isinstance(h, dict) and h.get("session_id") == req_id:
+                                    self._send_json_response({
+                                        "status": "success",
+                                        "read_only": True,
+                                        "execution_locked": True,
+                                        "session": h,
+                                    })
+                                    return
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Investigation session '{req_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "count": len(history),
+                            "sessions": history,
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Investigation session manager not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                # Manager is attached
+                if path.startswith("/api/investigation-sessions/"):
+                    rest = path[len("/api/investigation-sessions/"):].strip()
+                    is_events = rest.endswith("/events")
+                    if is_events:
+                        session_id = rest[:-len("/events")].strip()
+                    else:
+                        session_id = rest
+
+                    if not session_id or ".." in session_id or not SAFE_ID_PATTERN.match(session_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid session_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    sess = inv_manager.get_session(session_id)
+                    if not sess:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Investigation session '{session_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if is_events:
+                        audits = inv_manager.get_audit_trail(session_id)
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "session_id": session_id,
+                            "count": len(audits),
+                            "audit_trail": [a.to_dict() for a in audits],
+                        })
+                        return
+
+                    s_dict = sess.to_dict() if hasattr(sess, "to_dict") else sess
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "session": s_dict,
+                    })
+                    return
+
+                # Listing
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                status_param = query.get("status", [None])[0]
+                candidate_param = query.get("candidate_id", [None])[0]
+
+                sessions = inv_manager.list_sessions(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                    status=status_param,
+                    candidate_id=candidate_param,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(sessions),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "sessions": [s.to_dict() if hasattr(s, "to_dict") else s for s in sessions],
+                })
+                return
 
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
@@ -1194,6 +1346,7 @@ class PortfolioDashboardServer:
         opportunity_engine: Optional[Any] = None,
         prioritization_engine: Optional[Any] = None,
         investigation_queue: Optional[Any] = None,
+        investigation_manager: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1210,6 +1363,7 @@ class PortfolioDashboardServer:
             opportunity_engine: Optional OpportunityAssessmentEngine for opportunity candidate queries.
             prioritization_engine: Optional OpportunityPrioritizationEngine for priority record queries.
             investigation_queue: Optional OpportunityInvestigationQueue for queue inspection queries.
+            investigation_manager: Optional InvestigationSessionManager for human investigation session queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1238,6 +1392,7 @@ class PortfolioDashboardServer:
         self.opportunity_engine = opportunity_engine
         self.prioritization_engine = prioritization_engine
         self.investigation_queue = investigation_queue
+        self.investigation_manager = investigation_manager
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1280,6 +1435,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "opportunity_engine", self.opportunity_engine)
             setattr(self._server, "prioritization_engine", self.prioritization_engine)
             setattr(self._server, "investigation_queue", self.investigation_queue)
+            setattr(self._server, "investigation_manager", self.investigation_manager)
 
 
 
