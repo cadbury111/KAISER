@@ -675,6 +675,121 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 15. Evidence Syntheses Endpoint (/api/evidence-syntheses or /api/evidence-syntheses/<report_id>)
+            if path == "/api/evidence-syntheses" or path.startswith("/api/evidence-syntheses/"):
+                evidence_engine = getattr(self.server, "evidence_engine", None)
+                if evidence_engine is None:
+                    # Fallback to state store if available
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        latest = state_store.get("evidence_synthesis:latest", None)
+                        history = state_store.get("evidence_synthesis:history", [])
+                        if path.startswith("/api/evidence-syntheses/"):
+                            req_id = path[len("/api/evidence-syntheses/"):].strip()
+                            if latest and latest.get("report_id") == req_id:
+                                self._send_json_response({
+                                    "status": "success",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                    "report": latest,
+                                })
+                                return
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Evidence synthesis '{req_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "count": len(history),
+                            "reports": history,
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Evidence synthesis engine not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                report_id = None
+                if path.startswith("/api/evidence-syntheses/"):
+                    report_id = path[len("/api/evidence-syntheses/"):].strip()
+
+                if report_id:
+                    if ".." in report_id or not SAFE_ID_PATTERN.match(report_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid report_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    report = evidence_engine.get_synthesis(report_id)
+                    if not report:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Evidence synthesis '{report_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    r_dict = report.to_dict() if hasattr(report, "to_dict") else report
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "report": r_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/evidence-syntheses
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                subject_param = query.get("subject", [None])[0]
+                reports = evidence_engine.list_syntheses(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                    subject=subject_param,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(reports),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "reports": [r.to_dict() for r in reports],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -775,6 +890,7 @@ class PortfolioDashboardServer:
         provenance_tracker: Optional[Any] = None,
         run_registry: Optional[Any] = None,
         comparison_engine: Optional[Any] = None,
+        evidence_engine: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -787,6 +903,7 @@ class PortfolioDashboardServer:
             provenance_tracker: Optional MarketDataProvenanceTracker for provenance/lineage queries.
             run_registry: Optional AnalysisRunRegistry for reproducible experiment run queries.
             comparison_engine: Optional RunComparisonEngine for experiment comparison queries.
+            evidence_engine: Optional EvidenceSynthesisEngine for decision-support evidence queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -811,6 +928,7 @@ class PortfolioDashboardServer:
         self.provenance_tracker = provenance_tracker
         self.run_registry = run_registry
         self.comparison_engine = comparison_engine
+        self.evidence_engine = evidence_engine
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -849,6 +967,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "provenance_tracker", self.provenance_tracker)
             setattr(self._server, "run_registry", self.run_registry)
             setattr(self._server, "comparison_engine", self.comparison_engine)
+            setattr(self._server, "evidence_engine", self.evidence_engine)
 
             # In case dynamic port 0 was passed, update to bound port
             actual_port = self._server.server_port

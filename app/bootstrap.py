@@ -68,6 +68,10 @@ from app.analysis.comparison import (
     RunComparisonEngine,
     register_comparison_handlers,
 )
+from app.analysis.evidence import (
+    EvidenceSynthesisEngine,
+    register_evidence_handlers,
+)
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
 
@@ -113,6 +117,7 @@ class SystemStatus:
     provenance_tracker: Optional[MarketDataProvenanceTracker] = None
     run_registry: Optional[AnalysisRunRegistry] = None
     comparison_engine: Optional[RunComparisonEngine] = None
+    evidence_engine: Optional[EvidenceSynthesisEngine] = None
 
 
 
@@ -425,6 +430,20 @@ def bootstrap_system(
         comparison_engine=comparison_engine,
     )
 
+    # Initialize Evidence Synthesis & Decision-Support Reporting Engine (Phase 2, Step 23)
+    evidence_engine = EvidenceSynthesisEngine(
+        run_registry=run_registry,
+        comparison_engine=comparison_engine,
+        provenance_tracker=provenance_tracker,
+        quality_monitor=quality_monitor,
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_evidence_handlers(
+        orchestrator=orchestrator,
+        evidence_engine=evidence_engine,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -435,6 +454,7 @@ def bootstrap_system(
         provenance_tracker=provenance_tracker,
         run_registry=run_registry,
         comparison_engine=comparison_engine,
+        evidence_engine=evidence_engine,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -520,6 +540,7 @@ def bootstrap_system(
         provenance_tracker=provenance_tracker,
         run_registry=run_registry,
         comparison_engine=comparison_engine,
+        evidence_engine=evidence_engine,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -528,6 +549,7 @@ def bootstrap_system(
     logger.info("Market data provenance & lineage tracker: ready")
     logger.info("Reproducible analysis run registry: ready (max_history=1000)")
     logger.info("Run comparison & experiment evaluation engine: ready (cache=%s)", comparison_engine.max_cache_size)
+    logger.info("Evidence synthesis & decision-support engine: ready (max_history=%s)", evidence_engine.max_history)
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)

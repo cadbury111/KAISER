@@ -70,6 +70,32 @@ from app.analysis.comparison import (
     register_comparison_handlers,
     safe_float,
 )
+from app.analysis.evidence import (
+    ConflictResolutionStatus,
+    ConflictSeverity,
+    ConflictType,
+    DEFAULT_MAX_CONFLICTS,
+    DEFAULT_MAX_EVIDENCE_ITEMS,
+    DEFAULT_MAX_LIMITATIONS,
+    DEFAULT_MAX_OBSERVATIONS,
+    DEFAULT_MAX_SOURCE_RUNS,
+    DEFAULT_MAX_SYNTHESIS_HISTORY,
+    EvidenceConflict,
+    EvidenceItem,
+    EvidenceStatus,
+    EvidenceSynthesisEngine,
+    EvidenceSynthesisReport,
+    EvidenceType,
+    EvidenceUncertainty,
+    EvidenceVoiceSummary,
+    KeyObservation,
+    MissingEvidence,
+    ObservationType,
+    SampleCoverage,
+    UncertaintySource,
+    evidence_priority_key,
+    register_evidence_handlers,
+)
 
 __all__ = [
     # Domain Models & Timeframe Constants
@@ -130,4 +156,24 @@ __all__ = [
     "compare_metrics_dicts",
     "safe_float",
     "register_comparison_handlers",
+    # Evidence Synthesis & Decision-Support Reporting (Phase 2 Step 23)
+    "EvidenceType",
+    "EvidenceStatus",
+    "ObservationType",
+    "ConflictType",
+    "ConflictSeverity",
+    "ConflictResolutionStatus",
+    "UncertaintySource",
+    "EvidenceItem",
+    "KeyObservation",
+    "EvidenceConflict",
+    "EvidenceUncertainty",
+    "MissingEvidence",
+    "SampleCoverage",
+    "EvidenceVoiceSummary",
+    "EvidenceSynthesisReport",
+    "EvidenceSynthesisEngine",
+    "register_evidence_handlers",
+    "evidence_priority_key",
 ]
+
