@@ -87,6 +87,27 @@ from app.analysis.opportunities.comparison import (
     safe_percentage_delta,
 )
 
+from app.analysis.opportunities.resolution import (
+    DEFAULT_MAX_RESOLUTION_HISTORY,
+    DecisionClaimType,
+    DiscrepancyResolutionCase,
+    DiscrepancyResolutionService,
+    EvidenceReconciliationRecord,
+    EvidenceRelationshipType,
+    ReconciliationOutcome,
+    ResolutionAuditRecord,
+    ResolutionDecision,
+    ResolutionState,
+    ResolutionVoiceSummary,
+    TERMINAL_RESOLUTION_STATES,
+    VALID_RESOLUTION_TRANSITIONS,
+    compute_deterministic_audit_id,
+    compute_deterministic_case_id,
+    compute_deterministic_decision_id,
+    compute_deterministic_reconciliation_id,
+    register_discrepancy_resolution_handlers,
+)
+
 __all__ = [
     "OpportunityAssessmentEngine",
     "register_opportunity_handlers",
@@ -160,5 +181,23 @@ __all__ = [
     "compute_deterministic_comparison_id",
     "register_investigation_comparison_handlers",
     "safe_percentage_delta",
+    "DEFAULT_MAX_RESOLUTION_HISTORY",
+    "DecisionClaimType",
+    "DiscrepancyResolutionCase",
+    "DiscrepancyResolutionService",
+    "EvidenceReconciliationRecord",
+    "EvidenceRelationshipType",
+    "ReconciliationOutcome",
+    "ResolutionAuditRecord",
+    "ResolutionDecision",
+    "ResolutionState",
+    "ResolutionVoiceSummary",
+    "TERMINAL_RESOLUTION_STATES",
+    "VALID_RESOLUTION_TRANSITIONS",
+    "compute_deterministic_audit_id",
+    "compute_deterministic_case_id",
+    "compute_deterministic_decision_id",
+    "compute_deterministic_reconciliation_id",
+    "register_discrepancy_resolution_handlers",
 ]
 

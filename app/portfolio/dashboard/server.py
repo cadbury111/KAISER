@@ -1522,6 +1522,159 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # 22. Investigation Discrepancy Resolutions Endpoint (/api/discrepancy-resolutions, /api/discrepancy-resolutions/<resolution_case_id>, /api/discrepancy-resolutions/<resolution_case_id>/evidence, /api/discrepancy-resolutions/<resolution_case_id>/audit)
+            if path == "/api/discrepancy-resolutions" or path.startswith("/api/discrepancy-resolutions/"):
+                res_service = getattr(self.server, "discrepancy_resolution_service", None)
+                state_store = getattr(service, "state_store", None)
+
+                if path.startswith("/api/discrepancy-resolutions/"):
+                    rest = path[len("/api/discrepancy-resolutions/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/evidence"):
+                        case_id = rest[:-len("/evidence")].strip()
+                        sub_resource = "evidence"
+                    elif rest.endswith("/audit"):
+                        case_id = rest[:-len("/audit")].strip()
+                        sub_resource = "audit"
+                    else:
+                        case_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not case_id
+                        or ".." in case_id
+                        or "/" in case_id
+                        or "\\" in case_id
+                        or "\0" in case_id
+                        or len(case_id) > 128
+                        or not SAFE_ID_PATTERN.match(case_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid resolution_case_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    c_dict = None
+                    if res_service is not None:
+                        case_obj = res_service.get_case(case_id)
+                        if case_obj is not None:
+                            c_dict = case_obj.to_dict()
+
+                    if c_dict is None and state_store is not None:
+                        latest = state_store.get("discrepancy_resolution:latest", None)
+                        if isinstance(latest, dict) and latest.get("resolution_case_id") == case_id:
+                            c_dict = latest
+                        else:
+                            item = state_store.get(f"discrepancy_resolution:{case_id}", None)
+                            if isinstance(item, dict):
+                                c_dict = item
+
+                    if c_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resolution case '{case_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "evidence":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "resolution_case_id": case_id,
+                            "supporting_evidence_ids": c_dict.get("supporting_evidence_ids", []),
+                            "reconciliation_records": c_dict.get("reconciliation_records", []),
+                        })
+                        return
+
+                    if sub_resource == "audit":
+                        audits = c_dict.get("audit_trail", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "resolution_case_id": case_id,
+                            "count": len(audits),
+                            "audit_trail": audits,
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "case": c_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/discrepancy-resolutions
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                comp_param = query.get("comparison_id", [None])[0]
+                disc_param = query.get("discrepancy_id", [None])[0]
+                state_param = query.get("state", [None])[0]
+
+                if res_service is not None:
+                    cases = res_service.list_cases(
+                        comparison_id=comp_param,
+                        discrepancy_id=disc_param,
+                        state=state_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(cases),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "cases": [c.to_dict() if hasattr(c, "to_dict") else c for c in cases],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("discrepancy_resolution:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "cases": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Discrepancy resolution service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -1647,6 +1800,7 @@ class PortfolioDashboardServer:
         investigation_manager: Optional[Any] = None,
         investigation_reporting_service: Optional[Any] = None,
         investigation_comparison_engine: Optional[Any] = None,
+        discrepancy_resolution_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1666,6 +1820,7 @@ class PortfolioDashboardServer:
             investigation_manager: Optional InvestigationSessionManager for human investigation session queries.
             investigation_reporting_service: Optional InvestigationReportingService for analytical investigation report queries.
             investigation_comparison_engine: Optional InvestigationComparisonEngine for cross-investigation comparison queries.
+            discrepancy_resolution_service: Optional DiscrepancyResolutionService for discrepancy resolution queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1697,6 +1852,7 @@ class PortfolioDashboardServer:
         self.investigation_manager = investigation_manager
         self.investigation_reporting_service = investigation_reporting_service
         self.investigation_comparison_engine = investigation_comparison_engine
+        self.discrepancy_resolution_service = discrepancy_resolution_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1742,6 +1898,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "investigation_manager", self.investigation_manager)
             setattr(self._server, "investigation_reporting_service", self.investigation_reporting_service)
             setattr(self._server, "investigation_comparison_engine", self.investigation_comparison_engine)
+            setattr(self._server, "discrepancy_resolution_service", self.discrepancy_resolution_service)
 
 
 
