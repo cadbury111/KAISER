@@ -98,14 +98,23 @@ from app.analysis.evidence import (
 )
 from app.analysis.opportunities import (
     DEFAULT_MAX_OPPORTUNITY_HISTORY,
+    DEFAULT_MAX_PRIORITY_HISTORY,
+    DEFAULT_MAX_QUEUE_CAPACITY,
     ConfidenceState,
     ObservationWindow,
     OpportunityAssessmentEngine,
     OpportunityCandidate,
+    OpportunityInvestigationQueue,
+    OpportunityPrioritizationEngine,
+    OpportunityPriorityRecord,
     OpportunityState,
     OpportunityVoiceSummary,
+    PriorityState,
+    PriorityVoiceSummary,
     PROHIBITED_RECOMMENDATION_FIELDS,
+    STATE_RANK,
     register_opportunity_handlers,
+    register_prioritization_handlers,
     validate_no_prohibited_fields,
 )
 
@@ -198,6 +207,17 @@ __all__ = [
     "PROHIBITED_RECOMMENDATION_FIELDS",
     "DEFAULT_MAX_OPPORTUNITY_HISTORY",
     "validate_no_prohibited_fields",
+    # Opportunity Prioritization & Investigation Queue (Phase 2 Step 25)
+    "OpportunityPriorityRecord",
+    "PriorityState",
+    "PriorityVoiceSummary",
+    "OpportunityPrioritizationEngine",
+    "OpportunityInvestigationQueue",
+    "register_prioritization_handlers",
+    "DEFAULT_MAX_PRIORITY_HISTORY",
+    "DEFAULT_MAX_QUEUE_CAPACITY",
+    "STATE_RANK",
 ]
+
 
 

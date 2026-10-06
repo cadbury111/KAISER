@@ -74,7 +74,10 @@ from app.analysis.evidence import (
 )
 from app.analysis.opportunities import (
     OpportunityAssessmentEngine,
+    OpportunityInvestigationQueue,
+    OpportunityPrioritizationEngine,
     register_opportunity_handlers,
+    register_prioritization_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -123,6 +126,8 @@ class SystemStatus:
     comparison_engine: Optional[RunComparisonEngine] = None
     evidence_engine: Optional[EvidenceSynthesisEngine] = None
     opportunity_engine: Optional[OpportunityAssessmentEngine] = None
+    prioritization_engine: Optional[OpportunityPrioritizationEngine] = None
+    investigation_queue: Optional[OpportunityInvestigationQueue] = None
 
 
 
@@ -462,6 +467,23 @@ def bootstrap_system(
         opportunity_engine=opportunity_engine,
     )
 
+    # Initialize Opportunity Prioritization & Investigation Queue (Phase 2, Step 25)
+    prioritization_engine = OpportunityPrioritizationEngine(
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    investigation_queue = OpportunityInvestigationQueue(
+        engine=prioritization_engine,
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_prioritization_handlers(
+        orchestrator=orchestrator,
+        prioritization_engine=prioritization_engine,
+        investigation_queue=investigation_queue,
+        opportunity_assessment_engine=opportunity_engine,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -474,6 +496,8 @@ def bootstrap_system(
         comparison_engine=comparison_engine,
         evidence_engine=evidence_engine,
         opportunity_engine=opportunity_engine,
+        prioritization_engine=prioritization_engine,
+        investigation_queue=investigation_queue,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -562,6 +586,8 @@ def bootstrap_system(
         comparison_engine=comparison_engine,
         evidence_engine=evidence_engine,
         opportunity_engine=opportunity_engine,
+        prioritization_engine=prioritization_engine,
+        investigation_queue=investigation_queue,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -572,6 +598,8 @@ def bootstrap_system(
     logger.info("Run comparison & experiment evaluation engine: ready (cache=%s)", comparison_engine.max_cache_size)
     logger.info("Evidence synthesis & decision-support engine: ready (max_history=%s)", evidence_engine.max_history)
     logger.info("Opportunity assessment & decision-support engine: ready (max_history=%s)", opportunity_engine.max_history)
+    logger.info("Opportunity prioritization engine: ready (max_history=%s)", prioritization_engine.max_history)
+    logger.info("Opportunity investigation queue: ready (capacity=%s)", investigation_queue.max_capacity)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

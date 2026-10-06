@@ -17,6 +17,17 @@ from app.analysis.opportunities.models import (
     OpportunityVoiceSummary,
     validate_no_prohibited_fields,
 )
+from app.analysis.opportunities.prioritization import (
+    DEFAULT_MAX_PRIORITY_HISTORY,
+    DEFAULT_MAX_QUEUE_CAPACITY,
+    STATE_RANK,
+    OpportunityInvestigationQueue,
+    OpportunityPrioritizationEngine,
+    OpportunityPriorityRecord,
+    PriorityState,
+    PriorityVoiceSummary,
+    register_prioritization_handlers,
+)
 
 __all__ = [
     "OpportunityAssessmentEngine",
@@ -30,4 +41,14 @@ __all__ = [
     "FORBIDDEN_VOICE_WORDS",
     "DEFAULT_MAX_OPPORTUNITY_HISTORY",
     "validate_no_prohibited_fields",
+    "OpportunityPrioritizationEngine",
+    "OpportunityInvestigationQueue",
+    "OpportunityPriorityRecord",
+    "PriorityState",
+    "PriorityVoiceSummary",
+    "register_prioritization_handlers",
+    "DEFAULT_MAX_PRIORITY_HISTORY",
+    "DEFAULT_MAX_QUEUE_CAPACITY",
+    "STATE_RANK",
 ]
+

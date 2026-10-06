@@ -902,6 +902,176 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 17. Opportunity Priorities Endpoint (/api/opportunity-priorities or /api/opportunity-priorities/<priority_id>)
+            if path == "/api/opportunity-priorities" or path.startswith("/api/opportunity-priorities/"):
+                prio_engine = getattr(self.server, "prioritization_engine", None)
+                if prio_engine is None:
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        latest = state_store.get("opportunity_priority:latest", None)
+                        history = state_store.get("opportunity_priority:history", [])
+                        if path.startswith("/api/opportunity-priorities/"):
+                            req_id = path[len("/api/opportunity-priorities/"):].strip()
+                            if latest and (latest.get("priority_id") == req_id or latest.get("candidate_id") == req_id):
+                                self._send_json_response({
+                                    "status": "success",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                    "priority": latest,
+                                })
+                                return
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Opportunity priority '{req_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "count": len(history),
+                            "priorities": history,
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Opportunity prioritization engine not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                priority_id = None
+                if path.startswith("/api/opportunity-priorities/"):
+                    priority_id = path[len("/api/opportunity-priorities/"):].strip()
+
+                if priority_id:
+                    if ".." in priority_id or not SAFE_ID_PATTERN.match(priority_id):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid priority_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    rec = prio_engine.get_priority(priority_id)
+                    if not rec:
+                        queue_obj = getattr(self.server, "investigation_queue", None)
+                        if queue_obj:
+                            rec = queue_obj.get(priority_id)
+
+                    if not rec:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Opportunity priority record '{priority_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    r_dict = rec.to_dict() if hasattr(rec, "to_dict") else rec
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "priority": r_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/opportunity-priorities
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                state_param = query.get("state", [None])[0]
+                records = prio_engine.list_priorities(
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                    state=state_param,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(records),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "priorities": [r.to_dict() if hasattr(r, "to_dict") else r for r in records],
+                })
+                return
+
+            # 18. Opportunity Investigation Queue Endpoint (/api/opportunity-queue)
+            if path == "/api/opportunity-queue":
+                queue_obj = getattr(self.server, "investigation_queue", None)
+                if queue_obj is None:
+                    state_store = getattr(service, "state_store", None)
+                    if state_store is not None:
+                        queued = state_store.get("opportunity_queue:latest", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "queue_size": len(queued),
+                            "count": len(queued),
+                            "queue": queued,
+                        })
+                        return
+
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Opportunity investigation queue not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                items = queue_obj.list_queue(limit=limit_clamped, offset=offset_clamped)
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "queue_size": queue_obj.size(),
+                    "count": len(items),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "queue": [i.to_dict() if hasattr(i, "to_dict") else i for i in items],
+                })
+                return
+
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -943,6 +1113,12 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _send_method_not_allowed(self) -> None:
         """Helper to return read-only 405 status with Allow header."""
+        try:
+            cl = int(self.headers.get("Content-Length", 0))
+            if cl > 0:
+                self.rfile.read(min(cl, 65536))
+        except Exception:
+            pass
         self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
         self.send_header("Allow", "GET, HEAD")
         clean_data = sanitize_dict_for_export(
@@ -1016,6 +1192,8 @@ class PortfolioDashboardServer:
         comparison_engine: Optional[Any] = None,
         evidence_engine: Optional[Any] = None,
         opportunity_engine: Optional[Any] = None,
+        prioritization_engine: Optional[Any] = None,
+        investigation_queue: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1030,6 +1208,8 @@ class PortfolioDashboardServer:
             comparison_engine: Optional RunComparisonEngine for experiment comparison queries.
             evidence_engine: Optional EvidenceSynthesisEngine for decision-support evidence queries.
             opportunity_engine: Optional OpportunityAssessmentEngine for opportunity candidate queries.
+            prioritization_engine: Optional OpportunityPrioritizationEngine for priority record queries.
+            investigation_queue: Optional OpportunityInvestigationQueue for queue inspection queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1056,6 +1236,8 @@ class PortfolioDashboardServer:
         self.comparison_engine = comparison_engine
         self.evidence_engine = evidence_engine
         self.opportunity_engine = opportunity_engine
+        self.prioritization_engine = prioritization_engine
+        self.investigation_queue = investigation_queue
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1096,6 +1278,9 @@ class PortfolioDashboardServer:
             setattr(self._server, "comparison_engine", self.comparison_engine)
             setattr(self._server, "evidence_engine", self.evidence_engine)
             setattr(self._server, "opportunity_engine", self.opportunity_engine)
+            setattr(self._server, "prioritization_engine", self.prioritization_engine)
+            setattr(self._server, "investigation_queue", self.investigation_queue)
+
 
 
             # In case dynamic port 0 was passed, update to bound port
