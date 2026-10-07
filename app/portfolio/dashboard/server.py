@@ -1857,6 +1857,197 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # 24. Consolidated Outcome Comparisons Endpoint (/api/consolidated-outcome-comparisons, /api/consolidated-outcome-comparisons/<id>, /api/consolidated-outcome-comparisons/<id>/dimensions, /api/consolidated-outcome-comparisons/<id>/evidence, /api/consolidated-outcome-comparisons/<id>/coverage, /api/consolidated-outcome-comparisons/<id>/divergences, /api/consolidated-outcome-comparisons/<id>/provenance)
+            if path == "/api/consolidated-outcome-comparisons" or path.startswith("/api/consolidated-outcome-comparisons/"):
+                c_service = getattr(self.server, "consistency_service", None)
+                state_store = getattr(service, "state_store", None)
+
+                if path.startswith("/api/consolidated-outcome-comparisons/"):
+                    rest = path[len("/api/consolidated-outcome-comparisons/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/dimensions"):
+                        comp_id = rest[:-len("/dimensions")].strip()
+                        sub_resource = "dimensions"
+                    elif rest.endswith("/evidence"):
+                        comp_id = rest[:-len("/evidence")].strip()
+                        sub_resource = "evidence"
+                    elif rest.endswith("/coverage"):
+                        comp_id = rest[:-len("/coverage")].strip()
+                        sub_resource = "coverage"
+                    elif rest.endswith("/divergences"):
+                        comp_id = rest[:-len("/divergences")].strip()
+                        sub_resource = "divergences"
+                    elif rest.endswith("/provenance"):
+                        comp_id = rest[:-len("/provenance")].strip()
+                        sub_resource = "provenance"
+                    else:
+                        comp_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not comp_id
+                        or ".." in comp_id
+                        or "/" in comp_id
+                        or "\\" in comp_id
+                        or "\0" in comp_id
+                        or len(comp_id) > 128
+                        or not SAFE_ID_PATTERN.match(comp_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid comparison_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    c_dict = None
+                    if c_service is not None:
+                        comp_obj = c_service.get_comparison(comp_id)
+                        if comp_obj is not None:
+                            c_dict = comp_obj.to_dict()
+
+                    if c_dict is None and state_store is not None:
+                        latest = state_store.get("consolidated_outcome_comparison:latest", None)
+                        if isinstance(latest, dict) and latest.get("comparison_id") == comp_id:
+                            c_dict = latest
+                        else:
+                            item = state_store.get(f"consolidated_outcome_comparison:{comp_id}", None)
+                            if isinstance(item, dict):
+                                c_dict = item
+
+                    if c_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Consolidated outcome comparison '{comp_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "dimensions":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "dimensions": c_dict.get("dimensions", []),
+                        })
+                        return
+
+                    if sub_resource == "evidence":
+                        ev = c_dict.get("evidence_consistency", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "count": len(ev),
+                            "evidence_consistency": ev,
+                        })
+                        return
+
+                    if sub_resource == "coverage":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "review_coverage": c_dict.get("review_coverage", {}),
+                        })
+                        return
+
+                    if sub_resource == "divergences":
+                        divs = c_dict.get("divergence_items", [])
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "count": len(divs),
+                            "divergences": divs,
+                        })
+                        return
+
+                    if sub_resource == "provenance":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "comparison_id": comp_id,
+                            "provenance_comparison": c_dict.get("provenance_comparison", {}),
+                            "reproducibility_comparison": c_dict.get("reproducibility_comparison", {}),
+                            "traceability": c_dict.get("traceability", {}),
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "comparison": c_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/consolidated-outcome-comparisons
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                state_param = query.get("comparability_state", [None])[0]
+
+                if c_service is not None:
+                    comparisons = c_service.list_comparisons(
+                        comparability_state=state_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(comparisons),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "comparisons": [c.to_dict() if hasattr(c, "to_dict") else c for c in comparisons],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("consolidated_outcome_comparison:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "comparisons": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Consolidated outcome consistency service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -1984,6 +2175,7 @@ class PortfolioDashboardServer:
         investigation_comparison_engine: Optional[Any] = None,
         discrepancy_resolution_service: Optional[Any] = None,
         consolidation_service: Optional[Any] = None,
+        consistency_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2005,6 +2197,7 @@ class PortfolioDashboardServer:
             investigation_comparison_engine: Optional InvestigationComparisonEngine for cross-investigation comparison queries.
             discrepancy_resolution_service: Optional DiscrepancyResolutionService for discrepancy resolution queries.
             consolidation_service: Optional InvestigationOutcomeConsolidationService for consolidated review queries.
+            consistency_service: Optional ConsolidatedOutcomeConsistencyService for outcome consistency queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -2038,6 +2231,7 @@ class PortfolioDashboardServer:
         self.investigation_comparison_engine = investigation_comparison_engine
         self.discrepancy_resolution_service = discrepancy_resolution_service
         self.consolidation_service = consolidation_service
+        self.consistency_service = consistency_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -2085,6 +2279,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "investigation_comparison_engine", self.investigation_comparison_engine)
             setattr(self._server, "discrepancy_resolution_service", self.discrepancy_resolution_service)
             setattr(self._server, "consolidation_service", self.consolidation_service)
+            setattr(self._server, "consistency_service", self.consistency_service)
 
 
 
