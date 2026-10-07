@@ -80,12 +80,14 @@ from app.analysis.opportunities import (
     InvestigationReportingService,
     InvestigationComparisonEngine,
     DiscrepancyResolutionService,
+    InvestigationOutcomeConsolidationService,
     register_opportunity_handlers,
     register_prioritization_handlers,
     register_investigation_handlers,
     register_investigation_reporting_handlers,
     register_investigation_comparison_handlers,
     register_discrepancy_resolution_handlers,
+    register_consolidation_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -140,6 +142,7 @@ class SystemStatus:
     investigation_reporting_service: Optional[InvestigationReportingService] = None
     investigation_comparison_engine: Optional[InvestigationComparisonEngine] = None
     discrepancy_resolution_service: Optional[DiscrepancyResolutionService] = None
+    consolidation_service: Optional[InvestigationOutcomeConsolidationService] = None
 
 
 
@@ -540,6 +543,19 @@ def bootstrap_system(
         resolution_service=discrepancy_resolution_service,
     )
 
+    # Initialize Resolved Investigation Evidence Consolidation & Review Outcome (Phase 2, Step 30)
+    consolidation_service = InvestigationOutcomeConsolidationService(
+        state_store=state_store,
+        event_bus=event_bus,
+        reporting_service=investigation_reporting_service,
+        comparison_engine=investigation_comparison_engine,
+        resolution_service=discrepancy_resolution_service,
+    )
+    register_consolidation_handlers(
+        orchestrator=orchestrator,
+        consolidation_service=consolidation_service,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -558,6 +574,7 @@ def bootstrap_system(
         investigation_reporting_service=investigation_reporting_service,
         investigation_comparison_engine=investigation_comparison_engine,
         discrepancy_resolution_service=discrepancy_resolution_service,
+        consolidation_service=consolidation_service,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -652,6 +669,7 @@ def bootstrap_system(
         investigation_reporting_service=investigation_reporting_service,
         investigation_comparison_engine=investigation_comparison_engine,
         discrepancy_resolution_service=discrepancy_resolution_service,
+        consolidation_service=consolidation_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -668,6 +686,7 @@ def bootstrap_system(
     logger.info("Investigation reporting service: ready (max_history=%s)", investigation_reporting_service.max_history)
     logger.info("Cross-investigation comparison engine: ready (max_history=%s)", investigation_comparison_engine.max_history)
     logger.info("Investigation discrepancy resolution service: ready (max_history=%s)", discrepancy_resolution_service.max_history)
+    logger.info("Investigation outcome consolidation service: ready (max_history=%s)", consolidation_service.max_history)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

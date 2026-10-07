@@ -1675,6 +1675,188 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # 23. Consolidated Investigation Outcomes Endpoint (/api/investigation-outcomes, /api/investigation-outcomes/<id>, /api/investigation-outcomes/<id>/evidence, /api/investigation-outcomes/<id>/conflicts, /api/investigation-outcomes/<id>/limitations, /api/investigation-outcomes/<id>/provenance)
+            if path == "/api/investigation-outcomes" or path.startswith("/api/investigation-outcomes/"):
+                cons_service = getattr(self.server, "consolidation_service", None)
+                state_store = getattr(service, "state_store", None)
+
+                if path.startswith("/api/investigation-outcomes/"):
+                    rest = path[len("/api/investigation-outcomes/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/evidence"):
+                        outcome_id = rest[:-len("/evidence")].strip()
+                        sub_resource = "evidence"
+                    elif rest.endswith("/conflicts"):
+                        outcome_id = rest[:-len("/conflicts")].strip()
+                        sub_resource = "conflicts"
+                    elif rest.endswith("/limitations"):
+                        outcome_id = rest[:-len("/limitations")].strip()
+                        sub_resource = "limitations"
+                    elif rest.endswith("/provenance"):
+                        outcome_id = rest[:-len("/provenance")].strip()
+                        sub_resource = "provenance"
+                    else:
+                        outcome_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not outcome_id
+                        or ".." in outcome_id
+                        or "/" in outcome_id
+                        or "\\" in outcome_id
+                        or "\0" in outcome_id
+                        or len(outcome_id) > 128
+                        or not SAFE_ID_PATTERN.match(outcome_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid outcome_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    o_dict = None
+                    if cons_service is not None:
+                        out_obj = cons_service.get_outcome(outcome_id)
+                        if out_obj is not None:
+                            o_dict = out_obj.to_dict()
+
+                    if o_dict is None and state_store is not None:
+                        latest = state_store.get("investigation_outcome:latest", None)
+                        if isinstance(latest, dict) and latest.get("outcome_id") == outcome_id:
+                            o_dict = latest
+                        else:
+                            item = state_store.get(f"investigation_outcome:{outcome_id}", None)
+                            if isinstance(item, dict):
+                                o_dict = item
+
+                    if o_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Consolidated outcome '{outcome_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "evidence":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "outcome_id": outcome_id,
+                            "facts": o_dict.get("facts", []),
+                            "interpretations": o_dict.get("interpretations", []),
+                            "human_review_decisions": o_dict.get("human_review_decisions", []),
+                            "evidence_summary": o_dict.get("evidence_summary", {}),
+                        })
+                        return
+
+                    if sub_resource == "conflicts":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "outcome_id": outcome_id,
+                            "conflicts": o_dict.get("conflicts", []),
+                            "unresolved_items": o_dict.get("unresolved_items", []),
+                            "resolved_items": o_dict.get("resolved_items", []),
+                        })
+                        return
+
+                    if sub_resource == "limitations":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "outcome_id": outcome_id,
+                            "limitations": o_dict.get("limitations", []),
+                            "quality_summary": o_dict.get("quality_summary", {}),
+                        })
+                        return
+
+                    if sub_resource == "provenance":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "outcome_id": outcome_id,
+                            "traceability": o_dict.get("traceability", {}),
+                            "provenance_summary": o_dict.get("provenance_summary", {}),
+                            "reproducibility_summary": o_dict.get("reproducibility_summary", {}),
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "outcome": o_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/investigation-outcomes
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                inv_param = query.get("investigation_id", [None])[0]
+                state_param = query.get("state", [None])[0]
+
+                if cons_service is not None:
+                    outcomes = cons_service.list_outcomes(
+                        investigation_id=inv_param,
+                        state=state_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(outcomes),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "outcomes": [o.to_dict() if hasattr(o, "to_dict") else o for o in outcomes],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("investigation_outcome:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "outcomes": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Investigation outcome consolidation service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -1801,6 +1983,7 @@ class PortfolioDashboardServer:
         investigation_reporting_service: Optional[Any] = None,
         investigation_comparison_engine: Optional[Any] = None,
         discrepancy_resolution_service: Optional[Any] = None,
+        consolidation_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -1821,6 +2004,7 @@ class PortfolioDashboardServer:
             investigation_reporting_service: Optional InvestigationReportingService for analytical investigation report queries.
             investigation_comparison_engine: Optional InvestigationComparisonEngine for cross-investigation comparison queries.
             discrepancy_resolution_service: Optional DiscrepancyResolutionService for discrepancy resolution queries.
+            consolidation_service: Optional InvestigationOutcomeConsolidationService for consolidated review queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -1853,6 +2037,7 @@ class PortfolioDashboardServer:
         self.investigation_reporting_service = investigation_reporting_service
         self.investigation_comparison_engine = investigation_comparison_engine
         self.discrepancy_resolution_service = discrepancy_resolution_service
+        self.consolidation_service = consolidation_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1899,6 +2084,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "investigation_reporting_service", self.investigation_reporting_service)
             setattr(self._server, "investigation_comparison_engine", self.investigation_comparison_engine)
             setattr(self._server, "discrepancy_resolution_service", self.discrepancy_resolution_service)
+            setattr(self._server, "consolidation_service", self.consolidation_service)
 
 
 

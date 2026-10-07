@@ -108,6 +108,25 @@ from app.analysis.opportunities.resolution import (
     register_discrepancy_resolution_handlers,
 )
 
+from app.analysis.opportunities.consolidation import (
+    DEFAULT_MAX_CONSOLIDATION_HISTORY,
+    ConsolidatedConflictItem,
+    ConsolidatedEvidenceItem,
+    ConsolidatedInvestigationOutcome,
+    ConsolidatedReviewDecision,
+    ConsolidationLimitation,
+    ConsolidationLimitationItem,
+    ConsolidationState,
+    ConsolidationVoiceSummary,
+    InvestigationOutcomeConsolidationService,
+    QualityAggregationSummary,
+    ReproducibilityConsolidationState,
+    ReproducibilitySummary,
+    compute_deterministic_conflict_id,
+    compute_deterministic_outcome_id,
+    register_consolidation_handlers,
+)
+
 __all__ = [
     "OpportunityAssessmentEngine",
     "register_opportunity_handlers",
@@ -199,5 +218,23 @@ __all__ = [
     "compute_deterministic_decision_id",
     "compute_deterministic_reconciliation_id",
     "register_discrepancy_resolution_handlers",
+    # Resolved Investigation Evidence Consolidation (Phase 2 Step 30)
+    "DEFAULT_MAX_CONSOLIDATION_HISTORY",
+    "ConsolidatedConflictItem",
+    "ConsolidatedEvidenceItem",
+    "ConsolidatedInvestigationOutcome",
+    "ConsolidatedReviewDecision",
+    "ConsolidationLimitation",
+    "ConsolidationLimitationItem",
+    "ConsolidationState",
+    "ConsolidationVoiceSummary",
+    "InvestigationOutcomeConsolidationService",
+    "QualityAggregationSummary",
+    "ReproducibilityConsolidationState",
+    "ReproducibilitySummary",
+    "compute_deterministic_conflict_id",
+    "compute_deterministic_outcome_id",
+    "register_consolidation_handlers",
 ]
+
 
