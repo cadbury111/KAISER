@@ -2386,6 +2386,170 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # Endpoint 26: Historical Review Evolution Audit & Validation: /api/historical-review-audit
+            if path == "/api/historical-review-audit" or path.startswith("/api/historical-review-audit/"):
+                audit_service = getattr(self.server, "audit_service", None)
+                state_store = getattr(self.server, "state_store", None) or getattr(
+                    getattr(self.server, "reporting_service", None), "state_store", None
+                )
+
+                sub_path = path[len("/api/historical-review-audit"):]
+                if sub_path.startswith("/"):
+                    sub_path = sub_path[1:]
+                parts = [p for p in sub_path.split("/") if p]
+
+                if parts:
+                    report_id = parts[0]
+                    sub_resource = parts[1] if len(parts) > 1 else None
+
+                    # Strict path traversal and safe ID verification
+                    if (
+                        ".." in report_id
+                        or "/" in report_id
+                        or "\\" in report_id
+                        or "\0" in report_id
+                        or len(report_id) > 128
+                        or not SAFE_ID_PATTERN.match(report_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid report_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    report_dict = None
+                    if audit_service is not None:
+                        report_obj = audit_service.get_audit_report(report_id)
+                        if report_obj is not None:
+                            report_dict = report_obj.to_dict()
+
+                    if report_dict is None and state_store is not None:
+                        latest = state_store.get("historical_review_audit:latest", None)
+                        if isinstance(latest, dict) and latest.get("report_id") == report_id:
+                            report_dict = latest
+                        else:
+                            item = state_store.get(f"historical_review_audit:{report_id}", None)
+                            if isinstance(item, dict):
+                                report_dict = item
+
+                    if report_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Historical review audit report '{report_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "findings":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "findings": report_dict.get("findings", []),
+                        })
+                        return
+
+                    if sub_resource == "chain":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "chain_result": report_dict.get("chain_result", None),
+                        })
+                        return
+
+                    if sub_resource == "reproducibility":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "reproducibility_result": report_dict.get("reproducibility_result", None),
+                        })
+                        return
+
+                    if sub_resource == "summary":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "report_id": report_id,
+                            "voice_summary": report_dict.get("voice_summary", None),
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "report": report_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/historical-review-audit
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                inv_id_param = query.get("investigation_id", [None])[0]
+
+                if audit_service is not None:
+                    reports = audit_service.list_audit_reports(
+                        investigation_id=inv_id_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(reports),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "reports": [r.to_dict() if hasattr(r, "to_dict") else r for r in reports],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("historical_review_audit:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "reports": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Historical review audit service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -2515,6 +2679,7 @@ class PortfolioDashboardServer:
         consolidation_service: Optional[Any] = None,
         consistency_service: Optional[Any] = None,
         evolution_service: Optional[Any] = None,
+        audit_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2538,6 +2703,7 @@ class PortfolioDashboardServer:
             consolidation_service: Optional InvestigationOutcomeConsolidationService for consolidated review queries.
             consistency_service: Optional ConsolidatedOutcomeConsistencyService for outcome consistency queries.
             evolution_service: Optional HistoricalReviewEvolutionService for review evolution queries.
+            audit_service: Optional HistoricalReviewAuditService for review evolution audit queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -2573,6 +2739,7 @@ class PortfolioDashboardServer:
         self.consolidation_service = consolidation_service
         self.consistency_service = consistency_service
         self.evolution_service = evolution_service
+        self.audit_service = audit_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -2622,6 +2789,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "consolidation_service", self.consolidation_service)
             setattr(self._server, "consistency_service", self.consistency_service)
             setattr(self._server, "evolution_service", self.evolution_service)
+            setattr(self._server, "audit_service", self.audit_service)
 
 
 

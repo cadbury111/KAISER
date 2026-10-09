@@ -175,6 +175,21 @@ from app.analysis.opportunities.evolution import (
     compute_deterministic_evolution_id,
     compute_deterministic_snapshot_id,
     register_evolution_handlers,
+    # Step 33
+    AuditFindingSeverity,
+    AuditFindingCategory,
+    RecordValidationStatus,
+    AuditReportLifecycleState,
+    EvolutionAuditFinding,
+    SnapshotIntegrityResult,
+    EvolutionRecordIntegrityResult,
+    HistoricalChainIntegrityResult,
+    EvolutionReproducibilityVerificationResult,
+    EvolutionAuditVoiceSummary,
+    HistoricalReviewAuditReport,
+    HistoricalReviewAuditService,
+    compute_deterministic_audit_report_id,
+    register_audit_handlers,
 )
 
 __all__ = [
@@ -332,6 +347,21 @@ __all__ = [
     "compute_deterministic_evolution_id",
     "compute_deterministic_snapshot_id",
     "register_evolution_handlers",
+    # Step 33
+    "AuditFindingSeverity",
+    "AuditFindingCategory",
+    "RecordValidationStatus",
+    "AuditReportLifecycleState",
+    "EvolutionAuditFinding",
+    "SnapshotIntegrityResult",
+    "EvolutionRecordIntegrityResult",
+    "HistoricalChainIntegrityResult",
+    "EvolutionReproducibilityVerificationResult",
+    "EvolutionAuditVoiceSummary",
+    "HistoricalReviewAuditReport",
+    "HistoricalReviewAuditService",
+    "compute_deterministic_audit_report_id",
+    "register_audit_handlers",
 ]
 
 

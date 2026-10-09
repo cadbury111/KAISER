@@ -83,6 +83,7 @@ from app.analysis.opportunities import (
     InvestigationOutcomeConsolidationService,
     ConsolidatedOutcomeConsistencyService,
     HistoricalReviewEvolutionService,
+    HistoricalReviewAuditService,
     register_opportunity_handlers,
     register_prioritization_handlers,
     register_investigation_handlers,
@@ -92,6 +93,7 @@ from app.analysis.opportunities import (
     register_consolidation_handlers,
     register_consistency_handlers,
     register_evolution_handlers,
+    register_audit_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -149,6 +151,7 @@ class SystemStatus:
     consolidation_service: Optional[InvestigationOutcomeConsolidationService] = None
     consistency_service: Optional[ConsolidatedOutcomeConsistencyService] = None
     evolution_service: Optional[HistoricalReviewEvolutionService] = None
+    audit_service: Optional[HistoricalReviewAuditService] = None
 
 
 
@@ -585,6 +588,18 @@ def bootstrap_system(
         evolution_service=evolution_service,
     )
 
+    # Initialize Historical Review Evolution Audit Service (Phase 2, Step 33)
+    audit_service = HistoricalReviewAuditService(
+        evolution_service=evolution_service,
+        state_store=state_store,
+        event_bus=event_bus,
+        run_registry=run_registry,
+    )
+    register_audit_handlers(
+        orchestrator=orchestrator,
+        audit_service=audit_service,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -606,6 +621,7 @@ def bootstrap_system(
         consolidation_service=consolidation_service,
         consistency_service=consistency_service,
         evolution_service=evolution_service,
+        audit_service=audit_service,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -703,6 +719,7 @@ def bootstrap_system(
         consolidation_service=consolidation_service,
         consistency_service=consistency_service,
         evolution_service=evolution_service,
+        audit_service=audit_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -726,6 +743,7 @@ def bootstrap_system(
         evolution_service.max_snapshots_per_investigation,
         evolution_service.max_evolution_per_investigation,
     )
+    logger.info("Historical review audit service: ready (max_reports=%s)", audit_service.max_reports)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

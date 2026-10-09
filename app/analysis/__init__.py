@@ -255,6 +255,21 @@ from app.analysis.opportunities.evolution import (
     register_evolution_handlers,
     validate_no_prohibited_fields,
     validate_numerical_integrity,
+    # Historical Review Evolution Audit & Integrity Validation (Phase 2 Step 33)
+    AuditFindingSeverity,
+    AuditFindingCategory,
+    RecordValidationStatus,
+    AuditReportLifecycleState,
+    EvolutionAuditFinding,
+    SnapshotIntegrityResult,
+    EvolutionRecordIntegrityResult,
+    HistoricalChainIntegrityResult,
+    EvolutionReproducibilityVerificationResult,
+    EvolutionAuditVoiceSummary,
+    HistoricalReviewAuditReport,
+    HistoricalReviewAuditService,
+    compute_deterministic_audit_report_id,
+    register_audit_handlers,
 )
 
 __all__ = [
@@ -496,6 +511,21 @@ __all__ = [
     "register_evolution_handlers",
     "validate_no_prohibited_fields",
     "validate_numerical_integrity",
+    # Historical Review Evolution Audit & Integrity Validation (Phase 2 Step 33)
+    "AuditFindingSeverity",
+    "AuditFindingCategory",
+    "RecordValidationStatus",
+    "AuditReportLifecycleState",
+    "EvolutionAuditFinding",
+    "SnapshotIntegrityResult",
+    "EvolutionRecordIntegrityResult",
+    "HistoricalChainIntegrityResult",
+    "EvolutionReproducibilityVerificationResult",
+    "EvolutionAuditVoiceSummary",
+    "HistoricalReviewAuditReport",
+    "HistoricalReviewAuditService",
+    "compute_deterministic_audit_report_id",
+    "register_audit_handlers",
 ]
 
 
