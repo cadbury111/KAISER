@@ -2048,6 +2048,344 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # 25. Historical Review Snapshot Endpoint (/api/historical-review, /api/historical-review/<id>, /api/historical-review/<id>/evolution, /api/historical-review/<id>/coverage, /api/historical-review/<id>/conflicts, /api/historical-review/<id>/provenance)
+            if path == "/api/historical-review" or path.startswith("/api/historical-review/"):
+                ev_service = getattr(self.server, "evolution_service", None)
+                state_store = getattr(ev_service, "state_store", None) or getattr(self.server, "state_store", None) or getattr(service, "state_store", None)
+
+                if path.startswith("/api/historical-review/"):
+                    rest = path[len("/api/historical-review/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/evolution"):
+                        snap_id = rest[:-len("/evolution")].strip()
+                        sub_resource = "evolution"
+                    elif rest.endswith("/coverage"):
+                        snap_id = rest[:-len("/coverage")].strip()
+                        sub_resource = "coverage"
+                    elif rest.endswith("/conflicts"):
+                        snap_id = rest[:-len("/conflicts")].strip()
+                        sub_resource = "conflicts"
+                    elif rest.endswith("/provenance"):
+                        snap_id = rest[:-len("/provenance")].strip()
+                        sub_resource = "provenance"
+                    else:
+                        snap_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not snap_id
+                        or ".." in snap_id
+                        or "/" in snap_id
+                        or "\\" in snap_id
+                        or "\0" in snap_id
+                        or len(snap_id) > 128
+                        or not SAFE_ID_PATTERN.match(snap_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid snapshot_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    snap_obj = None
+                    if ev_service is not None:
+                        snap_obj = ev_service.get_snapshot(snap_id)
+
+                    snap_dict = None
+                    if snap_obj is not None:
+                        snap_dict = snap_obj.to_dict()
+                    elif state_store is not None:
+                        latest = state_store.get("historical_review:latest", None)
+                        if isinstance(latest, dict) and latest.get("snapshot_id") == snap_id:
+                            snap_dict = latest
+                        else:
+                            item = state_store.get(f"historical_review:{snap_id}", None)
+                            if isinstance(item, dict):
+                                snap_dict = item
+
+                    if snap_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Historical review snapshot '{snap_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "evolution":
+                        inv_id = snap_dict.get("investigation_id")
+                        evolutions = []
+                        if ev_service is not None and inv_id:
+                            ev_list = ev_service.list_evolution_history(investigation_id=inv_id, limit=50)
+                            evolutions = [e.to_dict() for e in ev_list]
+                        self._send_json_response({
+                            "status": "success",
+                            "snapshot_id": snap_id,
+                            "investigation_id": inv_id,
+                            "evolutions": evolutions,
+                            "read_only": True,
+                            "execution_locked": True,
+                        })
+                        return
+
+                    if sub_resource == "coverage":
+                        self._send_json_response({
+                            "status": "success",
+                            "snapshot_id": snap_id,
+                            "coverage_state": snap_dict.get("coverage_state", {}),
+                            "read_only": True,
+                            "execution_locked": True,
+                        })
+                        return
+
+                    if sub_resource == "conflicts":
+                        self._send_json_response({
+                            "status": "success",
+                            "snapshot_id": snap_id,
+                            "conflict_state": snap_dict.get("conflict_state", {}),
+                            "read_only": True,
+                            "execution_locked": True,
+                        })
+                        return
+
+                    if sub_resource == "provenance":
+                        self._send_json_response({
+                            "status": "success",
+                            "snapshot_id": snap_id,
+                            "provenance_state": snap_dict.get("provenance_state", {}),
+                            "read_only": True,
+                            "execution_locked": True,
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "snapshot": snap_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/historical-review
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                inv_id_param = query.get("investigation_id", [None])[0]
+
+                if ev_service is not None:
+                    snapshots = ev_service.list_snapshots(
+                        investigation_id=inv_id_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(snapshots),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "snapshots": [s.to_dict() if hasattr(s, "to_dict") else s for s in snapshots],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("historical_review:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "snapshots": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Historical review evolution service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
+            # 26. Review Evolution Endpoint (/api/review-evolution, /api/review-evolution/<id>)
+            if path == "/api/review-evolution" or path.startswith("/api/review-evolution/"):
+                ev_service = getattr(self.server, "evolution_service", None)
+                state_store = getattr(ev_service, "state_store", None) or getattr(self.server, "state_store", None) or getattr(service, "state_store", None)
+
+                if path.startswith("/api/review-evolution/"):
+                    rest = path[len("/api/review-evolution/"):].strip()
+                    sub_resource = None
+                    if rest.endswith("/dimensions"):
+                        evol_id = rest[:-len("/dimensions")].strip()
+                        sub_resource = "dimensions"
+                    elif rest.endswith("/summary"):
+                        evol_id = rest[:-len("/summary")].strip()
+                        sub_resource = "summary"
+                    elif rest.endswith("/traceability"):
+                        evol_id = rest[:-len("/traceability")].strip()
+                        sub_resource = "traceability"
+                    else:
+                        evol_id = rest
+
+                    # Traversal, length, null byte, format protections
+                    if (
+                        not evol_id
+                        or ".." in evol_id
+                        or "/" in evol_id
+                        or "\\" in evol_id
+                        or "\0" in evol_id
+                        or len(evol_id) > 128
+                        or not SAFE_ID_PATTERN.match(evol_id)
+                    ):
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid evolution_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    evol_dict = None
+                    if ev_service is not None:
+                        evol_obj = ev_service.get_evolution(evol_id)
+                        if evol_obj is not None:
+                            evol_dict = evol_obj.to_dict()
+
+                    if evol_dict is None and state_store is not None:
+                        latest = state_store.get("historical_review_evolution:latest", None)
+                        if isinstance(latest, dict) and latest.get("evolution_id") == evol_id:
+                            evol_dict = latest
+                        else:
+                            item = state_store.get(f"historical_review_evolution:{evol_id}", None)
+                            if isinstance(item, dict):
+                                evol_dict = item
+
+                    if evol_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Review evolution record '{evol_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "dimensions":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evolution_id": evol_id,
+                            "changed_dimensions": evol_dict.get("changed_dimensions", []),
+                        })
+                        return
+
+                    if sub_resource == "summary":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evolution_id": evol_id,
+                            "voice_summary": evol_dict.get("voice_summary", None),
+                        })
+                        return
+
+                    if sub_resource == "traceability":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evolution_id": evol_id,
+                            "traceability": evol_dict.get("traceability", {}),
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "evolution": evol_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/review-evolution
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                inv_id_param = query.get("investigation_id", [None])[0]
+
+                if ev_service is not None:
+                    evolutions = ev_service.list_evolution_history(
+                        investigation_id=inv_id_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(evolutions),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "evolutions": [e.to_dict() if hasattr(e, "to_dict") else e for e in evolutions],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("historical_review_evolution:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "evolutions": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Historical review evolution service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -2176,6 +2514,7 @@ class PortfolioDashboardServer:
         discrepancy_resolution_service: Optional[Any] = None,
         consolidation_service: Optional[Any] = None,
         consistency_service: Optional[Any] = None,
+        evolution_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2198,6 +2537,7 @@ class PortfolioDashboardServer:
             discrepancy_resolution_service: Optional DiscrepancyResolutionService for discrepancy resolution queries.
             consolidation_service: Optional InvestigationOutcomeConsolidationService for consolidated review queries.
             consistency_service: Optional ConsolidatedOutcomeConsistencyService for outcome consistency queries.
+            evolution_service: Optional HistoricalReviewEvolutionService for review evolution queries.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -2232,6 +2572,7 @@ class PortfolioDashboardServer:
         self.discrepancy_resolution_service = discrepancy_resolution_service
         self.consolidation_service = consolidation_service
         self.consistency_service = consistency_service
+        self.evolution_service = evolution_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -2280,6 +2621,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "discrepancy_resolution_service", self.discrepancy_resolution_service)
             setattr(self._server, "consolidation_service", self.consolidation_service)
             setattr(self._server, "consistency_service", self.consistency_service)
+            setattr(self._server, "evolution_service", self.evolution_service)
 
 
 

@@ -157,6 +157,25 @@ from app.analysis.opportunities.consistency import (
     compute_deterministic_divergence_id,
     register_consistency_handlers,
 )
+from app.analysis.opportunities.evolution import (
+    ChangeClassification,
+    ConflictLifecycleState,
+    DataQualityEvolutionState,
+    EvolutionDimensionName,
+    EvolutionDimensionRecord,
+    HistoricalReviewSnapshot,
+    HistoricalSnapshotLifecycleState,
+    HistoricalReviewEvolutionService,
+    RecurringReviewConflict,
+    ReproducibilityEvolutionState,
+    ReviewCoverageEvolutionState,
+    ReviewEvolutionRecord,
+    ReviewEvolutionVoiceSummary,
+    TERMINAL_SNAPSHOT_LIFECYCLE_STATES,
+    compute_deterministic_evolution_id,
+    compute_deterministic_snapshot_id,
+    register_evolution_handlers,
+)
 
 __all__ = [
     "OpportunityAssessmentEngine",
@@ -296,6 +315,23 @@ __all__ = [
     "compute_deterministic_comparison_id",
     "compute_deterministic_divergence_id",
     "register_consistency_handlers",
+    "ChangeClassification",
+    "ConflictLifecycleState",
+    "DataQualityEvolutionState",
+    "EvolutionDimensionName",
+    "EvolutionDimensionRecord",
+    "HistoricalReviewSnapshot",
+    "HistoricalSnapshotLifecycleState",
+    "HistoricalReviewEvolutionService",
+    "RecurringReviewConflict",
+    "ReproducibilityEvolutionState",
+    "ReviewCoverageEvolutionState",
+    "ReviewEvolutionRecord",
+    "ReviewEvolutionVoiceSummary",
+    "TERMINAL_SNAPSHOT_LIFECYCLE_STATES",
+    "compute_deterministic_evolution_id",
+    "compute_deterministic_snapshot_id",
+    "register_evolution_handlers",
 ]
 
 
