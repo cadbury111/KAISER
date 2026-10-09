@@ -19,6 +19,19 @@ from app.analysis.opportunities.evolution.audit import (
     SnapshotIntegrityResult,
     compute_deterministic_audit_report_id,
     register_audit_handlers,
+    # Step 34
+    AuditCoverageState,
+    AuditCoverageSummary,
+    AuditRegressionResult,
+    AuditRegressionState,
+    AuditRepeatabilityResult,
+    AuditRepeatabilityState,
+    AuditReliabilityVoiceSummary,
+    HistoricalReviewReliabilityResult,
+    HistoricalReviewAuditReliabilityService,
+    compute_deterministic_reliability_id,
+    register_reliability_handlers,
+    MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,
 )
 from app.analysis.opportunities.evolution.handlers import (
     register_evolution_handlers,
@@ -82,4 +95,18 @@ __all__ = [
     "HistoricalReviewAuditService",
     "compute_deterministic_audit_report_id",
     "register_audit_handlers",
+    # Step 34
+    "AuditCoverageState",
+    "AuditRepeatabilityState",
+    "AuditRegressionState",
+    "ReliabilityEvaluationStatus",
+    "AuditCoverageSummary",
+    "AuditRepeatabilityResult",
+    "AuditRegressionResult",
+    "AuditReliabilityVoiceSummary",
+    "HistoricalReviewReliabilityResult",
+    "HistoricalReviewAuditReliabilityService",
+    "compute_deterministic_reliability_id",
+    "register_reliability_handlers",
+    "MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION",
 ]

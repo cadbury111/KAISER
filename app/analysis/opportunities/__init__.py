@@ -190,6 +190,19 @@ from app.analysis.opportunities.evolution import (
     HistoricalReviewAuditService,
     compute_deterministic_audit_report_id,
     register_audit_handlers,
+    # Step 34
+    AuditCoverageState,
+    AuditCoverageSummary,
+    AuditRegressionResult,
+    AuditRegressionState,
+    AuditRepeatabilityResult,
+    AuditRepeatabilityState,
+    AuditReliabilityVoiceSummary,
+    HistoricalReviewReliabilityResult,
+    HistoricalReviewAuditReliabilityService,
+    compute_deterministic_reliability_id,
+    register_reliability_handlers,
+    MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,
 )
 
 __all__ = [
@@ -362,6 +375,19 @@ __all__ = [
     "HistoricalReviewAuditService",
     "compute_deterministic_audit_report_id",
     "register_audit_handlers",
+    # Step 34
+    "AuditCoverageState",
+    "AuditCoverageSummary",
+    "AuditRegressionResult",
+    "AuditRegressionState",
+    "AuditRepeatabilityResult",
+    "AuditRepeatabilityState",
+    "AuditReliabilityVoiceSummary",
+    "HistoricalReviewReliabilityResult",
+    "HistoricalReviewAuditReliabilityService",
+    "compute_deterministic_reliability_id",
+    "register_reliability_handlers",
+    "MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION",
 ]
 
 

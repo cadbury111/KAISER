@@ -26,9 +26,23 @@ from app.analysis.opportunities.evolution.audit.models import (
 from app.analysis.opportunities.evolution.audit.service import (
     HistoricalReviewAuditService,
 )
+from app.analysis.opportunities.evolution.audit.reliability import (
+    AuditCoverageState,
+    AuditCoverageSummary,
+    AuditRegressionResult,
+    AuditRegressionState,
+    AuditRepeatabilityResult,
+    AuditRepeatabilityState,
+    AuditReliabilityVoiceSummary,
+    HistoricalReviewReliabilityResult,
+    HistoricalReviewAuditReliabilityService,
+    compute_deterministic_reliability_id,
+    register_reliability_handlers,
+    MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,
+)
 
 __all__ = [
-    # Models
+    # Models (Step 33)
     "AuditFindingSeverity",
     "AuditFindingCategory",
     "RecordValidationStatus",
@@ -41,8 +55,22 @@ __all__ = [
     "EvolutionAuditVoiceSummary",
     "HistoricalReviewAuditReport",
     "compute_deterministic_audit_report_id",
-    # Service
+    # Service (Step 33)
     "HistoricalReviewAuditService",
-    # Handlers
+    # Handlers (Step 33)
     "register_audit_handlers",
+    # Reliability (Step 34)
+    "AuditCoverageState",
+    "AuditRepeatabilityState",
+    "AuditRegressionState",
+    "ReliabilityEvaluationStatus",
+    "AuditCoverageSummary",
+    "AuditRepeatabilityResult",
+    "AuditRegressionResult",
+    "AuditReliabilityVoiceSummary",
+    "HistoricalReviewReliabilityResult",
+    "HistoricalReviewAuditReliabilityService",
+    "compute_deterministic_reliability_id",
+    "register_reliability_handlers",
+    "MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION",
 ]

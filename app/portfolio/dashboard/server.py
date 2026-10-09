@@ -2550,6 +2550,162 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # Endpoint 27: Historical Review Audit Reliability & Coverage API (Phase 2, Step 34)
+            if path.startswith("/api/historical-review-reliability"):
+                reliability_service = getattr(self.server, "reliability_service", None)
+                state_store = getattr(self.server, "state_store", None)
+
+                # Single evaluation with optional sub-resource: /api/historical-review-reliability/<eval_id>[/coverage|/repeatability|/regression|/summary]
+                item_match = re.match(
+                    r"^/api/historical-review-reliability/(?P<eval_id>[^/?#]+)(?:/(?P<sub_resource>coverage|repeatability|regression|summary))?/?$",
+                    path,
+                )
+                if item_match:
+                    raw_eval_id = item_match.group("eval_id")
+                    sub_resource = item_match.group("sub_resource")
+
+                    # Sanitize and validate ID
+                    eval_id = (raw_eval_id or "").strip()
+                    if not SAFE_ID_PATTERN.match(eval_id) or ".." in eval_id or "/" in eval_id or "\\" in eval_id:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": f"Invalid evaluation_id '{eval_id}'. Must be a safe identifier.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    eval_dict = None
+                    if reliability_service is not None:
+                        eval_obj = reliability_service.get_reliability_result(eval_id)
+                        if eval_obj is not None:
+                            eval_dict = eval_obj.to_dict()
+
+                    if eval_dict is None and state_store is not None:
+                        latest = state_store.get("historical_review_reliability:latest", None)
+                        if isinstance(latest, dict) and latest.get("evaluation_id") == eval_id:
+                            eval_dict = latest
+                        else:
+                            item = state_store.get(f"historical_review_reliability:{eval_id}", None)
+                            if isinstance(item, dict):
+                                eval_dict = item
+
+                    if eval_dict is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Historical review reliability evaluation '{eval_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if sub_resource == "coverage":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evaluation_id": eval_id,
+                            "coverage_summary": eval_dict.get("coverage_summary", None),
+                        })
+                        return
+
+                    if sub_resource == "repeatability":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evaluation_id": eval_id,
+                            "repeatability_result": eval_dict.get("repeatability_result", None),
+                        })
+                        return
+
+                    if sub_resource == "regression":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evaluation_id": eval_id,
+                            "regression_result": eval_dict.get("regression_result", None),
+                        })
+                        return
+
+                    if sub_resource == "summary":
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "evaluation_id": eval_id,
+                            "voice_summary": eval_dict.get("voice_summary", None),
+                        })
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "evaluation": eval_dict,
+                    })
+                    return
+
+                # Listing endpoint: /api/historical-review-reliability
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+                inv_id_param = query.get("investigation_id", [None])[0]
+
+                if reliability_service is not None:
+                    evaluations = reliability_service.list_reliability_results(
+                        investigation_id=inv_id_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(evaluations),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "evaluations": [e.to_dict() if hasattr(e, "to_dict") else e for e in evaluations],
+                    })
+                    return
+                elif state_store is not None:
+                    history = state_store.get("historical_review_reliability:history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(history),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "evaluations": history[offset_clamped : offset_clamped + limit_clamped],
+                    })
+                    return
+                else:
+                    self._send_json_response(
+                        {
+                            "status": "not_available",
+                            "message": "Historical review reliability service not initialized.",
+                            "read_only": True,
+                            "execution_locked": True,
+                        },
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -2680,6 +2836,7 @@ class PortfolioDashboardServer:
         consistency_service: Optional[Any] = None,
         evolution_service: Optional[Any] = None,
         audit_service: Optional[Any] = None,
+        reliability_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2740,6 +2897,7 @@ class PortfolioDashboardServer:
         self.consistency_service = consistency_service
         self.evolution_service = evolution_service
         self.audit_service = audit_service
+        self.reliability_service = reliability_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -2790,6 +2948,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "consistency_service", self.consistency_service)
             setattr(self._server, "evolution_service", self.evolution_service)
             setattr(self._server, "audit_service", self.audit_service)
+            setattr(self._server, "reliability_service", self.reliability_service)
 
 
 
