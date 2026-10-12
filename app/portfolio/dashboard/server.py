@@ -2399,8 +2399,32 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 parts = [p for p in sub_path.split("/") if p]
 
                 if parts:
+                    if len(parts) > 2:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
                     report_id = parts[0]
                     sub_resource = parts[1] if len(parts) > 1 else None
+
+                    if sub_resource is not None and sub_resource not in ("findings", "chain", "reproducibility", "summary"):
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Sub-resource '{sub_resource}' not found for report '{report_id}'.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
 
                     # Strict path traversal and safe ID verification
                     if (
@@ -2507,6 +2531,19 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 limit_clamped = max(1, min(100, limit_val))
                 offset_clamped = max(0, offset_val)
                 inv_id_param = query.get("investigation_id", [None])[0]
+                if inv_id_param is not None:
+                    inv_id_param = inv_id_param.strip()
+                    if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_request",
+                                "message": "Invalid investigation_id format.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
 
                 if audit_service is not None:
                     reports = audit_service.list_audit_reports(
@@ -2551,22 +2588,46 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     return
 
             # Endpoint 27: Historical Review Audit Reliability & Coverage API (Phase 2, Step 34)
-            if path.startswith("/api/historical-review-reliability"):
+            if path == "/api/historical-review-reliability" or path.startswith("/api/historical-review-reliability/"):
                 reliability_service = getattr(self.server, "reliability_service", None)
                 state_store = getattr(self.server, "state_store", None)
 
-                # Single evaluation with optional sub-resource: /api/historical-review-reliability/<eval_id>[/coverage|/repeatability|/regression|/summary]
-                item_match = re.match(
-                    r"^/api/historical-review-reliability/(?P<eval_id>[^/?#]+)(?:/(?P<sub_resource>coverage|repeatability|regression|summary))?/?$",
-                    path,
-                )
-                if item_match:
-                    raw_eval_id = item_match.group("eval_id")
-                    sub_resource = item_match.group("sub_resource")
+                rel_sub = path[len("/api/historical-review-reliability"):]
+                if rel_sub.startswith("/"):
+                    rel_sub = rel_sub[1:]
+                parts = [p for p in rel_sub.split("/") if p]
+
+                if parts:
+                    if len(parts) > 2:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    raw_eval_id = parts[0]
+                    sub_resource = parts[1] if len(parts) > 1 else None
+
+                    if sub_resource is not None and sub_resource not in ("coverage", "repeatability", "regression", "summary"):
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Sub-resource '{sub_resource}' not found for evaluation '{raw_eval_id}'.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
 
                     # Sanitize and validate ID
                     eval_id = (raw_eval_id or "").strip()
-                    if not SAFE_ID_PATTERN.match(eval_id) or ".." in eval_id or "/" in eval_id or "\\" in eval_id:
+                    if not SAFE_ID_PATTERN.match(eval_id) or ".." in eval_id or "/" in eval_id or "\\" in eval_id or len(eval_id) > 128:
                         self._send_json_response(
                             {
                                 "status": "invalid_parameter",
@@ -2663,6 +2724,19 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 limit_clamped = max(1, min(100, limit_val))
                 offset_clamped = max(0, offset_val)
                 inv_id_param = query.get("investigation_id", [None])[0]
+                if inv_id_param is not None:
+                    inv_id_param = inv_id_param.strip()
+                    if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": f"Invalid investigation_id '{inv_id_param}'. Must be a safe identifier.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
 
                 if reliability_service is not None:
                     evaluations = reliability_service.list_reliability_results(
@@ -2837,6 +2911,7 @@ class PortfolioDashboardServer:
         evolution_service: Optional[Any] = None,
         audit_service: Optional[Any] = None,
         reliability_service: Optional[Any] = None,
+        state_store: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2861,6 +2936,8 @@ class PortfolioDashboardServer:
             consistency_service: Optional ConsolidatedOutcomeConsistencyService for outcome consistency queries.
             evolution_service: Optional HistoricalReviewEvolutionService for review evolution queries.
             audit_service: Optional HistoricalReviewAuditService for review evolution audit queries.
+            reliability_service: Optional HistoricalReviewAuditReliabilityService for audit reliability queries.
+            state_store: Optional StateStore instance.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -2898,6 +2975,7 @@ class PortfolioDashboardServer:
         self.evolution_service = evolution_service
         self.audit_service = audit_service
         self.reliability_service = reliability_service
+        self.state_store = state_store
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -2949,6 +3027,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "evolution_service", self.evolution_service)
             setattr(self._server, "audit_service", self.audit_service)
             setattr(self._server, "reliability_service", self.reliability_service)
+            setattr(self._server, "state_store", self.state_store)
 
 
 

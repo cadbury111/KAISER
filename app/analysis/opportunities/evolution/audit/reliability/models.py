@@ -182,6 +182,27 @@ class AuditCoverageSummary:
             "details": _unfreeze(self.details),
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AuditCoverageSummary:
+        """Safely deserialize AuditCoverageSummary from dictionary."""
+        if not isinstance(data, dict):
+            raise ValidationError("Expected dictionary for AuditCoverageSummary deserialization.")
+        return cls(
+            investigation_id=data["investigation_id"],
+            coverage_state=AuditCoverageState(data["coverage_state"]),
+            total_snapshots=int(data.get("total_snapshots", 0)),
+            audited_snapshots=int(data.get("audited_snapshots", 0)),
+            snapshot_coverage_ratio=float(data.get("snapshot_coverage_ratio", 0.0)),
+            total_evolutions=int(data.get("total_evolutions", 0)),
+            audited_evolutions=int(data.get("audited_evolutions", 0)),
+            evolution_coverage_ratio=float(data.get("evolution_coverage_ratio", 0.0)),
+            overall_coverage_ratio=float(data.get("overall_coverage_ratio", 0.0)),
+            unaudited_snapshot_ids=tuple(data.get("unaudited_snapshot_ids", ())),
+            unaudited_evolution_ids=tuple(data.get("unaudited_evolution_ids", ())),
+            missing_history_detected=bool(data.get("missing_history_detected", False)),
+            details=data.get("details", {}),
+        )
+
 
 @dataclass(frozen=True)
 class AuditRepeatabilityResult:
@@ -242,6 +263,29 @@ class AuditRepeatabilityResult:
             "divergence_reasons": list(self.divergence_reasons),
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AuditRepeatabilityResult:
+        """Safely deserialize AuditRepeatabilityResult from dictionary."""
+        if not isinstance(data, dict):
+            raise ValidationError("Expected dictionary for AuditRepeatabilityResult deserialization.")
+        return cls(
+            investigation_id=data["investigation_id"],
+            repeatability_state=AuditRepeatabilityState(data["repeatability_state"]),
+            repeatability_score=float(data.get("repeatability_score", 0.0)),
+            is_repeatable=bool(data.get("is_repeatable", False)),
+            report_id_1=data["report_id_1"],
+            report_id_2=data["report_id_2"],
+            report_ids_match=bool(data.get("report_ids_match", False)),
+            findings_count_1=int(data.get("findings_count_1", 0)),
+            findings_count_2=int(data.get("findings_count_2", 0)),
+            findings_match=bool(data.get("findings_match", False)),
+            status_1=RecordValidationStatus(data["status_1"]),
+            status_2=RecordValidationStatus(data["status_2"]),
+            status_match=bool(data.get("status_match", False)),
+            divergent_fields=tuple(data.get("divergent_fields", ())),
+            divergence_reasons=tuple(data.get("divergence_reasons", ())),
+        )
+
 
 @dataclass(frozen=True)
 class AuditRegressionResult:
@@ -295,6 +339,27 @@ class AuditRegressionResult:
             "regression_summary": self.regression_summary,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AuditRegressionResult:
+        """Safely deserialize AuditRegressionResult from dictionary."""
+        if not isinstance(data, dict):
+            raise ValidationError("Expected dictionary for AuditRegressionResult deserialization.")
+        return cls(
+            investigation_id=data["investigation_id"],
+            regression_state=AuditRegressionState(data["regression_state"]),
+            baseline_report_id=data.get("baseline_report_id"),
+            current_report_id=data["current_report_id"],
+            new_findings_count=int(data.get("new_findings_count", 0)),
+            resolved_findings_count=int(data.get("resolved_findings_count", 0)),
+            persistent_findings_count=int(data.get("persistent_findings_count", 0)),
+            new_finding_ids=tuple(data.get("new_finding_ids", ())),
+            resolved_finding_ids=tuple(data.get("resolved_finding_ids", ())),
+            persistent_finding_ids=tuple(data.get("persistent_finding_ids", ())),
+            regression_severities=tuple(data.get("regression_severities", ())),
+            conflict_preservation_maintained=bool(data.get("conflict_preservation_maintained", True)),
+            regression_summary=str(data.get("regression_summary", "")),
+        )
+
 
 @dataclass(frozen=True)
 class AuditReliabilityVoiceSummary:
@@ -325,6 +390,19 @@ class AuditReliabilityVoiceSummary:
             "summary_text": self.summary_text,
             "voice_safe": self.voice_safe,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AuditReliabilityVoiceSummary:
+        """Safely deserialize AuditReliabilityVoiceSummary from dictionary."""
+        if not isinstance(data, dict):
+            raise ValidationError("Expected dictionary for AuditReliabilityVoiceSummary deserialization.")
+        return cls(
+            evaluation_id=data["evaluation_id"],
+            investigation_id=data["investigation_id"],
+            reliability_status=ReliabilityEvaluationStatus(data["reliability_status"]),
+            summary_text=data["summary_text"],
+            voice_safe=bool(data.get("voice_safe", True)),
+        )
 
 
 @dataclass(frozen=True)
@@ -385,3 +463,41 @@ class HistoricalReviewReliabilityResult:
             "schema_version": self.schema_version,
             "disclaimer": self.disclaimer,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> HistoricalReviewReliabilityResult:
+        """Safely deserialize HistoricalReviewReliabilityResult from dictionary."""
+        if not isinstance(data, dict):
+            raise ValidationError("Expected dictionary for HistoricalReviewReliabilityResult deserialization.")
+        cov_raw = data.get("coverage_summary")
+        cov = AuditCoverageSummary.from_dict(cov_raw) if isinstance(cov_raw, dict) else None
+        if cov is None:
+            raise ValidationError("Missing coverage_summary in reliability result dictionary.")
+
+        rep_raw = data.get("repeatability_result")
+        repeatability = AuditRepeatabilityResult.from_dict(rep_raw) if isinstance(rep_raw, dict) else None
+
+        reg_raw = data.get("regression_result")
+        regression = AuditRegressionResult.from_dict(reg_raw) if isinstance(reg_raw, dict) else None
+
+        voice_raw = data.get("voice_summary")
+        voice_summary = AuditReliabilityVoiceSummary.from_dict(voice_raw) if isinstance(voice_raw, dict) else None
+
+        return cls(
+            evaluation_id=data["evaluation_id"],
+            investigation_id=data["investigation_id"],
+            evaluated_at=float(data.get("evaluated_at", 0.0)),
+            overall_reliability_status=ReliabilityEvaluationStatus(data["overall_reliability_status"]),
+            coverage_summary=cov,
+            repeatability_result=repeatability,
+            regression_result=regression,
+            facts_count=int(data.get("facts_count", 0)),
+            interpretations_count=int(data.get("interpretations_count", 0)),
+            human_decisions_count=int(data.get("human_decisions_count", 0)),
+            active_conflicts_preserved_count=int(data.get("active_conflicts_preserved_count", 0)),
+            controlled_failure_recovered=bool(data.get("controlled_failure_recovered", False)),
+            recovery_notes=tuple(data.get("recovery_notes", ())),
+            voice_summary=voice_summary,
+            schema_version=str(data.get("schema_version", "1.0.0")),
+            disclaimer=str(data.get("disclaimer", cls.disclaimer)),
+        )

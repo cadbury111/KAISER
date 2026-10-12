@@ -128,8 +128,13 @@ class HistoricalReviewAuditService:
             snap = snap_obj
         elif isinstance(snapshot, HistoricalReviewSnapshot):
             snap = snapshot
+        elif isinstance(snapshot, dict):
+            try:
+                snap = self._dict_to_snapshot(snapshot)
+            except Exception as d_err:
+                raise ValidationError(f"Invalid snapshot dictionary structure: {d_err}")
         else:
-            raise ValidationError("Expected HistoricalReviewSnapshot instance or snapshot_id string.")
+            raise ValidationError("Expected HistoricalReviewSnapshot instance, dict, or snapshot_id string.")
 
         findings: List[EvolutionAuditFinding] = []
         has_prohibited = False
@@ -542,7 +547,13 @@ class HistoricalReviewAuditService:
             seen_ids.add(s.snapshot_id)
 
         # 2. Sort by version and check sequence
-        sorted_snaps = sorted(snapshots, key=lambda x: (x.snapshot_version, x.captured_at))
+        sorted_snaps = sorted(
+            snapshots,
+            key=lambda x: (
+                x.snapshot_version,
+                0.0 if (not isinstance(x.captured_at, (int, float)) or math.isnan(x.captured_at) or math.isinf(x.captured_at)) else x.captured_at,
+            ),
+        )
         version_intact = True
         expected_version = 1
 
@@ -1115,6 +1126,31 @@ class HistoricalReviewAuditService:
     # Private Helpers
     # ==============================================================================
 
+    def _dict_to_snapshot(self, stored: Dict[str, Any]) -> HistoricalReviewSnapshot:
+        """Construct HistoricalReviewSnapshot from dictionary."""
+        return HistoricalReviewSnapshot(
+            snapshot_id=stored["snapshot_id"],
+            investigation_id=stored["investigation_id"],
+            outcome_id=stored["outcome_id"],
+            comparison_id=stored.get("comparison_id"),
+            snapshot_version=stored.get("snapshot_version", 1),
+            captured_at=float(stored.get("captured_at", 0.0)),
+            lifecycle_state=HistoricalSnapshotLifecycleState(
+                stored.get("lifecycle_state", "STORED")
+            ),
+            source_state=stored.get("source_state", {}),
+            evidence_state=stored.get("evidence_state", {}),
+            review_state=stored.get("review_state", {}),
+            conflict_state=stored.get("conflict_state", {}),
+            quality_state=stored.get("quality_state", {}),
+            provenance_state=stored.get("provenance_state", {}),
+            reproducibility_state=stored.get("reproducibility_state", {}),
+            coverage_state=stored.get("coverage_state", {}),
+            limitation_state=tuple(stored.get("limitation_state", ())),
+            source_references=tuple(stored.get("source_references", ())),
+            generated_from=stored.get("generated_from", "CONSOLIDATED_INVESTIGATION_OUTCOME"),
+        )
+
     def _resolve_snapshot(self, snapshot_id: str) -> Optional[HistoricalReviewSnapshot]:
         """Resolve snapshot from evolution service or state store."""
         if self.evolution_service:
@@ -1126,28 +1162,7 @@ class HistoricalReviewAuditService:
             stored = self.state_store.get(f"historical_review:{snapshot_id}", None)
             if isinstance(stored, dict):
                 try:
-                    return HistoricalReviewSnapshot(
-                        snapshot_id=stored["snapshot_id"],
-                        investigation_id=stored["investigation_id"],
-                        outcome_id=stored["outcome_id"],
-                        comparison_id=stored.get("comparison_id"),
-                        snapshot_version=stored.get("snapshot_version", 1),
-                        captured_at=stored.get("captured_at", 0.0),
-                        lifecycle_state=HistoricalSnapshotLifecycleState(
-                            stored.get("lifecycle_state", "STORED")
-                        ),
-                        source_state=stored.get("source_state", {}),
-                        evidence_state=stored.get("evidence_state", {}),
-                        review_state=stored.get("review_state", {}),
-                        conflict_state=stored.get("conflict_state", {}),
-                        quality_state=stored.get("quality_state", {}),
-                        provenance_state=stored.get("provenance_state", {}),
-                        reproducibility_state=stored.get("reproducibility_state", {}),
-                        coverage_state=stored.get("coverage_state", {}),
-                        limitation_state=tuple(stored.get("limitation_state", ())),
-                        source_references=tuple(stored.get("source_references", ())),
-                        generated_from=stored.get("generated_from", "CONSOLIDATED_INVESTIGATION_OUTCOME"),
-                    )
+                    return self._dict_to_snapshot(stored)
                 except Exception as exc:
                     logger.debug("Failed deserializing snapshot from StateStore: %s", exc)
 

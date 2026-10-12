@@ -119,11 +119,17 @@ class HistoricalReviewAuditReliabilityService:
                     )
             elif self._state_store is not None:
                 # Fallback to state store
-                stored_snaps = self._state_store.get(f"historical_review_snapshot:{clean_inv}:history", [])
+                stored_snaps = self._state_store.get(f"historical_review_snapshot:{clean_inv}:history", None)
+                if not isinstance(stored_snaps, list):
+                    stored_snaps = self._state_store.get("historical_review:history", [])
                 if isinstance(stored_snaps, list):
-                    total_snapshots = len(stored_snaps)
+                    inv_snaps = [
+                        s for s in stored_snaps
+                        if isinstance(s, dict) and (s.get("investigation_id") == clean_inv or not s.get("investigation_id"))
+                    ]
+                    total_snapshots = len(inv_snaps)
                     snapshot_ids_available = [
-                        s.get("snapshot_id", "") for s in stored_snaps if isinstance(s, dict) and s.get("snapshot_id")
+                        s.get("snapshot_id", "") for s in inv_snaps if s.get("snapshot_id")
                     ]
 
             # 2. Resolve evolutions from evolution service
@@ -141,6 +147,18 @@ class HistoricalReviewAuditReliabilityService:
                     evolution_ids_available = [e.evolution_id for e in evols]
                 except Exception as ex:
                     logger.warning("Error fetching evolutions for investigation '%s': %s", clean_inv, ex)
+            elif self._state_store is not None:
+                # Fallback to state store for evolutions
+                stored_evols = self._state_store.get("historical_review_evolution:history", [])
+                if isinstance(stored_evols, list):
+                    inv_evols = [
+                        e for e in stored_evols
+                        if isinstance(e, dict) and (e.get("investigation_id") == clean_inv or not e.get("investigation_id"))
+                    ]
+                    total_evolutions = len(inv_evols)
+                    evolution_ids_available = [
+                        e.get("evolution_id", "") for e in inv_evols if e.get("evolution_id")
+                    ]
 
             # 3. Check what has been audited
             audited_snapshot_ids: Set[str] = set()
@@ -156,6 +174,18 @@ class HistoricalReviewAuditReliabilityService:
                             audited_evolution_ids.add(e_res.evolution_id)
                 except Exception as ex:
                     logger.warning("Error inspecting audit reports for investigation '%s': %s", clean_inv, ex)
+            elif self._state_store is not None:
+                # Fallback to state store audit reports
+                stored_reports = self._state_store.get("historical_review_audit:history", [])
+                if isinstance(stored_reports, list):
+                    for r in stored_reports:
+                        if isinstance(r, dict) and r.get("investigation_id") == clean_inv:
+                            for s_res in r.get("snapshot_results", []):
+                                if isinstance(s_res, dict) and s_res.get("snapshot_id"):
+                                    audited_snapshot_ids.add(s_res["snapshot_id"])
+                            for e_res in r.get("evolution_results", []):
+                                if isinstance(e_res, dict) and e_res.get("evolution_id"):
+                                    audited_evolution_ids.add(e_res["evolution_id"])
 
             audited_snapshots = len(audited_snapshot_ids.intersection(set(snapshot_ids_available)))
             audited_evolutions = len(audited_evolution_ids.intersection(set(evolution_ids_available)))
@@ -229,6 +259,11 @@ class HistoricalReviewAuditReliabilityService:
         clean_inv = (investigation_id or "").strip()
         if not clean_inv or not SAFE_ID_PATTERN.match(clean_inv):
             raise ValidationError(f"Invalid investigation_id for repeatability: '{investigation_id}'")
+
+        try:
+            runs_clamped = max(1, min(10, int(runs)))
+        except (ValueError, TypeError):
+            runs_clamped = 2
 
         with self._lock:
             if self._audit_service is None:
@@ -517,9 +552,14 @@ class HistoricalReviewAuditReliabilityService:
             recovery_notes: List[str] = []
             controlled_recovered = False
 
+            try:
+                runs_clamped = max(1, min(10, int(runs_for_repeatability)))
+            except (ValueError, TypeError):
+                runs_clamped = 2
+
             # 1. Repeatability (executes audit verification runs)
             try:
-                repeatability = self.verify_repeatability(clean_inv, runs=runs_for_repeatability)
+                repeatability = self.verify_repeatability(clean_inv, runs=runs_clamped)
             except Exception as rep_err:
                 logger.error("Controlled error during repeatability verification: %s", rep_err)
                 controlled_recovered = True
@@ -529,6 +569,11 @@ class HistoricalReviewAuditReliabilityService:
             # 2. Coverage (assesses audited vs total entities)
             try:
                 coverage = self.evaluate_coverage(clean_inv)
+                if coverage.coverage_state == AuditCoverageState.UNAVAILABLE:
+                    controlled_recovered = True
+                    recovery_notes.append(
+                        f"Coverage evaluation reported service error: {coverage.details.get('error', 'unavailable')}"
+                    )
             except Exception as cov_err:
                 logger.error("Controlled error during coverage evaluation: %s", cov_err)
                 controlled_recovered = True
@@ -581,15 +626,24 @@ class HistoricalReviewAuditReliabilityService:
                     conflicts_count += s_res.active_conflicts_count
 
             # 5. Overall Status Classification
-            if controlled_recovered and coverage.coverage_state == AuditCoverageState.UNAVAILABLE:
+            if coverage.coverage_state == AuditCoverageState.UNAVAILABLE:
                 overall_status = ReliabilityEvaluationStatus.FAILED
             elif coverage.coverage_state == AuditCoverageState.EMPTY:
                 overall_status = ReliabilityEvaluationStatus.UNVERIFIABLE
-            elif repeatability and repeatability.repeatability_state == AuditRepeatabilityState.DIVERGENT:
-                overall_status = ReliabilityEvaluationStatus.UNRELIABLE
+            elif repeatability and repeatability.repeatability_state in (
+                AuditRepeatabilityState.FAILED,
+                AuditRepeatabilityState.DIVERGENT,
+            ):
+                overall_status = (
+                    ReliabilityEvaluationStatus.UNRELIABLE
+                    if repeatability.repeatability_state == AuditRepeatabilityState.DIVERGENT
+                    else ReliabilityEvaluationStatus.FAILED
+                )
             elif regression and regression.regression_state == AuditRegressionState.REGRESSION_DETECTED:
                 overall_status = ReliabilityEvaluationStatus.DEGRADED
             elif coverage.coverage_state == AuditCoverageState.PARTIAL:
+                overall_status = ReliabilityEvaluationStatus.DEGRADED
+            elif controlled_recovered:
                 overall_status = ReliabilityEvaluationStatus.DEGRADED
             else:
                 overall_status = ReliabilityEvaluationStatus.RELIABLE
@@ -696,7 +750,7 @@ class HistoricalReviewAuditReliabilityService:
     # ==============================================================================
 
     def get_reliability_result(self, evaluation_id: str) -> Optional[HistoricalReviewReliabilityResult]:
-        """Retrieve a cached reliability result by evaluation ID."""
+        """Retrieve a cached reliability result by evaluation ID with StateStore hydration."""
         clean_id = (evaluation_id or "").strip()
         with self._lock:
             if clean_id in self._evaluations:
@@ -705,10 +759,17 @@ class HistoricalReviewAuditReliabilityService:
             if self._state_store is not None:
                 stored = self._state_store.get(f"historical_review_reliability:{clean_id}", None)
                 if isinstance(stored, dict):
-                    # Cache hit from state store
-                    latest = self._state_store.get("historical_review_reliability:latest", None)
-                    if isinstance(latest, dict) and latest.get("evaluation_id") == clean_id:
-                        return self._evaluations.get(clean_id)
+                    deserialized = self._deserialize_reliability_result(stored)
+                    if deserialized:
+                        self._evaluations[clean_id] = deserialized
+                        return deserialized
+
+                latest = self._state_store.get("historical_review_reliability:latest", None)
+                if isinstance(latest, dict) and latest.get("evaluation_id") == clean_id:
+                    deserialized = self._deserialize_reliability_result(latest)
+                    if deserialized:
+                        self._evaluations[clean_id] = deserialized
+                        return deserialized
             return None
 
     def list_reliability_results(
@@ -717,7 +778,10 @@ class HistoricalReviewAuditReliabilityService:
         limit: int = 50,
         offset: int = 0,
     ) -> List[HistoricalReviewReliabilityResult]:
-        """List reliability results with pagination and optional investigation filter."""
+        """List reliability results with pagination, optional filter, and StateStore hydration."""
+        limit_clamped = max(1, min(100, limit))
+        offset_clamped = max(0, offset)
+
         with self._lock:
             if investigation_id:
                 clean_inv = investigation_id.strip()
@@ -731,9 +795,22 @@ class HistoricalReviewAuditReliabilityService:
                     reverse=True,
                 )
 
-            start = max(0, offset)
-            end = start + max(1, min(100, limit))
-            return results[start:end]
+            if not results and self._state_store is not None:
+                # Hydrate from StateStore history if in-memory cache is cold
+                history = self._state_store.get("historical_review_reliability:history", [])
+                if isinstance(history, list):
+                    hydrated: List[HistoricalReviewReliabilityResult] = []
+                    for h in history:
+                        if isinstance(h, dict):
+                            if investigation_id and h.get("investigation_id") != clean_inv:
+                                continue
+                            deserialized = self._deserialize_reliability_result(h)
+                            if deserialized:
+                                hydrated.append(deserialized)
+                                self._evaluations[deserialized.evaluation_id] = deserialized
+                    results = hydrated
+
+            return results[offset_clamped : offset_clamped + limit_clamped]
 
     def get_latest_reliability_result(
         self,
@@ -741,7 +818,30 @@ class HistoricalReviewAuditReliabilityService:
     ) -> Optional[HistoricalReviewReliabilityResult]:
         """Get the latest reliability result for an investigation or overall."""
         results = self.list_reliability_results(investigation_id=investigation_id, limit=1, offset=0)
-        return results[0] if results else None
+        if results:
+            return results[0]
+
+        if self._state_store is not None:
+            latest = self._state_store.get("historical_review_reliability:latest", None)
+            if isinstance(latest, dict):
+                if investigation_id is None or latest.get("investigation_id") == investigation_id:
+                    deserialized = self._deserialize_reliability_result(latest)
+                    if deserialized:
+                        with self._lock:
+                            self._evaluations[deserialized.evaluation_id] = deserialized
+                        return deserialized
+        return None
+
+    def _deserialize_reliability_result(
+        self,
+        data: Dict[str, Any],
+    ) -> Optional[HistoricalReviewReliabilityResult]:
+        """Safely deserialize a HistoricalReviewReliabilityResult dictionary."""
+        try:
+            return HistoricalReviewReliabilityResult.from_dict(data)
+        except Exception as exc:
+            logger.warning("Failed to deserialize HistoricalReviewReliabilityResult: %s", exc)
+            return None
 
     # ==============================================================================
     # 6. Helpers
