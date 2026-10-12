@@ -2780,6 +2780,274 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+            # Endpoint 28: Historical Review Audit Diagnostics & Observability API (Phase 2, Step 36)
+            if path == "/api/historical-review-diagnostics" or path.startswith("/api/historical-review-diagnostics/"):
+                diagnostics_service = getattr(self.server, "audit_diagnostics_service", None)
+                state_store = getattr(self.server, "state_store", None)
+
+                diag_sub = path[len("/api/historical-review-diagnostics"):]
+                if diag_sub.startswith("/"):
+                    diag_sub = diag_sub[1:]
+                parts = [p for p in diag_sub.split("/") if p]
+
+                # Case 1: Sub-resource /alerts
+                if parts and parts[0] == "alerts":
+                    if len(parts) > 2:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if len(parts) == 2:
+                        alert_id = parts[1].strip()
+                        if not SAFE_ID_PATTERN.match(alert_id) or ".." in alert_id or "/" in alert_id or "\\" in alert_id or len(alert_id) > 128:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid alert_id '{alert_id}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                        alert_obj = diagnostics_service.get_alert(alert_id) if diagnostics_service is not None else None
+                        if alert_obj is None and state_store is not None:
+                            stored = state_store.get(f"historical_review_alerts:{alert_id}", None)
+                            if isinstance(stored, dict):
+                                alert_obj = stored
+
+                        if alert_obj is None:
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Operational alert '{alert_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "alert": alert_obj.to_dict() if hasattr(alert_obj, "to_dict") else alert_obj,
+                        })
+                        return
+
+                    # Listing alerts
+                    try:
+                        limit_val = int(query.get("limit", ["50"])[0])
+                        offset_val = int(query.get("offset", ["0"])[0])
+                    except (ValueError, TypeError):
+                        limit_val = 50
+                        offset_val = 0
+                    limit_clamped = max(1, min(100, limit_val))
+                    offset_clamped = max(0, offset_val)
+
+                    inv_id_param = query.get("investigation_id", [None])[0]
+                    if inv_id_param is not None:
+                        inv_id_param = inv_id_param.strip()
+                        if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid investigation_id '{inv_id_param}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                    cat_param = query.get("category", [None])[0]
+                    sev_param = query.get("severity", [None])[0]
+                    active_only_param = query.get("active_only", ["false"])[0].lower() in ("true", "1")
+
+                    if diagnostics_service is not None:
+                        alerts_list = diagnostics_service.list_alerts(
+                            investigation_id=inv_id_param,
+                            category=cat_param,
+                            severity=sev_param,
+                            active_only=active_only_param,
+                            limit=limit_clamped,
+                            offset=offset_clamped,
+                        )
+                        alerts_data = [a.to_dict() if hasattr(a, "to_dict") else a for a in alerts_list]
+                    else:
+                        alerts_data = []
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(alerts_data),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "alerts": alerts_data,
+                    })
+                    return
+
+                # Case 2: Sub-resource /summary
+                if parts and parts[0] == "summary":
+                    inv_id_param = query.get("investigation_id", [None])[0]
+                    if not inv_id_param:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": "Missing required query parameter 'investigation_id'.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    inv_id_param = inv_id_param.strip()
+                    if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": f"Invalid investigation_id '{inv_id_param}'. Must be a safe identifier.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    if diagnostics_service is not None:
+                        summary = diagnostics_service.get_diagnostic_summary(inv_id_param)
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "summary": summary.to_dict(),
+                        })
+                        return
+                    else:
+                        self._send_json_response(
+                            {
+                                "status": "not_available",
+                                "message": "Historical review diagnostics service not initialized.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                # Case 3: Specific diagnostic record by ID: /api/historical-review-diagnostics/<diag_id>
+                if parts:
+                    if len(parts) > 1:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    diag_id = parts[0].strip()
+                    if not SAFE_ID_PATTERN.match(diag_id) or ".." in diag_id or "/" in diag_id or "\\" in diag_id or len(diag_id) > 128:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": f"Invalid diagnostic_id '{diag_id}'. Must be a safe identifier.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    rec_obj = diagnostics_service.get_diagnostic(diag_id) if diagnostics_service is not None else None
+                    if rec_obj is None and state_store is not None:
+                        stored = state_store.get(f"historical_review_diagnostics:{diag_id}", None)
+                        if isinstance(stored, dict):
+                            rec_obj = stored
+
+                    if rec_obj is None:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Diagnostic record '{diag_id}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "diagnostic": rec_obj.to_dict() if hasattr(rec_obj, "to_dict") else rec_obj,
+                    })
+                    return
+
+                # Case 4: Listing diagnostics: /api/historical-review-diagnostics
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                inv_id_param = query.get("investigation_id", [None])[0]
+                if inv_id_param is not None:
+                    inv_id_param = inv_id_param.strip()
+                    if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                        self._send_json_response(
+                            {
+                                "status": "invalid_parameter",
+                                "message": f"Invalid investigation_id '{inv_id_param}'. Must be a safe identifier.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                cat_param = query.get("category", [None])[0]
+                sev_param = query.get("severity", [None])[0]
+
+                records_data = []
+                if diagnostics_service is not None:
+                    records = diagnostics_service.list_diagnostics(
+                        investigation_id=inv_id_param,
+                        category=cat_param,
+                        severity=sev_param,
+                        limit=limit_clamped,
+                        offset=offset_clamped,
+                    )
+                    records_data = [r.to_dict() if hasattr(r, "to_dict") else r for r in records]
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "count": len(records_data),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "diagnostics": records_data,
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -2912,6 +3180,7 @@ class PortfolioDashboardServer:
         audit_service: Optional[Any] = None,
         reliability_service: Optional[Any] = None,
         state_store: Optional[Any] = None,
+        audit_diagnostics_service: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -2938,6 +3207,7 @@ class PortfolioDashboardServer:
             audit_service: Optional HistoricalReviewAuditService for review evolution audit queries.
             reliability_service: Optional HistoricalReviewAuditReliabilityService for audit reliability queries.
             state_store: Optional StateStore instance.
+            audit_diagnostics_service: Optional HistoricalReviewAuditDiagnosticsService instance.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -2976,6 +3246,7 @@ class PortfolioDashboardServer:
         self.audit_service = audit_service
         self.reliability_service = reliability_service
         self.state_store = state_store
+        self.audit_diagnostics_service = audit_diagnostics_service
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -3028,6 +3299,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "audit_service", self.audit_service)
             setattr(self._server, "reliability_service", self.reliability_service)
             setattr(self._server, "state_store", self.state_store)
+            setattr(self._server, "audit_diagnostics_service", self.audit_diagnostics_service)
 
 
 

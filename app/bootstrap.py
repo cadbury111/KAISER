@@ -85,6 +85,7 @@ from app.analysis.opportunities import (
     HistoricalReviewEvolutionService,
     HistoricalReviewAuditService,
     HistoricalReviewAuditReliabilityService,
+    HistoricalReviewAuditDiagnosticsService,
     register_opportunity_handlers,
     register_prioritization_handlers,
     register_investigation_handlers,
@@ -96,6 +97,7 @@ from app.analysis.opportunities import (
     register_evolution_handlers,
     register_audit_handlers,
     register_reliability_handlers,
+    register_audit_diagnostics_handlers,
 )
 from app.risk import PortfolioRiskMonitor, register_risk_handlers
 
@@ -155,6 +157,7 @@ class SystemStatus:
     evolution_service: Optional[HistoricalReviewEvolutionService] = None
     audit_service: Optional[HistoricalReviewAuditService] = None
     reliability_service: Optional[HistoricalReviewAuditReliabilityService] = None
+    audit_diagnostics_service: Optional[HistoricalReviewAuditDiagnosticsService] = None
 
 
 
@@ -615,6 +618,16 @@ def bootstrap_system(
         reliability_service=reliability_service,
     )
 
+    # Initialize Historical Review Audit Diagnostics & Observability (Phase 2, Step 36)
+    audit_diagnostics_service = HistoricalReviewAuditDiagnosticsService(
+        event_bus=event_bus,
+        state_store=state_store,
+    )
+    register_audit_diagnostics_handlers(
+        orchestrator=orchestrator,
+        diagnostics_service=audit_diagnostics_service,
+    )
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -638,6 +651,8 @@ def bootstrap_system(
         evolution_service=evolution_service,
         audit_service=audit_service,
         reliability_service=reliability_service,
+        state_store=state_store,
+        audit_diagnostics_service=audit_diagnostics_service,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -737,6 +752,7 @@ def bootstrap_system(
         evolution_service=evolution_service,
         audit_service=audit_service,
         reliability_service=reliability_service,
+        audit_diagnostics_service=audit_diagnostics_service,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -762,6 +778,7 @@ def bootstrap_system(
     )
     logger.info("Historical review audit service: ready (max_reports=%s)", audit_service.max_reports)
     logger.info("Historical review audit reliability service: ready (max_evaluations=%s)", reliability_service.max_evaluations)
+    logger.info("Historical review audit diagnostics service: ready (max_diagnostics=%s)", audit_diagnostics_service._max_diagnostics)
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")

@@ -203,6 +203,18 @@ from app.analysis.opportunities.evolution import (
     compute_deterministic_reliability_id,
     register_reliability_handlers,
     MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,
+    # Step 36
+    AuditAlert,
+    AuditAlertStatus,
+    AuditDiagnosticCategory,
+    AuditDiagnosticRecord,
+    AuditDiagnosticSeverity,
+    AuditDiagnosticSummary,
+    AuditEvidenceNature,
+    HistoricalReviewAuditDiagnosticsService,
+    compute_deterministic_alert_id,
+    compute_deterministic_diagnostic_id,
+    register_audit_diagnostics_handlers,
 )
 
 __all__ = [
@@ -388,6 +400,18 @@ __all__ = [
     "compute_deterministic_reliability_id",
     "register_reliability_handlers",
     "MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION",
+    # Step 36
+    "AuditAlert",
+    "AuditAlertStatus",
+    "AuditDiagnosticCategory",
+    "AuditDiagnosticRecord",
+    "AuditDiagnosticSeverity",
+    "AuditDiagnosticSummary",
+    "AuditEvidenceNature",
+    "HistoricalReviewAuditDiagnosticsService",
+    "compute_deterministic_alert_id",
+    "compute_deterministic_diagnostic_id",
+    "register_audit_diagnostics_handlers",
 ]
 
 

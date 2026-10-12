@@ -40,6 +40,19 @@ from app.analysis.opportunities.evolution.audit.reliability import (
     register_reliability_handlers,
     MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,
 )
+from app.analysis.opportunities.evolution.audit.diagnostics import (
+    AuditAlert,
+    AuditAlertStatus,
+    AuditDiagnosticCategory,
+    AuditDiagnosticRecord,
+    AuditDiagnosticSeverity,
+    AuditDiagnosticSummary,
+    AuditEvidenceNature,
+    HistoricalReviewAuditDiagnosticsService,
+    compute_deterministic_alert_id,
+    compute_deterministic_diagnostic_id,
+    register_audit_diagnostics_handlers,
+)
 
 __all__ = [
     # Models (Step 33)
@@ -73,4 +86,16 @@ __all__ = [
     "compute_deterministic_reliability_id",
     "register_reliability_handlers",
     "MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION",
+    # Diagnostics & Observability (Step 36)
+    "AuditAlert",
+    "AuditAlertStatus",
+    "AuditDiagnosticCategory",
+    "AuditDiagnosticRecord",
+    "AuditDiagnosticSeverity",
+    "AuditDiagnosticSummary",
+    "AuditEvidenceNature",
+    "HistoricalReviewAuditDiagnosticsService",
+    "compute_deterministic_alert_id",
+    "compute_deterministic_diagnostic_id",
+    "register_audit_diagnostics_handlers",
 ]
