@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import hashlib
 import json
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -53,7 +54,13 @@ UNIX_PATH_REGEX = re.compile(r"/(?:Users|home|root|var|etc|tmp|opt|usr)/[^\s\"'<
 
 def format_utc_iso(epoch_seconds: Optional[float]) -> str:
     """Format an epoch timestamp to a standardized UTC ISO-8601 string."""
-    if epoch_seconds is None or epoch_seconds <= 0.0:
+    if (
+        epoch_seconds is None
+        or not isinstance(epoch_seconds, (int, float))
+        or math.isnan(epoch_seconds)
+        or math.isinf(epoch_seconds)
+        or epoch_seconds <= 0.0
+    ):
         return "1970-01-01T00:00:00Z"
     try:
         dt = datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
@@ -134,18 +141,29 @@ class AuditAlertStatus(str, Enum):
     ACTIVE = "ACTIVE"
     SUPPRESSED_COOLDOWN = "SUPPRESSED_COOLDOWN"
     RECOVERED = "RECOVERED"
+    RESOLVED = "RESOLVED"
     ACKNOWLEDGED = "ACKNOWLEDGED"
 
 
 def compute_deterministic_diagnostic_id(
     investigation_id: str,
     category: Union[AuditDiagnosticCategory, str],
-    timestamp: float,
+    timestamp: Optional[float],
     correlation_id: str,
 ) -> str:
     """Generate a deterministic diagnostic ID."""
     cat_val = category.value if isinstance(category, Enum) else str(category)
-    seed = f"{investigation_id}:{cat_val}:{timestamp:.4f}:{correlation_id}"
+    safe_ts = (
+        0.0
+        if (
+            timestamp is None
+            or not isinstance(timestamp, (int, float))
+            or math.isnan(timestamp)
+            or math.isinf(timestamp)
+        )
+        else float(timestamp)
+    )
+    seed = f"{investigation_id}:{cat_val}:{safe_ts:.4f}:{correlation_id}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
     return f"diag_{digest}"
 
@@ -153,12 +171,22 @@ def compute_deterministic_diagnostic_id(
 def compute_deterministic_alert_id(
     investigation_id: str,
     category: Union[AuditDiagnosticCategory, str],
-    timestamp: float,
+    timestamp: Optional[float],
     reason: str,
 ) -> str:
     """Generate a deterministic alert ID."""
     cat_val = category.value if isinstance(category, Enum) else str(category)
-    seed = f"{investigation_id}:{cat_val}:{timestamp:.4f}:{reason[:64]}"
+    safe_ts = (
+        0.0
+        if (
+            timestamp is None
+            or not isinstance(timestamp, (int, float))
+            or math.isnan(timestamp)
+            or math.isinf(timestamp)
+        )
+        else float(timestamp)
+    )
+    seed = f"{investigation_id}:{cat_val}:{safe_ts:.4f}:{reason[:64]}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
     return f"alert_{digest}"
 

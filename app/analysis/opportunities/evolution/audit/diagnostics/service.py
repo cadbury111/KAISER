@@ -53,6 +53,8 @@ DEFAULT_MAX_DIAGNOSTICS = 100
 DEFAULT_MAX_ALERTS = 100
 DEFAULT_ALERT_COOLDOWN_SECONDS = 60.0
 
+SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.\:\@]+$")
+
 
 class HistoricalReviewAuditDiagnosticsService:
     """Operational diagnostics and informational alerting service for historical review audits."""
@@ -115,6 +117,7 @@ class HistoricalReviewAuditDiagnosticsService:
             return
 
         handlers = {
+            EventType.HISTORICAL_REVIEW_AUDIT_COMPLETED: self._on_audit_completed_event,
             EventType.HISTORICAL_REVIEW_AUDIT_FAILED: self._on_audit_failed_event,
             EventType.HISTORICAL_REVIEW_INTEGRITY_VIOLATION_DETECTED: self._on_integrity_violation_event,
             EventType.HISTORICAL_REVIEW_AUDIT_COVERAGE_EVALUATED: self._on_coverage_evaluated_event,
@@ -130,9 +133,54 @@ class HistoricalReviewAuditDiagnosticsService:
             except Exception as exc:
                 logger.warning("Could not subscribe to EventType '%s': %s", evt_type, exc)
 
+    def _safe_extract_inv_id(self, payload: Dict[str, Any]) -> str:
+        """Safely extract and sanitize investigation_id from event payload."""
+        raw = str(payload.get("investigation_id") or "inv_unknown").strip()
+        if SAFE_ID_PATTERN.match(raw) and ".." not in raw and len(raw) <= 128:
+            return raw
+        h = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:10]
+        return f"inv_malformed_{h}"
+
+    def _on_audit_completed_event(self, event: Event) -> None:
+        payload = event.payload or {}
+        inv_id = self._safe_extract_inv_id(payload)
+        status = payload.get("overall_status", "UNKNOWN")
+        findings_count = payload.get("findings_count", 0)
+        report_id = payload.get("report_id")
+
+        if findings_count > 0:
+            sev = AuditDiagnosticSeverity.WARNING
+            cat = AuditDiagnosticCategory.GENERAL_DIAGNOSTIC
+            nature = AuditEvidenceNature.OBSERVED_FAILURE
+            msg = f"Audit report '{report_id}' completed with {findings_count} finding(s) for investigation '{inv_id}'."
+        else:
+            sev = AuditDiagnosticSeverity.INFO
+            cat = AuditDiagnosticCategory.GENERAL_DIAGNOSTIC
+            nature = AuditEvidenceNature.INFERRED_INTERPRETATION
+            msg = f"Audit report '{report_id}' generated successfully for investigation '{inv_id}' with status '{status}'."
+
+        self.record_diagnostic(
+            investigation_id=inv_id,
+            category=cat,
+            severity=sev,
+            evidence_nature=nature,
+            message=msg,
+            correlation_id=event.correlation_id,
+            report_id=report_id,
+            details=payload,
+        )
+
+        if status == "PASSED" and findings_count == 0:
+            if self._active_failures.get(inv_id):
+                self.check_and_record_recovery(
+                    investigation_id=inv_id,
+                    correlation_id=event.correlation_id,
+                    report_id=report_id,
+                )
+
     def _on_audit_failed_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         error_msg = payload.get("error", "Audit evaluation encountered an unhandled failure.")
         self.record_diagnostic(
             investigation_id=inv_id,
@@ -148,7 +196,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_integrity_violation_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         msg = payload.get("message", "Integrity violation detected in historical chain.")
         self.record_diagnostic(
             investigation_id=inv_id,
@@ -164,7 +212,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_coverage_evaluated_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         state = payload.get("coverage_state", "COMPLETE")
         if state in ("PARTIAL", "EMPTY", "UNAVAILABLE"):
             sev = (
@@ -185,7 +233,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_repeatability_verified_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         is_rep = payload.get("is_repeatable", True)
         if not is_rep:
             score = payload.get("repeatability_score", 0.0)
@@ -202,7 +250,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_regression_detected_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         reg_state = payload.get("regression_state")
         if reg_state == "REGRESSION_DETECTED":
             new_count = payload.get("new_findings_count", 0)
@@ -220,7 +268,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_reliability_failed_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         err = payload.get("error", "Reliability evaluation failed.")
         self.record_diagnostic(
             investigation_id=inv_id,
@@ -235,7 +283,7 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def _on_reliability_completed_event(self, event: Event) -> None:
         payload = event.payload or {}
-        inv_id = payload.get("investigation_id") or "inv_unknown"
+        inv_id = self._safe_extract_inv_id(payload)
         status = payload.get("overall_reliability_status")
         # If successfully evaluated as RELIABLE and there were previous failures, observe recovery!
         if status == "RELIABLE":
@@ -282,7 +330,16 @@ class HistoricalReviewAuditDiagnosticsService:
         clean_msg = sanitize_text(message)
         summary_text = f"[{sev_obj.value}] {cat_obj.value} for investigation '{clean_inv}': {clean_msg}"
 
-        safe_refs = tuple(str(s) for s in source_references if SAFE_ID_PATTERN.match(str(s).strip()))
+        safe_refs = tuple(
+            str(s).strip()
+            for s in source_references
+            if s
+            and SAFE_REF_PATTERN.match(str(s).strip())
+            and ".." not in str(s)
+            and "/" not in str(s)
+            and "\\" not in str(s)
+            and len(str(s).strip()) <= 128
+        )
         prohibited_keys = {
             "api_key", "secret", "password", "token", "credential", "auth_token", "private_key",
             "prompt", "audio", "transcript", "raw_audio", "raw_transcript"
@@ -348,6 +405,15 @@ class HistoricalReviewAuditDiagnosticsService:
                 self._state_store.set(f"historical_review_diagnostics:{clean_inv}:latest", record.to_dict())
                 self._state_store.set(f"historical_review_diagnostics:{record.diagnostic_id}", record.to_dict())
 
+                hist = self._state_store.get("historical_review_diagnostics:history", [])
+                if not isinstance(hist, list):
+                    hist = []
+                hist.insert(0, record.to_dict())
+                self._state_store.set(
+                    "historical_review_diagnostics:history",
+                    hist[: self._max_diagnostics],
+                )
+
             # 5. Evaluate Operational Alerting
             self._evaluate_alert(record)
 
@@ -403,6 +469,11 @@ class HistoricalReviewAuditDiagnosticsService:
                 cooldown_until=cooldown_until,
                 suppressed_occurrences=suppressed,
             )
+
+            # Retain in lookup map and StateStore so get_alert(alert_id) can retrieve it
+            self._alerts_by_id[alert.alert_id] = alert
+            if self._state_store is not None:
+                self._state_store.set(f"historical_review_alerts:{alert.alert_id}", alert.to_dict())
 
             if self._event_bus is not None:
                 self._event_bus.publish(
@@ -466,6 +537,14 @@ class HistoricalReviewAuditDiagnosticsService:
         # StateStore persistence
         if self._state_store is not None:
             self._state_store.set(f"historical_review_alerts:{alert.alert_id}", alert.to_dict())
+            hist = self._state_store.get("historical_review_alerts:history", [])
+            if not isinstance(hist, list):
+                hist = []
+            hist.insert(0, alert.to_dict())
+            self._state_store.set(
+                "historical_review_alerts:history",
+                hist[: self._max_alerts],
+            )
 
         return alert
 
@@ -490,6 +569,17 @@ class HistoricalReviewAuditDiagnosticsService:
 
             resolved_categories = [c.value for c in active]
             self._active_failures.pop(clean_inv, None)
+
+            # Update previously active alerts for this investigation to RESOLVED
+            for i, a in enumerate(list(self._alerts)):
+                if a.investigation_id == clean_inv and a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE):
+                    resolved_dict = a.to_dict()
+                    resolved_dict["status"] = AuditAlertStatus.RESOLVED.value
+                    resolved_alert = AuditAlert.from_dict(resolved_dict)
+                    self._alerts[i] = resolved_alert
+                    self._alerts_by_id[a.alert_id] = resolved_alert
+                    if self._state_store is not None:
+                        self._state_store.set(f"historical_review_alerts:{a.alert_id}", resolved_alert.to_dict())
 
             msg = (
                 f"Operational recovery observed for investigation '{clean_inv}'. "
@@ -538,6 +628,8 @@ class HistoricalReviewAuditDiagnosticsService:
                 item = self._state_store.get(f"historical_review_diagnostics:{clean_id}", None)
                 if isinstance(item, dict):
                     rec = AuditDiagnosticRecord.from_dict(item)
+                    if rec not in self._diagnostics:
+                        self._diagnostics.append(rec)
                     self._diagnostics_by_id[rec.diagnostic_id] = rec
                     return rec
 
@@ -559,6 +651,20 @@ class HistoricalReviewAuditDiagnosticsService:
         sev_val = severity.value if isinstance(severity, Enum) else (str(severity) if severity else None)
 
         with self._lock:
+            # Hydrate from StateStore if in-memory queue is empty
+            if not self._diagnostics and self._state_store is not None:
+                stored_hist = self._state_store.get("historical_review_diagnostics:history", [])
+                if isinstance(stored_hist, list):
+                    for item in stored_hist:
+                        if isinstance(item, dict):
+                            try:
+                                r = AuditDiagnosticRecord.from_dict(item)
+                                if r not in self._diagnostics:
+                                    self._diagnostics.append(r)
+                                self._diagnostics_by_id[r.diagnostic_id] = r
+                            except Exception:
+                                pass
+
             results = list(self._diagnostics)
 
             # Filter
@@ -590,6 +696,8 @@ class HistoricalReviewAuditDiagnosticsService:
                 item = self._state_store.get(f"historical_review_alerts:{clean_id}", None)
                 if isinstance(item, dict):
                     alert = AuditAlert.from_dict(item)
+                    if alert not in self._alerts:
+                        self._alerts.append(alert)
                     self._alerts_by_id[alert.alert_id] = alert
                     return alert
 
@@ -612,6 +720,20 @@ class HistoricalReviewAuditDiagnosticsService:
         sev_val = severity.value if isinstance(severity, Enum) else (str(severity) if severity else None)
 
         with self._lock:
+            # Hydrate from StateStore if in-memory queue is empty
+            if not self._alerts and self._state_store is not None:
+                stored_hist = self._state_store.get("historical_review_alerts:history", [])
+                if isinstance(stored_hist, list):
+                    for item in stored_hist:
+                        if isinstance(item, dict):
+                            try:
+                                a = AuditAlert.from_dict(item)
+                                if a not in self._alerts:
+                                    self._alerts.append(a)
+                                self._alerts_by_id[a.alert_id] = a
+                            except Exception:
+                                pass
+
             results = list(self._alerts)
 
             if investigation_id:
@@ -636,7 +758,26 @@ class HistoricalReviewAuditDiagnosticsService:
 
         with self._lock:
             matching_diags = [d for d in self._diagnostics if d.investigation_id == clean_inv]
+            if not matching_diags and self._state_store is not None:
+                stored_hist = self._state_store.get("historical_review_diagnostics:history", [])
+                if isinstance(stored_hist, list):
+                    for item in stored_hist:
+                        if isinstance(item, dict) and item.get("investigation_id") == clean_inv:
+                            try:
+                                matching_diags.append(AuditDiagnosticRecord.from_dict(item))
+                            except Exception:
+                                pass
+
             matching_alerts = [a for a in self._alerts if a.investigation_id == clean_inv]
+            if not matching_alerts and self._state_store is not None:
+                stored_hist = self._state_store.get("historical_review_alerts:history", [])
+                if isinstance(stored_hist, list):
+                    for item in stored_hist:
+                        if isinstance(item, dict) and item.get("investigation_id") == clean_inv:
+                            try:
+                                matching_alerts.append(AuditAlert.from_dict(item))
+                            except Exception:
+                                pass
 
             cat_counts: Dict[str, int] = collections.defaultdict(int)
             sev_counts: Dict[str, int] = collections.defaultdict(int)
@@ -652,12 +793,12 @@ class HistoricalReviewAuditDiagnosticsService:
                 if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE)
             ]
 
-            latest_ts = matching_diags[-1].timestamp if matching_diags else None
-            latest_iso = matching_diags[-1].timestamp_iso if matching_diags else None
+            latest_ts = matching_diags[0].timestamp if matching_diags else None
+            latest_iso = matching_diags[0].timestamp_iso if matching_diags else None
 
-            has_active = bool(self._active_failures.get(clean_inv))
             recovery = any(d.category == AuditDiagnosticCategory.RECOVERY_OBSERVED for d in matching_diags)
-            recent_reasons = tuple(a.reason for a in matching_alerts[-5:])
+            has_active = bool(self._active_failures.get(clean_inv)) or bool(active_alerts and not recovery)
+            recent_reasons = tuple(a.reason for a in matching_alerts[:5])
 
             return AuditDiagnosticSummary(
                 investigation_id=clean_inv,
