@@ -142,6 +142,8 @@ class HistoricalReviewAuditDiagnosticsService:
         # Retention and eviction tracking
         self._evicted_diagnostics_count: int = 0
         self._evicted_alerts_count: int = 0
+        self._evicted_exports_count: int = 0
+        self._evicted_reconciliations_count: int = 0
         self._evicted_diagnostics_by_inv: collections.defaultdict[str, int] = collections.defaultdict(int)
         self._evicted_alerts_by_inv: collections.defaultdict[str, int] = collections.defaultdict(int)
         self._evicted_diagnostic_ids: collections.deque[str] = collections.deque(maxlen=self._max_diagnostics)
@@ -372,10 +374,14 @@ class HistoricalReviewAuditDiagnosticsService:
         data = {
             "evicted_diagnostics_count": self._evicted_diagnostics_count,
             "evicted_alerts_count": self._evicted_alerts_count,
+            "evicted_exports_count": self._evicted_exports_count,
+            "evicted_reconciliations_count": self._evicted_reconciliations_count,
             "evicted_diagnostics_by_inv": dict(self._evicted_diagnostics_by_inv),
             "evicted_alerts_by_inv": dict(self._evicted_alerts_by_inv),
             "evicted_diagnostic_ids": list(self._evicted_diagnostic_ids),
             "evicted_alert_ids": list(self._evicted_alert_ids),
+            "evicted_export_ids": list(self._evicted_export_ids),
+            "evicted_reconciliation_ids": list(self._evicted_reconciliation_ids),
         }
         self._state_store.set("historical_review_diagnostics:retention_stats", data)
 
@@ -479,6 +485,14 @@ class HistoricalReviewAuditDiagnosticsService:
                     self._evicted_alerts_count = max(0, int(stored_stats.get("evicted_alerts_count", 0)))
                 except (ValueError, TypeError):
                     self._evicted_alerts_count = 0
+                try:
+                    self._evicted_exports_count = max(0, int(stored_stats.get("evicted_exports_count", 0)))
+                except (ValueError, TypeError):
+                    self._evicted_exports_count = 0
+                try:
+                    self._evicted_reconciliations_count = max(0, int(stored_stats.get("evicted_reconciliations_count", 0)))
+                except (ValueError, TypeError):
+                    self._evicted_reconciliations_count = 0
 
                 inv_d = stored_stats.get("evicted_diagnostics_by_inv", {})
                 if isinstance(inv_d, dict):
@@ -512,6 +526,20 @@ class HistoricalReviewAuditDiagnosticsService:
                     self._evicted_alert_ids = collections.deque(
                         [str(x) for x in e_alts if isinstance(x, (str, int))],
                         maxlen=self._max_alerts,
+                    )
+
+                e_exps = stored_stats.get("evicted_export_ids", [])
+                if isinstance(e_exps, list):
+                    self._evicted_export_ids = collections.deque(
+                        [str(x) for x in e_exps if isinstance(x, (str, int))],
+                        maxlen=self._max_exports,
+                    )
+
+                e_recons = stored_stats.get("evicted_reconciliation_ids", [])
+                if isinstance(e_recons, list):
+                    self._evicted_reconciliation_ids = collections.deque(
+                        [str(x) for x in e_recons if isinstance(x, (str, int))],
+                        maxlen=self._max_reconciliations,
                     )
 
             # 6. Hydrate exports history
@@ -1076,16 +1104,22 @@ class HistoricalReviewAuditDiagnosticsService:
     def is_diagnostic_evicted(self, diagnostic_id: str) -> bool:
         """Check if a diagnostic record was evicted due to capacity retention boundaries."""
         with self._lock:
+            if not self._evicted_diagnostic_ids and self._state_store is not None:
+                self.hydrate_from_state_store()
             return diagnostic_id in self._evicted_diagnostic_ids
 
     def is_alert_evicted(self, alert_id: str) -> bool:
         """Check if an operational alert was evicted due to capacity retention boundaries."""
         with self._lock:
+            if not self._evicted_alert_ids and self._state_store is not None:
+                self.hydrate_from_state_store()
             return alert_id in self._evicted_alert_ids
 
     def get_retention_status(self) -> Dict[str, Any]:
         """Return system-wide retention and capacity metadata."""
         with self._lock:
+            if not self._diagnostics and not self._alerts and not self._exports and self._state_store is not None:
+                self.hydrate_from_state_store()
             oldest_diag_ts = self._diagnostics[0].timestamp if self._diagnostics else None
             oldest_alert_ts = self._alerts[0].timestamp if self._alerts else None
             return {
@@ -1104,10 +1138,10 @@ class HistoricalReviewAuditDiagnosticsService:
                 "state_store_configured": self._state_store is not None,
                 "max_exports_capacity": self._max_exports,
                 "current_exports_count": len(self._exports),
-                "total_exports_evicted": len(self._evicted_export_ids),
+                "total_exports_evicted": self._evicted_exports_count,
                 "max_reconciliations_capacity": self._max_reconciliations,
                 "current_reconciliations_count": len(self._reconciliations),
-                "total_reconciliations_evicted": len(self._evicted_reconciliation_ids),
+                "total_reconciliations_evicted": self._evicted_reconciliations_count,
             }
 
     # ==============================================================================
@@ -1512,8 +1546,20 @@ class HistoricalReviewAuditDiagnosticsService:
             # 9. In-memory bounded storage & eviction tracking
             if len(self._exports) == self._exports.maxlen:
                 evicted_exp = self._exports[0]
-                self._evicted_export_ids.append(evicted_exp.export_id)
-                self._exports_by_id.pop(evicted_exp.export_id, None)
+                remaining_same_id = any(e.export_id == evicted_exp.export_id for e in list(self._exports)[1:])
+                if not remaining_same_id:
+                    self._evicted_export_ids.append(evicted_exp.export_id)
+                    self._evicted_exports_count += 1
+                    self._exports_by_id.pop(evicted_exp.export_id, None)
+                    if self._state_store is not None:
+                        self._state_store.delete(f"historical_review_exports:{evicted_exp.export_id}")
+                    self._persist_retention_stats()
+
+            if export_id in self._evicted_export_ids:
+                try:
+                    self._evicted_export_ids.remove(export_id)
+                except ValueError:
+                    pass
 
             self._exports.append(export_result)
             self._exports_by_id[export_id] = export_result
@@ -1568,6 +1614,9 @@ class HistoricalReviewAuditDiagnosticsService:
             if clean_id in self._exports_by_id:
                 return self._exports_by_id[clean_id]
 
+            if clean_id in self._evicted_export_ids:
+                return None
+
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_exports:{clean_id}", None)
                 if isinstance(item, dict):
@@ -1619,6 +1668,9 @@ class HistoricalReviewAuditDiagnosticsService:
         recon_id = compute_deterministic_reconciliation_id(clean_id, recon_ts)
 
         with self._lock:
+            if not self._diagnostics and not self._alerts and self._state_store is not None:
+                self.hydrate_from_state_store()
+
             # 1. Retrieve export snapshot
             export = export_obj if export_obj is not None else self.get_export(clean_id)
             if export is None:
@@ -1874,8 +1926,20 @@ class HistoricalReviewAuditDiagnosticsService:
         """Store and publish a reconciliation report."""
         if len(self._reconciliations) == self._reconciliations.maxlen:
             evicted = self._reconciliations[0]
-            self._evicted_reconciliation_ids.append(evicted.reconciliation_id)
-            self._reconciliations_by_id.pop(evicted.reconciliation_id, None)
+            remaining_same_rec = any(r.reconciliation_id == evicted.reconciliation_id for r in list(self._reconciliations)[1:])
+            if not remaining_same_rec:
+                self._evicted_reconciliation_ids.append(evicted.reconciliation_id)
+                self._evicted_reconciliations_count += 1
+                self._reconciliations_by_id.pop(evicted.reconciliation_id, None)
+                if self._state_store is not None:
+                    self._state_store.delete(f"historical_review_reconciliations:{evicted.reconciliation_id}")
+                self._persist_retention_stats()
+
+        if report.reconciliation_id in self._evicted_reconciliation_ids:
+            try:
+                self._evicted_reconciliation_ids.remove(report.reconciliation_id)
+            except ValueError:
+                pass
 
         self._reconciliations.append(report)
         self._reconciliations_by_id[report.reconciliation_id] = report
@@ -1926,6 +1990,9 @@ class HistoricalReviewAuditDiagnosticsService:
             if clean_id in self._reconciliations_by_id:
                 return self._reconciliations_by_id[clean_id]
 
+            if clean_id in self._evicted_reconciliation_ids:
+                return None
+
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_reconciliations:{clean_id}", None)
                 if isinstance(item, dict):
@@ -1962,11 +2029,19 @@ class HistoricalReviewAuditDiagnosticsService:
     def is_export_evicted(self, export_id: str) -> bool:
         """Check if an export record was evicted due to retention bounds."""
         with self._lock:
+            if not self._evicted_export_ids and self._state_store is not None:
+                self.hydrate_from_state_store()
+            if export_id in self._exports_by_id:
+                return False
             return export_id in self._evicted_export_ids
 
     def is_reconciliation_evicted(self, reconciliation_id: str) -> bool:
         """Check if a reconciliation report was evicted due to retention bounds."""
         with self._lock:
+            if not self._evicted_reconciliation_ids and self._state_store is not None:
+                self.hydrate_from_state_store()
+            if reconciliation_id in self._reconciliations_by_id:
+                return False
             return reconciliation_id in self._evicted_reconciliation_ids
 
     def clear_history(self) -> None:
@@ -1988,6 +2063,8 @@ class HistoricalReviewAuditDiagnosticsService:
             self._active_failures.clear()
             self._evicted_diagnostics_count = 0
             self._evicted_alerts_count = 0
+            self._evicted_exports_count = 0
+            self._evicted_reconciliations_count = 0
             self._evicted_diagnostics_by_inv.clear()
             self._evicted_alerts_by_inv.clear()
             self._evicted_diagnostic_ids.clear()
