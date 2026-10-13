@@ -1571,8 +1571,11 @@ class HistoricalReviewAuditDiagnosticsService:
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_exports:{clean_id}", None)
                 if isinstance(item, dict):
-                    exp = DiagnosticsExportResult.from_dict(item)
-                    return exp
+                    try:
+                        exp = DiagnosticsExportResult.from_dict(item)
+                        return exp
+                    except Exception:
+                        return None
 
             return None
 
@@ -1600,18 +1603,24 @@ class HistoricalReviewAuditDiagnosticsService:
 
     def reconcile_export(
         self,
-        export_id: str,
+        export_id: Union[str, DiagnosticsExportResult],
         correlation_id: Optional[str] = None,
     ) -> DiagnosticsReconciliationReport:
         """Reconcile exported diagnostic and alert records against currently active source records."""
-        clean_id = validate_safe_id(export_id, "export_id")
+        if isinstance(export_id, DiagnosticsExportResult):
+            export_obj: Optional[DiagnosticsExportResult] = export_id
+            clean_id = validate_safe_id(export_obj.export_id, "export_id")
+        else:
+            clean_id = validate_safe_id(export_id, "export_id")
+            export_obj = None
+
         recon_ts = self._time_provider()
         recon_ts_iso = format_utc_iso(recon_ts)
         recon_id = compute_deterministic_reconciliation_id(clean_id, recon_ts)
 
         with self._lock:
             # 1. Retrieve export snapshot
-            export = self.get_export(clean_id)
+            export = export_obj if export_obj is not None else self.get_export(clean_id)
             if export is None:
                 is_evicted = self.is_export_evicted(clean_id)
                 status = (
@@ -1920,8 +1929,11 @@ class HistoricalReviewAuditDiagnosticsService:
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_reconciliations:{clean_id}", None)
                 if isinstance(item, dict):
-                    rpt = DiagnosticsReconciliationReport.from_dict(item)
-                    return rpt
+                    try:
+                        rpt = DiagnosticsReconciliationReport.from_dict(item)
+                        return rpt
+                    except Exception:
+                        return None
 
             return None
 
