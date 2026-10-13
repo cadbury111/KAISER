@@ -55,6 +55,16 @@ from app.core.events.bus import EventBus
 from app.core.events.event import Event, EventType
 from app.core.exceptions import ValidationError
 from app.core.state import StateStore
+from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
+    CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+    SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS,
+    SchemaVersionCompatibilityStatus,
+    SchemaVersionError,
+    IncompatibleSchemaVersionError,
+    MalformedSchemaVersionError,
+    detect_and_validate_schema_version,
+    migrate_retention_stats_payload,
+)
 
 logger = logging.getLogger("kaiser.analysis.evolution.audit.diagnostics")
 
@@ -148,6 +158,7 @@ class HistoricalReviewAuditDiagnosticsService:
         self._evicted_alerts_by_inv: collections.defaultdict[str, int] = collections.defaultdict(int)
         self._evicted_diagnostic_ids: collections.deque[str] = collections.deque(maxlen=self._max_diagnostics)
         self._evicted_alert_ids: collections.deque[str] = collections.deque(maxlen=self._max_alerts)
+        self._unsupported_records_skipped: int = 0
 
         # Hydrate from StateStore if explicitly requested
         if self._state_store is not None and auto_hydrate:
@@ -372,6 +383,7 @@ class HistoricalReviewAuditDiagnosticsService:
         if self._state_store is None:
             return
         data = {
+            "schema_version": CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
             "evicted_diagnostics_count": self._evicted_diagnostics_count,
             "evicted_alerts_count": self._evicted_alerts_count,
             "evicted_exports_count": self._evicted_exports_count,
@@ -403,6 +415,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 rec = AuditDiagnosticRecord.from_dict(item)
                                 self._diagnostics.append(rec)
                                 self._diagnostics_by_id[rec.diagnostic_id] = rec
+                            except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                                logger.warning("Skipping unsupported/malformed diagnostic record in StateStore: %s", exc)
+                                self._unsupported_records_skipped += 1
                             except Exception:
                                 pass
 
@@ -422,6 +437,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 else:
                                     self._alerts.append(alt)
                                 self._alerts_by_id[alt.alert_id] = alt
+                            except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                                logger.warning("Skipping unsupported/malformed alert in StateStore: %s", exc)
+                                self._unsupported_records_skipped += 1
                             except Exception:
                                 pass
 
@@ -435,6 +453,9 @@ class HistoricalReviewAuditDiagnosticsService:
                             if s_alt not in self._suppressed_alerts:
                                 self._suppressed_alerts.append(s_alt)
                             self._alerts_by_id[s_alt.alert_id] = s_alt
+                        except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                            logger.warning("Skipping unsupported/malformed suppressed alert: %s", exc)
+                            self._unsupported_records_skipped += 1
                         except Exception:
                             pass
 
@@ -478,23 +499,29 @@ class HistoricalReviewAuditDiagnosticsService:
             stored_stats = self._state_store.get("historical_review_diagnostics:retention_stats", None)
             if isinstance(stored_stats, dict):
                 try:
-                    self._evicted_diagnostics_count = max(0, int(stored_stats.get("evicted_diagnostics_count", 0)))
+                    migrated_stats = migrate_retention_stats_payload(stored_stats)
+                except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                    logger.warning("Skipping incompatible retention stats: %s", exc)
+                    migrated_stats = stored_stats
+
+                try:
+                    self._evicted_diagnostics_count = max(0, int(migrated_stats.get("evicted_diagnostics_count", 0)))
                 except (ValueError, TypeError):
                     self._evicted_diagnostics_count = 0
                 try:
-                    self._evicted_alerts_count = max(0, int(stored_stats.get("evicted_alerts_count", 0)))
+                    self._evicted_alerts_count = max(0, int(migrated_stats.get("evicted_alerts_count", 0)))
                 except (ValueError, TypeError):
                     self._evicted_alerts_count = 0
                 try:
-                    self._evicted_exports_count = max(0, int(stored_stats.get("evicted_exports_count", 0)))
+                    self._evicted_exports_count = max(0, int(migrated_stats.get("evicted_exports_count", 0)))
                 except (ValueError, TypeError):
                     self._evicted_exports_count = 0
                 try:
-                    self._evicted_reconciliations_count = max(0, int(stored_stats.get("evicted_reconciliations_count", 0)))
+                    self._evicted_reconciliations_count = max(0, int(migrated_stats.get("evicted_reconciliations_count", 0)))
                 except (ValueError, TypeError):
                     self._evicted_reconciliations_count = 0
 
-                inv_d = stored_stats.get("evicted_diagnostics_by_inv", {})
+                inv_d = migrated_stats.get("evicted_diagnostics_by_inv", {})
                 if isinstance(inv_d, dict):
                     cleaned_inv_d = {}
                     for k, v in inv_d.items():
@@ -504,7 +531,7 @@ class HistoricalReviewAuditDiagnosticsService:
                             pass
                     self._evicted_diagnostics_by_inv = collections.defaultdict(int, cleaned_inv_d)
 
-                inv_a = stored_stats.get("evicted_alerts_by_inv", {})
+                inv_a = migrated_stats.get("evicted_alerts_by_inv", {})
                 if isinstance(inv_a, dict):
                     cleaned_inv_a = {}
                     for k, v in inv_a.items():
@@ -514,28 +541,28 @@ class HistoricalReviewAuditDiagnosticsService:
                             pass
                     self._evicted_alerts_by_inv = collections.defaultdict(int, cleaned_inv_a)
 
-                e_diags = stored_stats.get("evicted_diagnostic_ids", [])
+                e_diags = migrated_stats.get("evicted_diagnostic_ids", [])
                 if isinstance(e_diags, list):
                     self._evicted_diagnostic_ids = collections.deque(
                         [str(x) for x in e_diags if isinstance(x, (str, int))],
                         maxlen=self._max_diagnostics,
                     )
 
-                e_alts = stored_stats.get("evicted_alert_ids", [])
+                e_alts = migrated_stats.get("evicted_alert_ids", [])
                 if isinstance(e_alts, list):
                     self._evicted_alert_ids = collections.deque(
                         [str(x) for x in e_alts if isinstance(x, (str, int))],
                         maxlen=self._max_alerts,
                     )
 
-                e_exps = stored_stats.get("evicted_export_ids", [])
+                e_exps = migrated_stats.get("evicted_export_ids", [])
                 if isinstance(e_exps, list):
                     self._evicted_export_ids = collections.deque(
                         [str(x) for x in e_exps if isinstance(x, (str, int))],
                         maxlen=self._max_exports,
                     )
 
-                e_recons = stored_stats.get("evicted_reconciliation_ids", [])
+                e_recons = migrated_stats.get("evicted_reconciliation_ids", [])
                 if isinstance(e_recons, list):
                     self._evicted_reconciliation_ids = collections.deque(
                         [str(x) for x in e_recons if isinstance(x, (str, int))],
@@ -554,6 +581,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 exp = DiagnosticsExportResult.from_dict(item)
                                 self._exports.append(exp)
                                 self._exports_by_id[exp.export_id] = exp
+                            except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                                logger.warning("Skipping unsupported/malformed export: %s", exc)
+                                self._unsupported_records_skipped += 1
                             except Exception:
                                 pass
 
@@ -569,6 +599,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 rpt = DiagnosticsReconciliationReport.from_dict(item)
                                 self._reconciliations.append(rpt)
                                 self._reconciliations_by_id[rpt.reconciliation_id] = rpt
+                            except (IncompatibleSchemaVersionError, MalformedSchemaVersionError) as exc:
+                                logger.warning("Skipping unsupported/malformed reconciliation: %s", exc)
+                                self._unsupported_records_skipped += 1
                             except Exception:
                                 pass
 
@@ -1123,12 +1156,17 @@ class HistoricalReviewAuditDiagnosticsService:
             oldest_diag_ts = self._diagnostics[0].timestamp if self._diagnostics else None
             oldest_alert_ts = self._alerts[0].timestamp if self._alerts else None
             return {
+                "schema_version": CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                "supported_schema_versions": list(sorted(SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS)),
+                "unsupported_records_skipped": self._unsupported_records_skipped,
                 "max_diagnostics_capacity": self._max_diagnostics,
                 "max_alerts_capacity": self._max_alerts,
                 "current_diagnostics_count": len(self._diagnostics),
                 "current_alerts_count": len(self._alerts),
                 "total_diagnostics_evicted": self._evicted_diagnostics_count,
                 "total_alerts_evicted": self._evicted_alerts_count,
+                "evicted_diagnostics_count": self._evicted_diagnostics_count,
+                "evicted_alerts_count": self._evicted_alerts_count,
                 "oldest_diagnostic_timestamp": oldest_diag_ts,
                 "oldest_diagnostic_timestamp_iso": format_utc_iso(oldest_diag_ts) if oldest_diag_ts else None,
                 "oldest_alert_timestamp": oldest_alert_ts,
@@ -1164,8 +1202,11 @@ class HistoricalReviewAuditDiagnosticsService:
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_diagnostics:{clean_id}", None)
                 if isinstance(item, dict):
-                    rec = AuditDiagnosticRecord.from_dict(item)
-                    return rec
+                    try:
+                        rec = AuditDiagnosticRecord.from_dict(item)
+                        return rec
+                    except Exception:
+                        return None
 
             return None
 
@@ -1222,8 +1263,11 @@ class HistoricalReviewAuditDiagnosticsService:
             if self._state_store is not None:
                 item = self._state_store.get(f"historical_review_alerts:{clean_id}", None)
                 if isinstance(item, dict):
-                    alert = AuditAlert.from_dict(item)
-                    return alert
+                    try:
+                        alert = AuditAlert.from_dict(item)
+                        return alert
+                    except Exception:
+                        return None
 
             return None
 
@@ -1674,6 +1718,32 @@ class HistoricalReviewAuditDiagnosticsService:
             # 1. Retrieve export snapshot
             export = export_obj if export_obj is not None else self.get_export(clean_id)
             if export is None:
+                if self._state_store is not None:
+                    raw_stored = self._state_store.get(f"historical_review_exports:{clean_id}", None)
+                    if isinstance(raw_stored, dict):
+                        raw_v = raw_stored.get("schema_version")
+                        c_status, v_detected = detect_and_validate_schema_version(raw_v)
+                        if c_status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+                            report = DiagnosticsReconciliationReport(
+                                reconciliation_id=recon_id,
+                                export_id=clean_id,
+                                timestamp=recon_ts,
+                                timestamp_iso=recon_ts_iso,
+                                status=DiagnosticsReconciliationStatus.UNVERIFIABLE,
+                                total_exported_diagnostics=len(raw_stored.get("diagnostics", [])),
+                                total_exported_alerts=len(raw_stored.get("alerts", [])),
+                                matched_diagnostics=0,
+                                matched_alerts=0,
+                                discrepancies=(),
+                                source_retention_status="NO_DATA",
+                                is_source_truncated=False,
+                                fingerprint_verified=False,
+                                summary_notes=f"Export record '{clean_id}' has unsupported future schema version '{v_detected}'. Supported versions: {list(sorted(SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS))}.",
+                                schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                            )
+                            self._record_reconciliation_report(report, correlation_id)
+                            return report
+
                 is_evicted = self.is_export_evicted(clean_id)
                 status = (
                     DiagnosticsReconciliationStatus.UNAVAILABLE
@@ -1700,6 +1770,30 @@ class HistoricalReviewAuditDiagnosticsService:
                     is_source_truncated=False,
                     fingerprint_verified=False,
                     summary_notes=note,
+                    schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                )
+                self._record_reconciliation_report(report, correlation_id)
+                return report
+
+            # Check schema version compatibility of export
+            compat_status, ver_str = detect_and_validate_schema_version(export.schema_version)
+            if compat_status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+                report = DiagnosticsReconciliationReport(
+                    reconciliation_id=recon_id,
+                    export_id=clean_id,
+                    timestamp=recon_ts,
+                    timestamp_iso=recon_ts_iso,
+                    status=DiagnosticsReconciliationStatus.UNVERIFIABLE,
+                    total_exported_diagnostics=len(export.diagnostics),
+                    total_exported_alerts=len(export.alerts),
+                    matched_diagnostics=0,
+                    matched_alerts=0,
+                    discrepancies=(),
+                    source_retention_status="NO_DATA",
+                    is_source_truncated=False,
+                    fingerprint_verified=False,
+                    summary_notes=f"Export record '{clean_id}' has unsupported future schema version '{export.schema_version}'. Supported versions: {list(sorted(SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS))}.",
+                    schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                 )
                 self._record_reconciliation_report(report, correlation_id)
                 return report
@@ -2004,6 +2098,10 @@ class HistoricalReviewAuditDiagnosticsService:
 
             return None
 
+    def get_reconciliation_report(self, reconciliation_id: str) -> Optional[DiagnosticsReconciliationReport]:
+        """Alias for get_reconciliation to retrieve a reconciliation report by ID."""
+        return self.get_reconciliation(reconciliation_id)
+
     def list_reconciliations(
         self,
         export_id: Optional[str] = None,
@@ -2061,6 +2159,7 @@ class HistoricalReviewAuditDiagnosticsService:
             self._last_alert_time.clear()
             self._suppressed_counts.clear()
             self._active_failures.clear()
+            self._unsupported_records_skipped = 0
             self._evicted_diagnostics_count = 0
             self._evicted_alerts_count = 0
             self._evicted_exports_count = 0

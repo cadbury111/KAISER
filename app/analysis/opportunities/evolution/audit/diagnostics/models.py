@@ -24,6 +24,20 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from app.core.exceptions import ValidationError
+from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
+    CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+    SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS,
+    LEGACY_UNVERSIONED,
+    SchemaVersionCompatibilityStatus,
+    SchemaVersionError,
+    IncompatibleSchemaVersionError,
+    MalformedSchemaVersionError,
+    detect_and_validate_schema_version,
+    migrate_diagnostic_payload,
+    migrate_alert_payload,
+    migrate_export_payload,
+    migrate_reconciliation_payload,
+)
 
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+$")
 
@@ -210,6 +224,7 @@ class AuditDiagnosticRecord:
     details: Dict[str, Any] = field(default_factory=dict)
     error_category: Optional[str] = None
     sanitized_summary: str = ""
+    schema_version: str = CURRENT_DIAGNOSTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         validate_safe_id(self.diagnostic_id, "diagnostic_id")
@@ -221,6 +236,11 @@ class AuditDiagnosticRecord:
             validate_safe_id(self.evaluation_id, "evaluation_id")
         check_prohibited_terms(self.message, "AuditDiagnosticRecord.message")
         check_prohibited_terms(self.sanitized_summary, "AuditDiagnosticRecord.sanitized_summary")
+        status, _ = detect_and_validate_schema_version(self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{self.schema_version}'", detected_version=self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{self.schema_version}'", detected_version=self.schema_version)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize record to dictionary."""
@@ -240,46 +260,49 @@ class AuditDiagnosticRecord:
             "details": self.details,
             "error_category": self.error_category,
             "sanitized_summary": self.sanitized_summary,
+            "schema_version": self.schema_version,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AuditDiagnosticRecord:
-        """Deserialize from dictionary."""
-        cat_raw = data.get("category", AuditDiagnosticCategory.GENERAL_DIAGNOSTIC.value)
+        """Deserialize from dictionary with schema version migration."""
+        migrated_data = migrate_diagnostic_payload(data)
+        cat_raw = migrated_data.get("category", AuditDiagnosticCategory.GENERAL_DIAGNOSTIC.value)
         try:
             category = AuditDiagnosticCategory(cat_raw)
         except ValueError:
             category = AuditDiagnosticCategory.GENERAL_DIAGNOSTIC
 
-        sev_raw = data.get("severity", AuditDiagnosticSeverity.INFO.value)
+        sev_raw = migrated_data.get("severity", AuditDiagnosticSeverity.INFO.value)
         try:
             severity = AuditDiagnosticSeverity(sev_raw)
         except ValueError:
             severity = AuditDiagnosticSeverity.INFO
 
-        nat_raw = data.get("evidence_nature", AuditEvidenceNature.OBSERVED_FAILURE.value)
+        nat_raw = migrated_data.get("evidence_nature", AuditEvidenceNature.OBSERVED_FAILURE.value)
         try:
             nature = AuditEvidenceNature(nat_raw)
         except ValueError:
             nature = AuditEvidenceNature.OBSERVED_FAILURE
 
-        ts = float(data.get("timestamp", 0.0))
+        ts = float(migrated_data.get("timestamp", 0.0))
         return cls(
-            diagnostic_id=str(data["diagnostic_id"]),
-            correlation_id=str(data["correlation_id"]),
-            investigation_id=str(data["investigation_id"]),
+            diagnostic_id=str(migrated_data["diagnostic_id"]),
+            correlation_id=str(migrated_data["correlation_id"]),
+            investigation_id=str(migrated_data["investigation_id"]),
             timestamp=ts,
-            timestamp_iso=str(data.get("timestamp_iso", format_utc_iso(ts))),
+            timestamp_iso=str(migrated_data.get("timestamp_iso", format_utc_iso(ts))),
             category=category,
             severity=severity,
             evidence_nature=nature,
-            message=str(data.get("message", "")),
-            report_id=data.get("report_id"),
-            evaluation_id=data.get("evaluation_id"),
-            source_references=tuple(str(s) for s in data.get("source_references", ())),
-            details=dict(data.get("details", {})),
-            error_category=data.get("error_category"),
-            sanitized_summary=str(data.get("sanitized_summary", "")),
+            message=str(migrated_data.get("message", "")),
+            report_id=migrated_data.get("report_id"),
+            evaluation_id=migrated_data.get("evaluation_id"),
+            source_references=tuple(str(s) for s in migrated_data.get("source_references", ())),
+            details=dict(migrated_data.get("details", {})),
+            error_category=migrated_data.get("error_category"),
+            sanitized_summary=str(migrated_data.get("sanitized_summary", "")),
+            schema_version=str(migrated_data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
         )
 
 
@@ -302,6 +325,7 @@ class AuditAlert:
     suppressed_occurrences: int = 0
     report_id: Optional[str] = None
     evaluation_id: Optional[str] = None
+    schema_version: str = CURRENT_DIAGNOSTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         validate_safe_id(self.alert_id, "alert_id")
@@ -313,6 +337,11 @@ class AuditAlert:
         if self.evaluation_id:
             validate_safe_id(self.evaluation_id, "evaluation_id")
         check_prohibited_terms(self.reason, "AuditAlert.reason")
+        status, _ = detect_and_validate_schema_version(self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{self.schema_version}'", detected_version=self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{self.schema_version}'", detected_version=self.schema_version)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize alert to dictionary."""
@@ -332,47 +361,51 @@ class AuditAlert:
             "suppressed_occurrences": self.suppressed_occurrences,
             "report_id": self.report_id,
             "evaluation_id": self.evaluation_id,
+            "schema_version": self.schema_version,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> AuditAlert:
-        """Deserialize alert from dictionary."""
-        cat_raw = data.get("category", AuditDiagnosticCategory.GENERAL_DIAGNOSTIC.value)
+        """Deserialize alert from dictionary with schema version migration."""
+        migrated_data = migrate_alert_payload(data)
+        cat_raw = migrated_data.get("category", AuditDiagnosticCategory.GENERAL_DIAGNOSTIC.value)
         try:
             category = AuditDiagnosticCategory(cat_raw)
         except ValueError:
             category = AuditDiagnosticCategory.GENERAL_DIAGNOSTIC
 
-        sev_raw = data.get("severity", AuditDiagnosticSeverity.WARNING.value)
+        sev_raw = migrated_data.get("severity", AuditDiagnosticSeverity.WARNING.value)
         try:
             severity = AuditDiagnosticSeverity(sev_raw)
         except ValueError:
             severity = AuditDiagnosticSeverity.WARNING
 
-        stat_raw = data.get("status", AuditAlertStatus.TRIGGERED.value)
+        stat_raw = migrated_data.get("status", AuditAlertStatus.TRIGGERED.value)
         try:
             status = AuditAlertStatus(stat_raw)
         except ValueError:
             status = AuditAlertStatus.TRIGGERED
 
-        ts = float(data.get("timestamp", 0.0))
+        ts = float(migrated_data.get("timestamp", 0.0))
         return cls(
-            alert_id=str(data["alert_id"]),
-            diagnostic_id=str(data["diagnostic_id"]),
-            correlation_id=str(data["correlation_id"]),
-            investigation_id=str(data["investigation_id"]),
+            alert_id=str(migrated_data["alert_id"]),
+            diagnostic_id=str(migrated_data["diagnostic_id"]),
+            correlation_id=str(migrated_data["correlation_id"]),
+            investigation_id=str(migrated_data["investigation_id"]),
             timestamp=ts,
-            timestamp_iso=str(data.get("timestamp_iso", format_utc_iso(ts))),
+            timestamp_iso=str(migrated_data.get("timestamp_iso", format_utc_iso(ts))),
             category=category,
             severity=severity,
-            reason=str(data.get("reason", "")),
-            source_references=tuple(str(s) for s in data.get("source_references", ())),
+            reason=str(migrated_data.get("reason", "")),
+            source_references=tuple(str(s) for s in migrated_data.get("source_references", ())),
             status=status,
-            cooldown_until=float(data.get("cooldown_until", 0.0)),
-            suppressed_occurrences=int(data.get("suppressed_occurrences", 0)),
-            report_id=data.get("report_id"),
-            evaluation_id=data.get("evaluation_id"),
+            cooldown_until=float(migrated_data.get("cooldown_until", 0.0)),
+            suppressed_occurrences=int(migrated_data.get("suppressed_occurrences", 0)),
+            report_id=migrated_data.get("report_id"),
+            evaluation_id=migrated_data.get("evaluation_id"),
+            schema_version=str(migrated_data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
         )
+
 
 
 @dataclass(frozen=True)
@@ -533,12 +566,17 @@ class DiagnosticsExportRequest:
     include_audit_references: bool = True
     include_reliability_references: bool = True
     limit: int = 100
-    schema_version: str = "1.0.0"
+    schema_version: str = CURRENT_DIAGNOSTICS_SCHEMA_VERSION
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.investigation_id:
             validate_safe_id(self.investigation_id, "investigation_id")
+        status, _ = detect_and_validate_schema_version(self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{self.schema_version}'", detected_version=self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{self.schema_version}'", detected_version=self.schema_version)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize export request to dictionary."""
@@ -559,6 +597,19 @@ class DiagnosticsExportRequest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsExportRequest:
         """Deserialize export request from dictionary."""
+        raw_ver = data.get("schema_version")
+        status, ver = detect_and_validate_schema_version(raw_ver)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{raw_ver}'")
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{ver}'")
+
+        final_ver = (
+            CURRENT_DIAGNOSTICS_SCHEMA_VERSION
+            if status == SchemaVersionCompatibilityStatus.SUPPORTED_OLDER and ver == LEGACY_UNVERSIONED
+            else str(data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION))
+        )
+
         cat_val = None
         if data.get("category"):
             try:
@@ -573,6 +624,8 @@ class DiagnosticsExportRequest:
             except ValueError:
                 pass
 
+        limit_val = int(data.get("limit") or data.get("max_records") or 100)
+
         return cls(
             investigation_id=data.get("investigation_id"),
             category=cat_val,
@@ -582,8 +635,8 @@ class DiagnosticsExportRequest:
             active_only=bool(data.get("active_only", False)),
             include_audit_references=bool(data.get("include_audit_references", True)),
             include_reliability_references=bool(data.get("include_reliability_references", True)),
-            limit=int(data.get("limit", 100)),
-            schema_version=str(data.get("schema_version", "1.0.0")),
+            limit=limit_val,
+            schema_version=final_ver,
             metadata=dict(data.get("metadata", {})),
         )
 
@@ -608,6 +661,11 @@ class DiagnosticsExportResult:
 
     def __post_init__(self) -> None:
         validate_safe_id(self.export_id, "export_id")
+        status, _ = detect_and_validate_schema_version(self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{self.schema_version}'", detected_version=self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{self.schema_version}'", detected_version=self.schema_version)
 
     def to_canonical_json(self) -> str:
         """Produce deterministic canonical JSON string."""
@@ -642,25 +700,26 @@ class DiagnosticsExportResult:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsExportResult:
-        """Deserialize export result from dictionary."""
-        req = DiagnosticsExportRequest.from_dict(data.get("request", {}))
-        diags = tuple(AuditDiagnosticRecord.from_dict(d) for d in data.get("diagnostics", []))
-        alerts = tuple(AuditAlert.from_dict(a) for a in data.get("alerts", []))
-        ts = float(data.get("created_at", 0.0))
+        """Deserialize export result from dictionary with schema version migration."""
+        migrated_data = migrate_export_payload(data)
+        req = DiagnosticsExportRequest.from_dict(migrated_data.get("request", {}))
+        diags = tuple(AuditDiagnosticRecord.from_dict(d) for d in migrated_data.get("diagnostics", []))
+        alerts = tuple(AuditAlert.from_dict(a) for a in migrated_data.get("alerts", []))
+        ts = float(migrated_data.get("created_at", 0.0))
         return cls(
-            export_id=str(data["export_id"]),
+            export_id=str(migrated_data["export_id"]),
             request=req,
             created_at=ts,
-            created_at_iso=str(data.get("created_at_iso", format_utc_iso(ts))),
-            schema_version=str(data.get("schema_version", "1.0.0")),
+            created_at_iso=str(migrated_data.get("created_at_iso", format_utc_iso(ts))),
+            schema_version=str(migrated_data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
             diagnostics=diags,
             alerts=alerts,
-            record_counts=dict(data.get("record_counts", {})),
-            source_references=tuple(str(s) for s in data.get("source_references", ())),
-            retention_status=str(data.get("retention_status", "COMPLETE")),
-            is_truncated=bool(data.get("is_truncated", False)),
-            content_fingerprint=str(data.get("content_fingerprint", "")),
-            omitted_reasons=dict(data.get("omitted_reasons", {})),
+            record_counts=dict(migrated_data.get("record_counts", {})),
+            source_references=tuple(str(s) for s in migrated_data.get("source_references", ())),
+            retention_status=str(migrated_data.get("retention_status", "COMPLETE")),
+            is_truncated=bool(migrated_data.get("is_truncated", False)),
+            content_fingerprint=str(migrated_data.get("content_fingerprint", "")),
+            omitted_reasons=dict(migrated_data.get("omitted_reasons", {})),
         )
 
 
@@ -720,10 +779,16 @@ class DiagnosticsReconciliationReport:
     is_source_truncated: bool
     fingerprint_verified: bool
     summary_notes: str = ""
+    schema_version: str = CURRENT_DIAGNOSTICS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         validate_safe_id(self.reconciliation_id, "reconciliation_id")
         validate_safe_id(self.export_id, "export_id")
+        status, _ = detect_and_validate_schema_version(self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.MALFORMED:
+            raise MalformedSchemaVersionError(f"Malformed schema_version: '{self.schema_version}'", detected_version=self.schema_version)
+        if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+            raise IncompatibleSchemaVersionError(f"Unsupported schema_version: '{self.schema_version}'", detected_version=self.schema_version)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize reconciliation report to dictionary."""
@@ -742,32 +807,35 @@ class DiagnosticsReconciliationReport:
             "is_source_truncated": self.is_source_truncated,
             "fingerprint_verified": self.fingerprint_verified,
             "summary_notes": self.summary_notes,
+            "schema_version": self.schema_version,
         }
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsReconciliationReport:
-        """Deserialize reconciliation report from dictionary."""
-        stat_raw = data.get("status", DiagnosticsReconciliationStatus.UNVERIFIABLE.value)
+        """Deserialize reconciliation report from dictionary with schema version migration."""
+        migrated_data = migrate_reconciliation_payload(data)
+        stat_raw = migrated_data.get("status", DiagnosticsReconciliationStatus.UNVERIFIABLE.value)
         try:
             status = DiagnosticsReconciliationStatus(stat_raw)
         except ValueError:
             status = DiagnosticsReconciliationStatus.UNVERIFIABLE
 
-        discrepancies = tuple(DiagnosticsReconciliationDiscrepancy.from_dict(d) for d in data.get("discrepancies", []))
-        ts = float(data.get("timestamp", 0.0))
+        discrepancies = tuple(DiagnosticsReconciliationDiscrepancy.from_dict(d) for d in migrated_data.get("discrepancies", []))
+        ts = float(migrated_data.get("timestamp", 0.0))
         return cls(
-            reconciliation_id=str(data["reconciliation_id"]),
-            export_id=str(data["export_id"]),
+            reconciliation_id=str(migrated_data["reconciliation_id"]),
+            export_id=str(migrated_data["export_id"]),
             timestamp=ts,
-            timestamp_iso=str(data.get("timestamp_iso", format_utc_iso(ts))),
+            timestamp_iso=str(migrated_data.get("timestamp_iso", format_utc_iso(ts))),
             status=status,
-            total_exported_diagnostics=int(data.get("total_exported_diagnostics", 0)),
-            total_exported_alerts=int(data.get("total_exported_alerts", 0)),
-            matched_diagnostics=int(data.get("matched_diagnostics", 0)),
-            matched_alerts=int(data.get("matched_alerts", 0)),
+            total_exported_diagnostics=int(migrated_data.get("total_exported_diagnostics", 0)),
+            total_exported_alerts=int(migrated_data.get("total_exported_alerts", 0)),
+            matched_diagnostics=int(migrated_data.get("matched_diagnostics", 0)),
+            matched_alerts=int(migrated_data.get("matched_alerts", 0)),
             discrepancies=discrepancies,
-            source_retention_status=str(data.get("source_retention_status", "COMPLETE")),
-            is_source_truncated=bool(data.get("is_source_truncated", False)),
-            fingerprint_verified=bool(data.get("fingerprint_verified", False)),
-            summary_notes=str(data.get("summary_notes", "")),
+            source_retention_status=str(migrated_data.get("source_retention_status", "COMPLETE")),
+            is_source_truncated=bool(migrated_data.get("is_source_truncated", False)),
+            fingerprint_verified=bool(migrated_data.get("fingerprint_verified", False)),
+            summary_notes=str(migrated_data.get("summary_notes", "")),
+            schema_version=str(migrated_data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
         )
