@@ -8,9 +8,11 @@ contract for operational diagnostics, alerts, exports, reconciliations, and rete
 from __future__ import annotations
 
 import copy
-import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Mapping, Optional, Tuple
+import re
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from app.core.exceptions import ValidationError
 
@@ -36,6 +38,105 @@ class SchemaVersionCompatibilityStatus(str, Enum):
     SUPPORTED_OLDER = "SUPPORTED_OLDER"
     UNSUPPORTED_FUTURE = "UNSUPPORTED_FUTURE"
     MALFORMED = "MALFORMED"
+
+
+class DiagnosticsRecordType(str, Enum):
+    """Supported persistence record types within the diagnostics subsystem."""
+
+    DIAGNOSTIC = "DIAGNOSTIC"
+    ALERT = "ALERT"
+    EXPORT = "EXPORT"
+    RECONCILIATION = "RECONCILIATION"
+    RETENTION_STATS = "RETENTION_STATS"
+
+
+class SchemaCompatibilityOutcome(str, Enum):
+    """Matrix outcome classifications for schema versions and payload states."""
+
+    DIRECT_COMPATIBLE = "DIRECT_COMPATIBLE"
+    MIGRATED_COMPATIBLE = "MIGRATED_COMPATIBLE"
+    UNVERIFIABLE_SOURCE = "UNVERIFIABLE_SOURCE"
+    UNSUPPORTED_FUTURE = "UNSUPPORTED_FUTURE"
+    MALFORMED = "MALFORMED"
+    CORRUPT_PAYLOAD = "CORRUPT_PAYLOAD"
+
+
+@dataclass(frozen=True)
+class CompatibilityMatrixEntry:
+    """Documented, test-backed compatibility matrix entry for a record type and version."""
+
+    record_type: DiagnosticsRecordType
+    version_category: str
+    expected_outcome: SchemaCompatibilityOutcome
+    target_version: Optional[str]
+    adapter_function: Optional[str]
+    exception_class: Optional[str]
+    description: str
+    non_destructive_guarantee: str
+    test_scenario_ref: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "record_type": self.record_type.value,
+            "version_category": self.version_category,
+            "expected_outcome": self.expected_outcome.value,
+            "target_version": self.target_version,
+            "adapter_function": self.adapter_function,
+            "exception_class": self.exception_class,
+            "description": self.description,
+            "non_destructive_guarantee": self.non_destructive_guarantee,
+            "test_scenario_ref": self.test_scenario_ref,
+        }
+
+
+@dataclass(frozen=True)
+class MigrationAuditRecord:
+    """Immutable audit record representing a single migration or hydration outcome."""
+
+    record_type: str
+    record_id: Optional[str]
+    source_version: Optional[str]
+    target_version: str
+    outcome: str
+    timestamp: float
+    timestamp_iso: str
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "record_type": self.record_type,
+            "record_id": self.record_id,
+            "source_version": self.source_version,
+            "target_version": self.target_version,
+            "outcome": self.outcome,
+            "timestamp": self.timestamp,
+            "timestamp_iso": self.timestamp_iso,
+            "details": self.details,
+        }
+
+
+@dataclass(frozen=True)
+class MigrationAuditSummary:
+    """Aggregate summary of migration audit outcomes across diagnostics persistence."""
+
+    total_inspected: int
+    successful_migrations: int
+    direct_compatible_loads: int
+    unsupported_future_skipped: int
+    malformed_records_skipped: int
+    migration_failures: int
+    last_migration_iso: Optional[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "total_inspected": self.total_inspected,
+            "successful_migrations": self.successful_migrations,
+            "direct_compatible_loads": self.direct_compatible_loads,
+            "unsupported_future_skipped": self.unsupported_future_skipped,
+            "malformed_records_skipped": self.malformed_records_skipped,
+            "migration_failures": self.migration_failures,
+            "last_migration_iso": self.last_migration_iso,
+        }
 
 
 class SchemaVersionError(ValidationError):
@@ -442,4 +543,433 @@ def migrate_retention_stats_payload(
         result["schema_version"] = CURRENT_DIAGNOSTICS_SCHEMA_VERSION
 
     return result
+
+
+# ==============================================================================
+# Diagnostics Schema Compatibility Matrix Registry
+# ==============================================================================
+
+DIAGNOSTICS_COMPATIBILITY_MATRIX: Dict[Tuple[DiagnosticsRecordType, str], CompatibilityMatrixEntry] = {
+    # --------------------------------------------------------------------------
+    # 1. DIAGNOSTIC RECORDS
+    # --------------------------------------------------------------------------
+    (DiagnosticsRecordType.DIAGNOSTIC, "legacy_unversioned"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="legacy_unversioned",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class=None,
+        description="Legacy unversioned diagnostic payload upgraded to 1.0.0 with optional defaults and sanitization.",
+        non_destructive_guarantee="Original input payload deepcopied; source dictionary not mutated in place.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_LEGACY",
+    ),
+    (DiagnosticsRecordType.DIAGNOSTIC, "0.9.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="0.9.0",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class=None,
+        description="Schema 0.9.0 diagnostic payload migrated: aliases diagnostic_category, summary, error mapped to 1.0.0.",
+        non_destructive_guarantee="Original input payload preserved; produces distinct normalized representation.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_0_9_0",
+    ),
+    (DiagnosticsRecordType.DIAGNOSTIC, "1.0.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="1.0.0",
+        expected_outcome=SchemaCompatibilityOutcome.DIRECT_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class=None,
+        description="Current schema 1.0.0 diagnostic payload loaded directly without schema transformation.",
+        non_destructive_guarantee="Direct compatible loading without data alteration.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_1_0_0",
+    ),
+    (DiagnosticsRecordType.DIAGNOSTIC, "unsupported_future"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="unsupported_future",
+        expected_outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE,
+        target_version=None,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class="IncompatibleSchemaVersionError",
+        description="Unsupported future version rejected; skipped during hydration to prevent silent downgrade.",
+        non_destructive_guarantee="Original record preserved in StateStore; never overwritten with downgraded payload.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_FUTURE",
+    ),
+    (DiagnosticsRecordType.DIAGNOSTIC, "malformed_version"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="malformed_version",
+        expected_outcome=SchemaCompatibilityOutcome.MALFORMED,
+        target_version=None,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class="MalformedSchemaVersionError",
+        description="Non-string, blank, or invalid semver schema version rejected; skipped during hydration.",
+        non_destructive_guarantee="Stored record retained in persistence without corruption or partial write.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_MALFORMED",
+    ),
+    (DiagnosticsRecordType.DIAGNOSTIC, "corrupt_payload"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.DIAGNOSTIC,
+        version_category="corrupt_payload",
+        expected_outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD,
+        target_version=None,
+        adapter_function="migrate_diagnostic_payload",
+        exception_class="ValidationError",
+        description="Non-mapping payload or missing required identifiers rejected by model validation.",
+        non_destructive_guarantee="Quarantined during hydration; valid unrelated records remain unaffected.",
+        test_scenario_ref="SCENARIO_1_DIAGNOSTIC_CORRUPT",
+    ),
+
+    # --------------------------------------------------------------------------
+    # 2. ALERT RECORDS
+    # --------------------------------------------------------------------------
+    (DiagnosticsRecordType.ALERT, "legacy_unversioned"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="legacy_unversioned",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_alert_payload",
+        exception_class=None,
+        description="Legacy unversioned alert payload upgraded to 1.0.0 with lifecycle defaults.",
+        non_destructive_guarantee="Original input payload preserved; deepcopy ensures zero in-place mutation.",
+        test_scenario_ref="SCENARIO_2_ALERT_LEGACY",
+    ),
+    (DiagnosticsRecordType.ALERT, "0.9.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="0.9.0",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_alert_payload",
+        exception_class=None,
+        description="Schema 0.9.0 alert payload migrated: alert_reason mapped to reason, state/active mapped to status.",
+        non_destructive_guarantee="Original input dictionary untouched; distinct normalized dictionary returned.",
+        test_scenario_ref="SCENARIO_2_ALERT_0_9_0",
+    ),
+    (DiagnosticsRecordType.ALERT, "1.0.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="1.0.0",
+        expected_outcome=SchemaCompatibilityOutcome.DIRECT_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_alert_payload",
+        exception_class=None,
+        description="Current schema 1.0.0 alert payload loaded directly.",
+        non_destructive_guarantee="Direct loading without schema alteration.",
+        test_scenario_ref="SCENARIO_2_ALERT_1_0_0",
+    ),
+    (DiagnosticsRecordType.ALERT, "unsupported_future"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="unsupported_future",
+        expected_outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE,
+        target_version=None,
+        adapter_function="migrate_alert_payload",
+        exception_class="IncompatibleSchemaVersionError",
+        description="Unsupported future alert schema version rejected; skipped during hydration.",
+        non_destructive_guarantee="Stored alert payload preserved in StateStore; never partially overwritten.",
+        test_scenario_ref="SCENARIO_2_ALERT_FUTURE",
+    ),
+    (DiagnosticsRecordType.ALERT, "malformed_version"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="malformed_version",
+        expected_outcome=SchemaCompatibilityOutcome.MALFORMED,
+        target_version=None,
+        adapter_function="migrate_alert_payload",
+        exception_class="MalformedSchemaVersionError",
+        description="Malformed or invalid semver alert schema version rejected; skipped during hydration.",
+        non_destructive_guarantee="Stored record retained in persistence without corruption.",
+        test_scenario_ref="SCENARIO_2_ALERT_MALFORMED",
+    ),
+    (DiagnosticsRecordType.ALERT, "corrupt_payload"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.ALERT,
+        version_category="corrupt_payload",
+        expected_outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD,
+        target_version=None,
+        adapter_function="migrate_alert_payload",
+        exception_class="ValidationError",
+        description="Non-mapping payload or missing mandatory identifiers rejected by alert validation.",
+        non_destructive_guarantee="Quarantined during hydration; other stored alerts remain accessible.",
+        test_scenario_ref="SCENARIO_2_ALERT_CORRUPT",
+    ),
+
+    # --------------------------------------------------------------------------
+    # 3. EXPORT RECORDS
+    # --------------------------------------------------------------------------
+    (DiagnosticsRecordType.EXPORT, "legacy_unversioned"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="legacy_unversioned",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_export_payload",
+        exception_class=None,
+        description="Legacy unversioned export snapshot migrated to 1.0.0; nested records recursively migrated.",
+        non_destructive_guarantee="Original snapshot mapping not mutated; separate migrated structure generated.",
+        test_scenario_ref="SCENARIO_3_EXPORT_LEGACY",
+    ),
+    (DiagnosticsRecordType.EXPORT, "0.9.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="0.9.0",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_export_payload",
+        exception_class=None,
+        description="Schema 0.9.0 export snapshot migrated: request.max_records mapped to limit; nested items upgraded.",
+        non_destructive_guarantee="Original snapshot dictionary preserved; nested records deepcopied.",
+        test_scenario_ref="SCENARIO_3_EXPORT_0_9_0",
+    ),
+    (DiagnosticsRecordType.EXPORT, "1.0.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="1.0.0",
+        expected_outcome=SchemaCompatibilityOutcome.DIRECT_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_export_payload",
+        exception_class=None,
+        description="Current schema 1.0.0 export snapshot loaded directly with canonical fingerprint match.",
+        non_destructive_guarantee="Direct loading without alteration.",
+        test_scenario_ref="SCENARIO_3_EXPORT_1_0_0",
+    ),
+    (DiagnosticsRecordType.EXPORT, "unsupported_future"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="unsupported_future",
+        expected_outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE,
+        target_version=None,
+        adapter_function="migrate_export_payload",
+        exception_class="IncompatibleSchemaVersionError",
+        description="Future export snapshot rejected; reconciliation reports UNVERIFIABLE status.",
+        non_destructive_guarantee="Stored export preserved in StateStore; reconciliation returns UNVERIFIABLE safely.",
+        test_scenario_ref="SCENARIO_3_EXPORT_FUTURE",
+    ),
+    (DiagnosticsRecordType.EXPORT, "malformed_version"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="malformed_version",
+        expected_outcome=SchemaCompatibilityOutcome.MALFORMED,
+        target_version=None,
+        adapter_function="migrate_export_payload",
+        exception_class="MalformedSchemaVersionError",
+        description="Malformed export schema version rejected; skipped during hydration; reconciliation reports UNVERIFIABLE.",
+        non_destructive_guarantee="Stored export snapshot preserved without corruption.",
+        test_scenario_ref="SCENARIO_3_EXPORT_MALFORMED",
+    ),
+    (DiagnosticsRecordType.EXPORT, "corrupt_payload"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.EXPORT,
+        version_category="corrupt_payload",
+        expected_outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD,
+        target_version=None,
+        adapter_function="migrate_export_payload",
+        exception_class="ValidationError",
+        description="Non-mapping export payload rejected by validation.",
+        non_destructive_guarantee="Quarantined safely; existing valid exports remain accessible.",
+        test_scenario_ref="SCENARIO_3_EXPORT_CORRUPT",
+    ),
+
+    # --------------------------------------------------------------------------
+    # 4. RECONCILIATION REPORTS
+    # --------------------------------------------------------------------------
+    (DiagnosticsRecordType.RECONCILIATION, "legacy_unversioned"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="legacy_unversioned",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class=None,
+        description="Legacy reconciliation report migrated to 1.0.0; discrepancies safely loaded.",
+        non_destructive_guarantee="Original payload preserved; deepcopy ensures zero in-place modification.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_LEGACY",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "0.9.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="0.9.0",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class=None,
+        description="Schema 0.9.0 reconciliation report migrated: verdict mapped to status, fingerprint_match mapped.",
+        non_destructive_guarantee="Original input payload preserved intact.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_0_9_0",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "1.0.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="1.0.0",
+        expected_outcome=SchemaCompatibilityOutcome.DIRECT_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class=None,
+        description="Current schema 1.0.0 reconciliation report loaded directly.",
+        non_destructive_guarantee="Direct loading without alteration.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_1_0_0",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "unsupported_future"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="unsupported_future",
+        expected_outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE,
+        target_version=None,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class="IncompatibleSchemaVersionError",
+        description="Unsupported future reconciliation report rejected; skipped during hydration.",
+        non_destructive_guarantee="Stored reconciliation preserved in StateStore.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_FUTURE",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "malformed_version"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="malformed_version",
+        expected_outcome=SchemaCompatibilityOutcome.MALFORMED,
+        target_version=None,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class="MalformedSchemaVersionError",
+        description="Malformed reconciliation schema version rejected; skipped during hydration.",
+        non_destructive_guarantee="Stored report retained without corruption.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_MALFORMED",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "corrupt_payload"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="corrupt_payload",
+        expected_outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD,
+        target_version=None,
+        adapter_function="migrate_reconciliation_payload",
+        exception_class="ValidationError",
+        description="Non-mapping reconciliation payload rejected by validation.",
+        non_destructive_guarantee="Quarantined safely; other reconciliation reports unaffected.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_CORRUPT",
+    ),
+    (DiagnosticsRecordType.RECONCILIATION, "unverifiable_source"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RECONCILIATION,
+        version_category="unverifiable_source",
+        expected_outcome=SchemaCompatibilityOutcome.UNVERIFIABLE_SOURCE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function=None,
+        exception_class=None,
+        description="Reconciliation when export snapshot is evicted, missing, or incompatible returns UNVERIFIABLE.",
+        non_destructive_guarantee="Safe non-crashing outcome exposing explicit verification limitation.",
+        test_scenario_ref="SCENARIO_4_RECONCILIATION_UNVERIFIABLE",
+    ),
+
+    # --------------------------------------------------------------------------
+    # 5. RETENTION STATISTICS
+    # --------------------------------------------------------------------------
+    (DiagnosticsRecordType.RETENTION_STATS, "legacy_unversioned"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="legacy_unversioned",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class=None,
+        description="Legacy retention statistics dictionary migrated to 1.0.0.",
+        non_destructive_guarantee="Original dictionary not mutated in place.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_LEGACY",
+    ),
+    (DiagnosticsRecordType.RETENTION_STATS, "0.9.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="0.9.0",
+        expected_outcome=SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class=None,
+        description="Schema 0.9.0 retention stats migrated: evicted_count mapped to evicted_diagnostics_count.",
+        non_destructive_guarantee="Original dictionary preserved intact.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_0_9_0",
+    ),
+    (DiagnosticsRecordType.RETENTION_STATS, "1.0.0"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="1.0.0",
+        expected_outcome=SchemaCompatibilityOutcome.DIRECT_COMPATIBLE,
+        target_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class=None,
+        description="Current schema 1.0.0 retention stats loaded directly.",
+        non_destructive_guarantee="Direct loading without alteration.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_1_0_0",
+    ),
+    (DiagnosticsRecordType.RETENTION_STATS, "unsupported_future"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="unsupported_future",
+        expected_outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE,
+        target_version=None,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class="IncompatibleSchemaVersionError",
+        description="Unsupported future retention stats rejected; fallback to clean initialized counters.",
+        non_destructive_guarantee="Stored stats key preserved in StateStore; not corrupted.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_FUTURE",
+    ),
+    (DiagnosticsRecordType.RETENTION_STATS, "malformed_version"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="malformed_version",
+        expected_outcome=SchemaCompatibilityOutcome.MALFORMED,
+        target_version=None,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class="MalformedSchemaVersionError",
+        description="Malformed retention stats schema version rejected; fallback to clean counters.",
+        non_destructive_guarantee="Stored payload retained in StateStore.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_MALFORMED",
+    ),
+    (DiagnosticsRecordType.RETENTION_STATS, "corrupt_payload"): CompatibilityMatrixEntry(
+        record_type=DiagnosticsRecordType.RETENTION_STATS,
+        version_category="corrupt_payload",
+        expected_outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD,
+        target_version=None,
+        adapter_function="migrate_retention_stats_payload",
+        exception_class="ValidationError",
+        description="Non-mapping retention stats rejected by validation.",
+        non_destructive_guarantee="Fallback safely initialized without affecting StateStore.",
+        test_scenario_ref="SCENARIO_5_RETENTION_STATS_CORRUPT",
+    ),
+}
+
+
+def query_compatibility_matrix(
+    record_type: Union[DiagnosticsRecordType, str],
+    version_category: str,
+) -> Optional[CompatibilityMatrixEntry]:
+    """Retrieve compatibility matrix entry for a record type and version category.
+
+    Args:
+        record_type: DiagnosticsRecordType or string (e.g. 'DIAGNOSTIC', 'ALERT').
+        version_category: Category string (e.g. '1.0.0', '0.9.0', 'legacy_unversioned',
+            'unsupported_future', 'malformed_version', 'corrupt_payload').
+
+    Returns:
+        CompatibilityMatrixEntry if found, else None.
+    """
+    rt_key = record_type.value if isinstance(record_type, DiagnosticsRecordType) else str(record_type).upper()
+    try:
+        r_type = DiagnosticsRecordType(rt_key)
+    except ValueError:
+        return None
+    return DIAGNOSTICS_COMPATIBILITY_MATRIX.get((r_type, str(version_category).lower()))
+
+
+def classify_payload_compatibility(
+    record_type: Union[DiagnosticsRecordType, str],
+    payload: Any,
+) -> Tuple[SchemaCompatibilityOutcome, Optional[CompatibilityMatrixEntry]]:
+    """Classify a given raw payload according to the compatibility matrix.
+
+    Args:
+        record_type: DiagnosticsRecordType or string.
+        payload: Raw record payload to evaluate.
+
+    Returns:
+        Tuple of (SchemaCompatibilityOutcome, Optional[CompatibilityMatrixEntry]).
+    """
+    if not isinstance(payload, Mapping):
+        entry = query_compatibility_matrix(record_type, "corrupt_payload")
+        return SchemaCompatibilityOutcome.CORRUPT_PAYLOAD, entry
+
+    raw_v = payload.get("schema_version")
+    status, v_str = detect_and_validate_schema_version(raw_v)
+
+    if status == SchemaVersionCompatibilityStatus.MALFORMED:
+        entry = query_compatibility_matrix(record_type, "malformed_version")
+        return SchemaCompatibilityOutcome.MALFORMED, entry
+    if status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+        entry = query_compatibility_matrix(record_type, "unsupported_future")
+        return SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE, entry
+    if status == SchemaVersionCompatibilityStatus.SUPPORTED_OLDER:
+        cat = "0.9.0" if v_str == "0.9.0" else "legacy_unversioned"
+        entry = query_compatibility_matrix(record_type, cat)
+        return SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE, entry
+    if status == SchemaVersionCompatibilityStatus.CURRENT:
+        entry = query_compatibility_matrix(record_type, "1.0.0")
+        return SchemaCompatibilityOutcome.DIRECT_COMPATIBLE, entry
+
+    entry = query_compatibility_matrix(record_type, "corrupt_payload")
+    return SchemaCompatibilityOutcome.CORRUPT_PAYLOAD, entry
+
 

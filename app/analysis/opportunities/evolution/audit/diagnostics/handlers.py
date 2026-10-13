@@ -343,6 +343,17 @@ def register_audit_diagnostics_handlers(
             "reconciliation": report.to_dict(),
         }
 
+    def handle_get_historical_review_migration_audit_summary(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'get_historical_review_migration_audit_summary'."""
+        _extract_params(req)
+        summary = diagnostics_service.get_migration_audit_summary()
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "migration_audit_summary": summary,
+        }
+
     handlers = {
         "record_historical_review_diagnostic": handle_record_historical_review_diagnostic,
         "get_historical_review_diagnostic": handle_get_historical_review_diagnostic,
@@ -357,6 +368,7 @@ def register_audit_diagnostics_handlers(
         "get_historical_review_diagnostics_export": handle_get_historical_review_diagnostics_export,
         "list_historical_review_diagnostics_exports": handle_list_historical_review_diagnostics_exports,
         "reconcile_historical_review_diagnostics_export": handle_reconcile_historical_review_diagnostics_export,
+        "get_historical_review_migration_audit_summary": handle_get_historical_review_migration_audit_summary,
     }
 
     for cmd, handler_func in handlers.items():

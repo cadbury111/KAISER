@@ -1,6 +1,6 @@
 """KAISER — Historical Review Audit Observability, Alerting & Operational Diagnostics Package.
 
-Phase 2, Steps 36–43.
+Phase 2, Steps 36–44.
 """
 
 from app.analysis.opportunities.evolution.audit.diagnostics.handlers import (
@@ -30,16 +30,25 @@ from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
     CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
     SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS,
     LEGACY_UNVERSIONED,
+    DIAGNOSTICS_COMPATIBILITY_MATRIX,
+    DiagnosticsRecordType,
+    SchemaCompatibilityOutcome,
+    CompatibilityMatrixEntry,
+    MigrationAuditRecord,
+    MigrationAuditSummary,
     SchemaVersionCompatibilityStatus,
     SchemaVersionError,
     IncompatibleSchemaVersionError,
     MalformedSchemaVersionError,
+    classify_payload_compatibility,
     detect_and_validate_schema_version,
     migrate_alert_payload,
     migrate_diagnostic_payload,
     migrate_export_payload,
     migrate_reconciliation_payload,
     migrate_retention_stats_payload,
+    query_compatibility_matrix,
+    sanitize_payload_text,
 )
 from app.analysis.opportunities.evolution.audit.diagnostics.service import (
     HistoricalReviewAuditDiagnosticsService,
@@ -53,19 +62,26 @@ __all__ = [
     "AuditDiagnosticSeverity",
     "AuditDiagnosticSummary",
     "AuditEvidenceNature",
+    "CompatibilityMatrixEntry",
     "CURRENT_DIAGNOSTICS_SCHEMA_VERSION",
+    "DIAGNOSTICS_COMPATIBILITY_MATRIX",
     "DiagnosticsExportRequest",
     "DiagnosticsExportResult",
     "DiagnosticsReconciliationDiscrepancy",
     "DiagnosticsReconciliationReport",
     "DiagnosticsReconciliationStatus",
+    "DiagnosticsRecordType",
     "HistoricalReviewAuditDiagnosticsService",
     "IncompatibleSchemaVersionError",
     "LEGACY_UNVERSIONED",
     "MalformedSchemaVersionError",
+    "MigrationAuditRecord",
+    "MigrationAuditSummary",
     "SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS",
+    "SchemaCompatibilityOutcome",
     "SchemaVersionCompatibilityStatus",
     "SchemaVersionError",
+    "classify_payload_compatibility",
     "compute_deterministic_alert_id",
     "compute_deterministic_diagnostic_id",
     "compute_deterministic_export_id",
@@ -78,5 +94,7 @@ __all__ = [
     "migrate_export_payload",
     "migrate_reconciliation_payload",
     "migrate_retention_stats_payload",
+    "query_compatibility_matrix",
     "register_audit_diagnostics_handlers",
+    "sanitize_payload_text",
 ]
