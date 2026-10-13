@@ -177,6 +177,6 @@ Executed: `python run.py`
 ### 7. Git Commit & Documentation State
 
 - **Pre-commit Hash:** `c5eef5a` (Step 39 commit)
-- **Step 40 Implementation Commit:** To be recorded upon final commit.
+- **Step 40 Implementation Commit:** `6469608`
 - **Known Limitations:**
   - Reconciliation against evicted records cannot perform deep field-level diffs because raw record data was removed per retention limits; this is accurately reported as `INCOMPLETE` with `is_retention_limitation = True`.
