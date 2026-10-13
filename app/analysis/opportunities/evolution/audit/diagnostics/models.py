@@ -300,12 +300,18 @@ class AuditAlert:
     status: AuditAlertStatus = AuditAlertStatus.TRIGGERED
     cooldown_until: float = 0.0
     suppressed_occurrences: int = 0
+    report_id: Optional[str] = None
+    evaluation_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         validate_safe_id(self.alert_id, "alert_id")
         validate_safe_id(self.diagnostic_id, "diagnostic_id")
         validate_safe_id(self.correlation_id, "correlation_id")
         validate_safe_id(self.investigation_id, "investigation_id")
+        if self.report_id:
+            validate_safe_id(self.report_id, "report_id")
+        if self.evaluation_id:
+            validate_safe_id(self.evaluation_id, "evaluation_id")
         check_prohibited_terms(self.reason, "AuditAlert.reason")
 
     def to_dict(self) -> Dict[str, Any]:
@@ -324,6 +330,8 @@ class AuditAlert:
             "status": self.status.value,
             "cooldown_until": self.cooldown_until,
             "suppressed_occurrences": self.suppressed_occurrences,
+            "report_id": self.report_id,
+            "evaluation_id": self.evaluation_id,
         }
 
     @classmethod
@@ -362,6 +370,8 @@ class AuditAlert:
             status=status,
             cooldown_until=float(data.get("cooldown_until", 0.0)),
             suppressed_occurrences=int(data.get("suppressed_occurrences", 0)),
+            report_id=data.get("report_id"),
+            evaluation_id=data.get("evaluation_id"),
         )
 
 
@@ -381,6 +391,13 @@ class AuditDiagnosticSummary:
     has_active_failures: bool = False
     recovery_observed: bool = False
     recent_alert_reasons: Tuple[str, ...] = field(default_factory=tuple)
+    retention_status: str = "COMPLETE"
+    is_truncated: bool = False
+    evicted_diagnostics_count: int = 0
+    evicted_alerts_count: int = 0
+    oldest_timestamp: Optional[float] = None
+    oldest_timestamp_iso: Optional[str] = None
+    capacity: int = 100
 
     def __post_init__(self) -> None:
         validate_safe_id(self.investigation_id, "investigation_id")
@@ -400,6 +417,13 @@ class AuditDiagnosticSummary:
             "has_active_failures": self.has_active_failures,
             "recovery_observed": self.recovery_observed,
             "recent_alert_reasons": list(self.recent_alert_reasons),
+            "retention_status": self.retention_status,
+            "is_truncated": self.is_truncated,
+            "evicted_diagnostics_count": self.evicted_diagnostics_count,
+            "evicted_alerts_count": self.evicted_alerts_count,
+            "oldest_timestamp": self.oldest_timestamp,
+            "oldest_timestamp_iso": self.oldest_timestamp_iso,
+            "capacity": self.capacity,
         }
 
     @classmethod
@@ -418,4 +442,11 @@ class AuditDiagnosticSummary:
             has_active_failures=bool(data.get("has_active_failures", False)),
             recovery_observed=bool(data.get("recovery_observed", False)),
             recent_alert_reasons=tuple(str(r) for r in data.get("recent_alert_reasons", ())),
+            retention_status=str(data.get("retention_status", "COMPLETE")),
+            is_truncated=bool(data.get("is_truncated", False)),
+            evicted_diagnostics_count=int(data.get("evicted_diagnostics_count", 0)),
+            evicted_alerts_count=int(data.get("evicted_alerts_count", 0)),
+            oldest_timestamp=data.get("oldest_timestamp"),
+            oldest_timestamp_iso=data.get("oldest_timestamp_iso"),
+            capacity=int(data.get("capacity", 100)),
         )

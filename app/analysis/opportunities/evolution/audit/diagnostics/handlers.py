@@ -164,6 +164,7 @@ def register_audit_diagnostics_handlers(
         cat = params.get("category")
         sev = params.get("severity")
         active_only = bool(params.get("active_only", False))
+        include_suppressed = bool(params.get("include_suppressed", False))
         limit = int(params.get("limit", 50))
         offset = int(params.get("offset", 0))
 
@@ -174,6 +175,7 @@ def register_audit_diagnostics_handlers(
             active_only=active_only,
             limit=limit,
             offset=offset,
+            include_suppressed=include_suppressed,
         )
         return {
             "status": "success",
@@ -198,6 +200,69 @@ def register_audit_diagnostics_handlers(
             "summary": summary.to_dict(),
         }
 
+    def handle_acknowledge_historical_review_alert(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'acknowledge_historical_review_alert'."""
+        params = _extract_params(req)
+        alert_id = params.get("alert_id")
+        if not alert_id or not isinstance(alert_id, str):
+            raise ValidationError("Missing or invalid 'alert_id' parameter.")
+
+        alert = diagnostics_service.acknowledge_alert(
+            alert_id=alert_id,
+            acknowledged_by=params.get("acknowledged_by"),
+        )
+        if alert is None:
+            return {
+                "status": "not_found",
+                "read_only": True,
+                "execution_locked": True,
+                "message": f"Operational alert '{alert_id}' not found.",
+            }
+
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "alert": alert.to_dict(),
+        }
+
+    def handle_resolve_historical_review_alert(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'resolve_historical_review_alert'."""
+        params = _extract_params(req)
+        alert_id = params.get("alert_id")
+        if not alert_id or not isinstance(alert_id, str):
+            raise ValidationError("Missing or invalid 'alert_id' parameter.")
+
+        alert = diagnostics_service.resolve_alert(
+            alert_id=alert_id,
+            reason=params.get("reason"),
+        )
+        if alert is None:
+            return {
+                "status": "not_found",
+                "read_only": True,
+                "execution_locked": True,
+                "message": f"Operational alert '{alert_id}' not found.",
+            }
+
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "alert": alert.to_dict(),
+        }
+
+    def handle_get_historical_review_retention_status(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'get_historical_review_retention_status'."""
+        _extract_params(req)
+        status_info = diagnostics_service.get_retention_status()
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "retention": status_info,
+        }
+
     handlers = {
         "record_historical_review_diagnostic": handle_record_historical_review_diagnostic,
         "get_historical_review_diagnostic": handle_get_historical_review_diagnostic,
@@ -205,6 +270,9 @@ def register_audit_diagnostics_handlers(
         "get_historical_review_alert": handle_get_historical_review_alert,
         "list_historical_review_alerts": handle_list_historical_review_alerts,
         "get_historical_review_diagnostic_summary": handle_get_historical_review_diagnostic_summary,
+        "acknowledge_historical_review_alert": handle_acknowledge_historical_review_alert,
+        "resolve_historical_review_alert": handle_resolve_historical_review_alert,
+        "get_historical_review_retention_status": handle_get_historical_review_retention_status,
     }
 
     for cmd, handler_func in handlers.items():

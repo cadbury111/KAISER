@@ -2872,6 +2872,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     cat_param = query.get("category", [None])[0]
                     sev_param = query.get("severity", [None])[0]
                     active_only_param = query.get("active_only", ["false"])[0].lower() in ("true", "1")
+                    include_suppressed_param = query.get("include_suppressed", ["false"])[0].lower() in ("true", "1")
 
                     if diagnostics_service is not None:
                         alerts_list = diagnostics_service.list_alerts(
@@ -2881,6 +2882,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                             active_only=active_only_param,
                             limit=limit_clamped,
                             offset=offset_clamped,
+                            include_suppressed=include_suppressed_param,
                         )
                         alerts_data = [a.to_dict() if hasattr(a, "to_dict") else a for a in alerts_list]
                     else:
@@ -2931,6 +2933,41 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                             "read_only": True,
                             "execution_locked": True,
                             "summary": summary.to_dict(),
+                        })
+                        return
+                    else:
+                        self._send_json_response(
+                            {
+                                "status": "not_available",
+                                "message": "Historical review diagnostics service not initialized.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                # Case 2b: Sub-resource /retention
+                if parts and parts[0] == "retention":
+                    if len(parts) > 1:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if diagnostics_service is not None:
+                        ret_data = diagnostics_service.get_retention_status()
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "retention": ret_data,
                         })
                         return
                     else:

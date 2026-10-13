@@ -68,6 +68,7 @@ class HistoricalReviewAuditDiagnosticsService:
         alert_cooldown_seconds: float = DEFAULT_ALERT_COOLDOWN_SECONDS,
         time_provider: Optional[Callable[[], float]] = None,
         auto_subscribe: bool = True,
+        auto_hydrate: bool = False,
     ) -> None:
         """Initialize the diagnostics and alerting service.
 
@@ -79,6 +80,7 @@ class HistoricalReviewAuditDiagnosticsService:
             alert_cooldown_seconds: Minimum seconds before re-triggering an identical alert.
             time_provider: Injectable timestamp function (defaults to time.time).
             auto_subscribe: If True and event_bus provided, automatically subscribes to audit events.
+            auto_hydrate: If True and state_store provided, automatically hydrates in-memory history.
         """
         self._event_bus = event_bus
         self._state_store = state_store
@@ -95,6 +97,7 @@ class HistoricalReviewAuditDiagnosticsService:
         self._diagnostics_by_id: Dict[str, AuditDiagnosticRecord] = {}
 
         self._alerts: collections.deque[AuditAlert] = collections.deque(maxlen=self._max_alerts)
+        self._suppressed_alerts: collections.deque[AuditAlert] = collections.deque(maxlen=self._max_alerts)
         self._alerts_by_id: Dict[str, AuditAlert] = {}
 
         # Alert deduplication and cooldown tracking: (investigation_id, category, severity) -> (last_timestamp, last_alert_id)
@@ -103,6 +106,18 @@ class HistoricalReviewAuditDiagnosticsService:
 
         # Failure lifecycle tracking: investigation_id -> Set of active failure categories
         self._active_failures: Dict[str, Set[AuditDiagnosticCategory]] = {}
+
+        # Retention and eviction tracking
+        self._evicted_diagnostics_count: int = 0
+        self._evicted_alerts_count: int = 0
+        self._evicted_diagnostics_by_inv: collections.defaultdict[str, int] = collections.defaultdict(int)
+        self._evicted_alerts_by_inv: collections.defaultdict[str, int] = collections.defaultdict(int)
+        self._evicted_diagnostic_ids: collections.deque[str] = collections.deque(maxlen=self._max_diagnostics)
+        self._evicted_alert_ids: collections.deque[str] = collections.deque(maxlen=self._max_alerts)
+
+        # Hydrate from StateStore if explicitly requested
+        if self._state_store is not None and auto_hydrate:
+            self.hydrate_from_state_store()
 
         if self._event_bus is not None and auto_subscribe:
             self._subscribe_to_event_bus()
@@ -294,6 +309,141 @@ class HistoricalReviewAuditDiagnosticsService:
             )
 
     # ==============================================================================
+    # StateStore Persistence & Hydration Lifecycle
+    # ==============================================================================
+
+    def _persist_active_failures(self) -> None:
+        """Persist active failures map to StateStore."""
+        if self._state_store is None:
+            return
+        data = {inv: [c.value for c in cats] for inv, cats in self._active_failures.items()}
+        self._state_store.set("historical_review_diagnostics:active_failures", data)
+
+    def _persist_cooldown_state(self) -> None:
+        """Persist cooldown and alert suppression state to StateStore."""
+        if self._state_store is None:
+            return
+        data = {}
+        for (inv, cat, sev), (ts, alt_id) in self._last_alert_time.items():
+            key = f"{inv}:{cat}:{sev}"
+            data[key] = {
+                "last_timestamp": ts,
+                "last_alert_id": alt_id,
+                "suppressed": self._suppressed_counts.get((inv, cat, sev), 0),
+            }
+        self._state_store.set("historical_review_diagnostics:cooldown_state", data)
+
+    def _persist_retention_stats(self) -> None:
+        """Persist eviction and retention statistics to StateStore."""
+        if self._state_store is None:
+            return
+        data = {
+            "evicted_diagnostics_count": self._evicted_diagnostics_count,
+            "evicted_alerts_count": self._evicted_alerts_count,
+            "evicted_diagnostics_by_inv": dict(self._evicted_diagnostics_by_inv),
+            "evicted_alerts_by_inv": dict(self._evicted_alerts_by_inv),
+        }
+        self._state_store.set("historical_review_diagnostics:retention_stats", data)
+
+    def hydrate_from_state_store(self, force: bool = False) -> None:
+        """Hydrate in-memory diagnostic, alert, failure, cooldown, and retention state from StateStore."""
+        if self._state_store is None:
+            return
+
+        with self._lock:
+            # 1. Hydrate diagnostics history
+            stored_diags = self._state_store.get("historical_review_diagnostics:history", [])
+            if isinstance(stored_diags, list):
+                if not self._diagnostics or force:
+                    self._diagnostics.clear()
+                    self._diagnostics_by_id.clear()
+                    for item in reversed(stored_diags[: self._max_diagnostics]):
+                        if isinstance(item, dict):
+                            try:
+                                rec = AuditDiagnosticRecord.from_dict(item)
+                                self._diagnostics.append(rec)
+                                self._diagnostics_by_id[rec.diagnostic_id] = rec
+                            except Exception:
+                                pass
+
+            # 2. Hydrate alerts history
+            stored_alerts = self._state_store.get("historical_review_alerts:history", [])
+            if isinstance(stored_alerts, list):
+                if not self._alerts or force:
+                    self._alerts.clear()
+                    self._suppressed_alerts.clear()
+                    self._alerts_by_id.clear()
+                    for item in reversed(stored_alerts[: self._max_alerts]):
+                        if isinstance(item, dict):
+                            try:
+                                alt = AuditAlert.from_dict(item)
+                                if alt.status == AuditAlertStatus.SUPPRESSED_COOLDOWN:
+                                    self._suppressed_alerts.append(alt)
+                                else:
+                                    self._alerts.append(alt)
+                                self._alerts_by_id[alt.alert_id] = alt
+                            except Exception:
+                                pass
+
+            # Hydrate suppressed alerts if stored separately
+            stored_suppressed = self._state_store.get("historical_review_alerts:suppressed_history", [])
+            if isinstance(stored_suppressed, list):
+                for item in stored_suppressed:
+                    if isinstance(item, dict):
+                        try:
+                            s_alt = AuditAlert.from_dict(item)
+                            if s_alt not in self._suppressed_alerts:
+                                self._suppressed_alerts.append(s_alt)
+                            self._alerts_by_id[s_alt.alert_id] = s_alt
+                        except Exception:
+                            pass
+
+            # 3. Hydrate active failures
+            stored_fails = self._state_store.get("historical_review_diagnostics:active_failures", None)
+            if isinstance(stored_fails, dict):
+                self._active_failures.clear()
+                for inv_id, cat_list in stored_fails.items():
+                    if isinstance(cat_list, list):
+                        cats = set()
+                        for c_str in cat_list:
+                            try:
+                                cats.add(AuditDiagnosticCategory(str(c_str)))
+                            except ValueError:
+                                pass
+                        if cats:
+                            self._active_failures[str(inv_id)] = cats
+
+            # 4. Hydrate cooldown and suppression state
+            stored_cd = self._state_store.get("historical_review_diagnostics:cooldown_state", None)
+            if isinstance(stored_cd, dict):
+                self._last_alert_time.clear()
+                self._suppressed_counts.clear()
+                for key_str, cd_val in stored_cd.items():
+                    if isinstance(cd_val, dict) and ":" in key_str:
+                        parts = key_str.split(":", 2)
+                        if len(parts) == 3:
+                            inv_id, cat_str, sev_str = parts
+                            ts = float(cd_val.get("last_timestamp", 0.0))
+                            alt_id = str(cd_val.get("last_alert_id", ""))
+                            supp = int(cd_val.get("suppressed", 0))
+                            tup = (inv_id, cat_str, sev_str)
+                            self._last_alert_time[tup] = (ts, alt_id)
+                            if supp > 0:
+                                self._suppressed_counts[tup] = supp
+
+            # 5. Hydrate retention statistics
+            stored_stats = self._state_store.get("historical_review_diagnostics:retention_stats", None)
+            if isinstance(stored_stats, dict):
+                self._evicted_diagnostics_count = int(stored_stats.get("evicted_diagnostics_count", 0))
+                self._evicted_alerts_count = int(stored_stats.get("evicted_alerts_count", 0))
+                inv_d = stored_stats.get("evicted_diagnostics_by_inv", {})
+                if isinstance(inv_d, dict):
+                    self._evicted_diagnostics_by_inv = collections.defaultdict(int, {k: int(v) for k, v in inv_d.items()})
+                inv_a = stored_stats.get("evicted_alerts_by_inv", {})
+                if isinstance(inv_a, dict):
+                    self._evicted_alerts_by_inv = collections.defaultdict(int, {k: int(v) for k, v in inv_a.items()})
+
+    # ==============================================================================
     # Core Diagnostics & Alerting API
     # ==============================================================================
 
@@ -351,8 +501,10 @@ class HistoricalReviewAuditDiagnosticsService:
                 continue
             if isinstance(v, (int, float, bool)):
                 safe_details[str(k)] = v
-            elif isinstance(v, (dict, list)):
-                continue
+            elif isinstance(v, (list, tuple)):
+                safe_details[str(k)] = [sanitize_text(item) if not isinstance(item, (int, float, bool)) else item for item in v]
+            elif isinstance(v, dict):
+                safe_details[str(k)] = {str(dk): sanitize_text(dv) if not isinstance(dv, (int, float, bool)) else dv for dk, dv in v.items() if not CREDENTIAL_KEY_REGEX.search(str(dk).lower())}
             else:
                 safe_details[str(k)] = sanitize_text(v)
 
@@ -379,6 +531,10 @@ class HistoricalReviewAuditDiagnosticsService:
             if len(self._diagnostics) >= self._max_diagnostics:
                 oldest = self._diagnostics[0]
                 self._diagnostics_by_id.pop(oldest.diagnostic_id, None)
+                self._evicted_diagnostics_count += 1
+                self._evicted_diagnostics_by_inv[oldest.investigation_id] += 1
+                self._evicted_diagnostic_ids.append(oldest.diagnostic_id)
+                self._persist_retention_stats()
 
             self._diagnostics.append(record)
             self._diagnostics_by_id[record.diagnostic_id] = record
@@ -388,6 +544,7 @@ class HistoricalReviewAuditDiagnosticsService:
                 if clean_inv not in self._active_failures:
                     self._active_failures[clean_inv] = set()
                 self._active_failures[clean_inv].add(cat_obj)
+                self._persist_active_failures()
 
             # 3. Publish Event
             if self._event_bus is not None:
@@ -468,12 +625,20 @@ class HistoricalReviewAuditDiagnosticsService:
                 status=AuditAlertStatus.SUPPRESSED_COOLDOWN,
                 cooldown_until=cooldown_until,
                 suppressed_occurrences=suppressed,
+                report_id=record.report_id,
+                evaluation_id=record.evaluation_id,
             )
 
-            # Retain in lookup map and StateStore so get_alert(alert_id) can retrieve it
+            # Retain suppressed alert in dedicated suppressed ring buffer, lookup map, and StateStore
+            self._suppressed_alerts.append(alert)
             self._alerts_by_id[alert.alert_id] = alert
             if self._state_store is not None:
                 self._state_store.set(f"historical_review_alerts:{alert.alert_id}", alert.to_dict())
+                self._state_store.set(
+                    "historical_review_alerts:suppressed_history",
+                    [a.to_dict() for a in self._suppressed_alerts],
+                )
+                self._persist_cooldown_state()
 
             if self._event_bus is not None:
                 self._event_bus.publish(
@@ -512,6 +677,8 @@ class HistoricalReviewAuditDiagnosticsService:
             status=status,
             cooldown_until=cooldown_until,
             suppressed_occurrences=suppressed_so_far,
+            report_id=record.report_id,
+            evaluation_id=record.evaluation_id,
         )
 
         self._last_alert_time[dedup_key] = (now, alert.alert_id)
@@ -519,6 +686,10 @@ class HistoricalReviewAuditDiagnosticsService:
         if len(self._alerts) >= self._max_alerts:
             oldest = self._alerts[0]
             self._alerts_by_id.pop(oldest.alert_id, None)
+            self._evicted_alerts_count += 1
+            self._evicted_alerts_by_inv[oldest.investigation_id] += 1
+            self._evicted_alert_ids.append(oldest.alert_id)
+            self._persist_retention_stats()
 
         self._alerts.append(alert)
         self._alerts_by_id[alert.alert_id] = alert
@@ -545,6 +716,7 @@ class HistoricalReviewAuditDiagnosticsService:
                 "historical_review_alerts:history",
                 hist[: self._max_alerts],
             )
+            self._persist_cooldown_state()
 
         return alert
 
@@ -558,21 +730,56 @@ class HistoricalReviewAuditDiagnosticsService:
         correlation_id: Optional[str] = None,
         report_id: Optional[str] = None,
         evaluation_id: Optional[str] = None,
+        target_categories: Optional[Sequence[Union[AuditDiagnosticCategory, str]]] = None,
     ) -> Optional[AuditDiagnosticRecord]:
         """Check if an investigation previously experienced failures and record an explicit recovery."""
         clean_inv = validate_safe_id(investigation_id, "investigation_id")
 
         with self._lock:
             active = self._active_failures.get(clean_inv)
-            if not active:
+            # Find any active failure states or active alerts
+            unresolved_alert_cats = set()
+            for a in self._alerts:
+                if a.investigation_id == clean_inv and a.status in (
+                    AuditAlertStatus.TRIGGERED,
+                    AuditAlertStatus.ACTIVE,
+                    AuditAlertStatus.ACKNOWLEDGED,
+                ):
+                    unresolved_alert_cats.add(a.category)
+
+            available_failures = set(active or set()) | unresolved_alert_cats
+            if not available_failures:
                 return None
 
-            resolved_categories = [c.value for c in active]
-            self._active_failures.pop(clean_inv, None)
+            # Determine categories to resolve
+            if target_categories:
+                target_cat_objs = set()
+                for tc in target_categories:
+                    obj = tc if isinstance(tc, AuditDiagnosticCategory) else AuditDiagnosticCategory(str(tc))
+                    target_cat_objs.add(obj)
+                to_resolve = available_failures.intersection(target_cat_objs)
+                if not to_resolve:
+                    return None
+            else:
+                to_resolve = set(available_failures)
 
-            # Update previously active alerts for this investigation to RESOLVED
+            resolved_categories = sorted([c.value for c in to_resolve])
+
+            # Update active failures
+            if clean_inv in self._active_failures:
+                for c in to_resolve:
+                    self._active_failures[clean_inv].discard(c)
+                if not self._active_failures[clean_inv]:
+                    self._active_failures.pop(clean_inv, None)
+            self._persist_active_failures()
+
+            # Update matching alerts to RESOLVED
             for i, a in enumerate(list(self._alerts)):
-                if a.investigation_id == clean_inv and a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE):
+                if a.investigation_id == clean_inv and a.category in to_resolve and a.status in (
+                    AuditAlertStatus.TRIGGERED,
+                    AuditAlertStatus.ACTIVE,
+                    AuditAlertStatus.ACKNOWLEDGED,
+                ):
                     resolved_dict = a.to_dict()
                     resolved_dict["status"] = AuditAlertStatus.RESOLVED.value
                     resolved_alert = AuditAlert.from_dict(resolved_dict)
@@ -580,6 +787,29 @@ class HistoricalReviewAuditDiagnosticsService:
                     self._alerts_by_id[a.alert_id] = resolved_alert
                     if self._state_store is not None:
                         self._state_store.set(f"historical_review_alerts:{a.alert_id}", resolved_alert.to_dict())
+
+            # Update history list in StateStore
+            if self._state_store is not None:
+                hist = self._state_store.get("historical_review_alerts:history", [])
+                if isinstance(hist, list):
+                    updated_hist = []
+                    for item in hist:
+                        if (
+                            isinstance(item, dict)
+                            and item.get("investigation_id") == clean_inv
+                            and item.get("category") in resolved_categories
+                            and item.get("status") in (
+                                AuditAlertStatus.TRIGGERED.value,
+                                AuditAlertStatus.ACTIVE.value,
+                                AuditAlertStatus.ACKNOWLEDGED.value,
+                            )
+                        ):
+                            item_copy = dict(item)
+                            item_copy["status"] = AuditAlertStatus.RESOLVED.value
+                            updated_hist.append(item_copy)
+                        else:
+                            updated_hist.append(item)
+                    self._state_store.set("historical_review_alerts:history", updated_hist)
 
             msg = (
                 f"Operational recovery observed for investigation '{clean_inv}'. "
@@ -611,6 +841,165 @@ class HistoricalReviewAuditDiagnosticsService:
             return rec
 
     # ==============================================================================
+    # Alert Lifecycle Transitions (Acknowledge / Resolve)
+    # ==============================================================================
+
+    def acknowledge_alert(
+        self,
+        alert_id: str,
+        acknowledged_by: Optional[str] = None,
+    ) -> Optional[AuditAlert]:
+        """Transition an active or triggered alert to ACKNOWLEDGED status."""
+        clean_id = (alert_id or "").strip()
+        if not clean_id or not SAFE_ID_PATTERN.match(clean_id):
+            return None
+
+        with self._lock:
+            target_alert = self.get_alert(clean_id)
+            if target_alert is None:
+                return None
+
+            if target_alert.status == AuditAlertStatus.RESOLVED:
+                return target_alert
+
+            updated = AuditAlert(
+                alert_id=target_alert.alert_id,
+                diagnostic_id=target_alert.diagnostic_id,
+                correlation_id=target_alert.correlation_id,
+                investigation_id=target_alert.investigation_id,
+                timestamp=target_alert.timestamp,
+                timestamp_iso=target_alert.timestamp_iso,
+                category=target_alert.category,
+                severity=target_alert.severity,
+                reason=target_alert.reason,
+                source_references=target_alert.source_references,
+                status=AuditAlertStatus.ACKNOWLEDGED,
+                cooldown_until=target_alert.cooldown_until,
+                suppressed_occurrences=target_alert.suppressed_occurrences,
+                report_id=target_alert.report_id,
+                evaluation_id=target_alert.evaluation_id,
+            )
+
+            for i, a in enumerate(self._alerts):
+                if a.alert_id == clean_id:
+                    self._alerts[i] = updated
+                    break
+            self._alerts_by_id[clean_id] = updated
+
+            if self._state_store is not None:
+                self._state_store.set(f"historical_review_alerts:{clean_id}", updated.to_dict())
+                hist = self._state_store.get("historical_review_alerts:history", [])
+                if isinstance(hist, list):
+                    new_hist = [updated.to_dict() if (isinstance(item, dict) and item.get("alert_id") == clean_id) else item for item in hist]
+                    self._state_store.set("historical_review_alerts:history", new_hist)
+
+            return updated
+
+    def resolve_alert(
+        self,
+        alert_id: str,
+        reason: Optional[str] = None,
+    ) -> Optional[AuditAlert]:
+        """Explicitly resolve an operational alert and update failure lifecycle tracking."""
+        clean_id = (alert_id or "").strip()
+        if not clean_id or not SAFE_ID_PATTERN.match(clean_id):
+            return None
+
+        with self._lock:
+            target_alert = self.get_alert(clean_id)
+            if target_alert is None:
+                return None
+
+            if target_alert.status == AuditAlertStatus.RESOLVED:
+                return target_alert
+
+            resolved_reason = target_alert.reason
+            if reason:
+                resolved_reason = f"{target_alert.reason} | Resolved: {sanitize_text(reason)}"
+
+            updated = AuditAlert(
+                alert_id=target_alert.alert_id,
+                diagnostic_id=target_alert.diagnostic_id,
+                correlation_id=target_alert.correlation_id,
+                investigation_id=target_alert.investigation_id,
+                timestamp=target_alert.timestamp,
+                timestamp_iso=target_alert.timestamp_iso,
+                category=target_alert.category,
+                severity=target_alert.severity,
+                reason=resolved_reason,
+                source_references=target_alert.source_references,
+                status=AuditAlertStatus.RESOLVED,
+                cooldown_until=target_alert.cooldown_until,
+                suppressed_occurrences=target_alert.suppressed_occurrences,
+                report_id=target_alert.report_id,
+                evaluation_id=target_alert.evaluation_id,
+            )
+
+            for i, a in enumerate(self._alerts):
+                if a.alert_id == clean_id:
+                    self._alerts[i] = updated
+                    break
+            self._alerts_by_id[clean_id] = updated
+
+            inv_id = target_alert.investigation_id
+            cat = target_alert.category
+            other_active = any(
+                a.investigation_id == inv_id
+                and a.category == cat
+                and a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE, AuditAlertStatus.ACKNOWLEDGED)
+                for a in self._alerts
+            )
+            if not other_active and inv_id in self._active_failures:
+                self._active_failures[inv_id].discard(cat)
+                if not self._active_failures[inv_id]:
+                    self._active_failures.pop(inv_id, None)
+                self._persist_active_failures()
+
+            if self._state_store is not None:
+                self._state_store.set(f"historical_review_alerts:{clean_id}", updated.to_dict())
+                hist = self._state_store.get("historical_review_alerts:history", [])
+                if isinstance(hist, list):
+                    new_hist = [updated.to_dict() if (isinstance(item, dict) and item.get("alert_id") == clean_id) else item for item in hist]
+                    self._state_store.set("historical_review_alerts:history", new_hist)
+
+            return updated
+
+    # ==============================================================================
+    # Eviction & Retention Query Interfaces
+    # ==============================================================================
+
+    def is_diagnostic_evicted(self, diagnostic_id: str) -> bool:
+        """Check if a diagnostic record was evicted due to capacity retention boundaries."""
+        with self._lock:
+            return diagnostic_id in self._evicted_diagnostic_ids
+
+    def is_alert_evicted(self, alert_id: str) -> bool:
+        """Check if an operational alert was evicted due to capacity retention boundaries."""
+        with self._lock:
+            return alert_id in self._evicted_alert_ids
+
+    def get_retention_status(self) -> Dict[str, Any]:
+        """Return system-wide retention and capacity metadata."""
+        with self._lock:
+            oldest_diag_ts = self._diagnostics[0].timestamp if self._diagnostics else None
+            oldest_alert_ts = self._alerts[0].timestamp if self._alerts else None
+            return {
+                "max_diagnostics_capacity": self._max_diagnostics,
+                "max_alerts_capacity": self._max_alerts,
+                "current_diagnostics_count": len(self._diagnostics),
+                "current_alerts_count": len(self._alerts),
+                "total_diagnostics_evicted": self._evicted_diagnostics_count,
+                "total_alerts_evicted": self._evicted_alerts_count,
+                "oldest_diagnostic_timestamp": oldest_diag_ts,
+                "oldest_diagnostic_timestamp_iso": format_utc_iso(oldest_diag_ts) if oldest_diag_ts else None,
+                "oldest_alert_timestamp": oldest_alert_ts,
+                "oldest_alert_timestamp_iso": format_utc_iso(oldest_alert_ts) if oldest_alert_ts else None,
+                "active_failures_tracked": len(self._active_failures),
+                "cooldown_entries_active": len(self._last_alert_time),
+                "state_store_configured": self._state_store is not None,
+            }
+
+    # ==============================================================================
     # Read-Only Query Interfaces
     # ==============================================================================
 
@@ -628,9 +1017,6 @@ class HistoricalReviewAuditDiagnosticsService:
                 item = self._state_store.get(f"historical_review_diagnostics:{clean_id}", None)
                 if isinstance(item, dict):
                     rec = AuditDiagnosticRecord.from_dict(item)
-                    if rec not in self._diagnostics:
-                        self._diagnostics.append(rec)
-                    self._diagnostics_by_id[rec.diagnostic_id] = rec
                     return rec
 
             return None
@@ -653,17 +1039,7 @@ class HistoricalReviewAuditDiagnosticsService:
         with self._lock:
             # Hydrate from StateStore if in-memory queue is empty
             if not self._diagnostics and self._state_store is not None:
-                stored_hist = self._state_store.get("historical_review_diagnostics:history", [])
-                if isinstance(stored_hist, list):
-                    for item in stored_hist:
-                        if isinstance(item, dict):
-                            try:
-                                r = AuditDiagnosticRecord.from_dict(item)
-                                if r not in self._diagnostics:
-                                    self._diagnostics.append(r)
-                                self._diagnostics_by_id[r.diagnostic_id] = r
-                            except Exception:
-                                pass
+                self.hydrate_from_state_store()
 
             results = list(self._diagnostics)
 
@@ -696,9 +1072,6 @@ class HistoricalReviewAuditDiagnosticsService:
                 item = self._state_store.get(f"historical_review_alerts:{clean_id}", None)
                 if isinstance(item, dict):
                     alert = AuditAlert.from_dict(item)
-                    if alert not in self._alerts:
-                        self._alerts.append(alert)
-                    self._alerts_by_id[alert.alert_id] = alert
                     return alert
 
             return None
@@ -711,6 +1084,7 @@ class HistoricalReviewAuditDiagnosticsService:
         active_only: bool = False,
         limit: int = 50,
         offset: int = 0,
+        include_suppressed: bool = False,
     ) -> List[AuditAlert]:
         """Query operational alerts with optional filters and pagination."""
         clamped_limit = max(1, min(100, limit))
@@ -721,20 +1095,12 @@ class HistoricalReviewAuditDiagnosticsService:
 
         with self._lock:
             # Hydrate from StateStore if in-memory queue is empty
-            if not self._alerts and self._state_store is not None:
-                stored_hist = self._state_store.get("historical_review_alerts:history", [])
-                if isinstance(stored_hist, list):
-                    for item in stored_hist:
-                        if isinstance(item, dict):
-                            try:
-                                a = AuditAlert.from_dict(item)
-                                if a not in self._alerts:
-                                    self._alerts.append(a)
-                                self._alerts_by_id[a.alert_id] = a
-                            except Exception:
-                                pass
+            if not self._alerts and not self._suppressed_alerts and self._state_store is not None:
+                self.hydrate_from_state_store()
 
             results = list(self._alerts)
+            if include_suppressed:
+                results.extend(self._suppressed_alerts)
 
             if investigation_id:
                 clean_inv = investigation_id.strip()
@@ -747,7 +1113,10 @@ class HistoricalReviewAuditDiagnosticsService:
                 results = [a for a in results if a.severity.value == sev_val]
 
             if active_only:
-                results = [a for a in results if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE)]
+                results = [
+                    a for a in results
+                    if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE, AuditAlertStatus.ACKNOWLEDGED)
+                ]
 
             results.sort(key=lambda a: a.timestamp, reverse=True)
             return results[clamped_offset : clamped_offset + clamped_limit]
@@ -757,6 +1126,9 @@ class HistoricalReviewAuditDiagnosticsService:
         clean_inv = validate_safe_id(investigation_id, "investigation_id")
 
         with self._lock:
+            if not self._diagnostics and not self._alerts and self._state_store is not None:
+                self.hydrate_from_state_store()
+
             matching_diags = [d for d in self._diagnostics if d.investigation_id == clean_inv]
             if not matching_diags and self._state_store is not None:
                 stored_hist = self._state_store.get("historical_review_diagnostics:history", [])
@@ -790,15 +1162,34 @@ class HistoricalReviewAuditDiagnosticsService:
 
             active_alerts = [
                 a for a in matching_alerts
-                if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE)
+                if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE, AuditAlertStatus.ACKNOWLEDGED)
             ]
 
-            latest_ts = matching_diags[0].timestamp if matching_diags else None
-            latest_iso = matching_diags[0].timestamp_iso if matching_diags else None
+            if matching_diags:
+                matching_diags.sort(key=lambda d: d.timestamp, reverse=True)
+                latest_ts = matching_diags[0].timestamp
+                latest_iso = matching_diags[0].timestamp_iso
+                oldest_ts = matching_diags[-1].timestamp
+                oldest_iso = matching_diags[-1].timestamp_iso
+            else:
+                latest_ts = None
+                latest_iso = None
+                oldest_ts = None
+                oldest_iso = None
 
             recovery = any(d.category == AuditDiagnosticCategory.RECOVERY_OBSERVED for d in matching_diags)
             has_active = bool(self._active_failures.get(clean_inv)) or bool(active_alerts and not recovery)
             recent_reasons = tuple(a.reason for a in matching_alerts[:5])
+
+            evicted_diags = self._evicted_diagnostics_by_inv.get(clean_inv, 0)
+            evicted_alts = self._evicted_alerts_by_inv.get(clean_inv, 0)
+            is_truncated = (evicted_diags > 0 or evicted_alts > 0)
+            if not matching_diags and not matching_alerts:
+                retention_status = "NO_DATA"
+            elif is_truncated:
+                retention_status = "TRUNCATED_TO_CAPACITY"
+            else:
+                retention_status = "COMPLETE"
 
             return AuditDiagnosticSummary(
                 investigation_id=clean_inv,
@@ -813,6 +1204,13 @@ class HistoricalReviewAuditDiagnosticsService:
                 has_active_failures=has_active,
                 recovery_observed=recovery,
                 recent_alert_reasons=recent_reasons,
+                retention_status=retention_status,
+                is_truncated=is_truncated,
+                evicted_diagnostics_count=evicted_diags,
+                evicted_alerts_count=evicted_alts,
+                oldest_timestamp=oldest_ts,
+                oldest_timestamp_iso=oldest_iso,
+                capacity=self._max_diagnostics,
             )
 
     def clear_history(self) -> None:
@@ -825,3 +1223,15 @@ class HistoricalReviewAuditDiagnosticsService:
             self._last_alert_time.clear()
             self._suppressed_counts.clear()
             self._active_failures.clear()
+            self._evicted_diagnostics_count = 0
+            self._evicted_alerts_count = 0
+            self._evicted_diagnostics_by_inv.clear()
+            self._evicted_alerts_by_inv.clear()
+            self._evicted_diagnostic_ids.clear()
+            self._evicted_alert_ids.clear()
+            if self._state_store is not None:
+                self._state_store.delete("historical_review_diagnostics:history")
+                self._state_store.delete("historical_review_alerts:history")
+                self._state_store.delete("historical_review_diagnostics:active_failures")
+                self._state_store.delete("historical_review_diagnostics:cooldown_state")
+                self._state_store.delete("historical_review_diagnostics:retention_stats")
