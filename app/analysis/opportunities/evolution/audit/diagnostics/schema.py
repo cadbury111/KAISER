@@ -114,6 +114,22 @@ class MigrationAuditRecord:
             "details": self.details,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> MigrationAuditRecord:
+        """Construct MigrationAuditRecord from a mapping representation."""
+        if not isinstance(data, Mapping):
+            raise ValidationError(f"Expected mapping for MigrationAuditRecord, got {type(data).__name__}")
+        return cls(
+            record_type=str(data.get("record_type", "UNKNOWN")),
+            record_id=str(data.get("record_id")) if data.get("record_id") is not None else None,
+            source_version=str(data.get("source_version")) if data.get("source_version") is not None else None,
+            target_version=str(data.get("target_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
+            outcome=str(data.get("outcome", "UNKNOWN")),
+            timestamp=float(data.get("timestamp", 0.0)),
+            timestamp_iso=str(data.get("timestamp_iso", "")),
+            details=dict(data.get("details", {})),
+        )
+
 
 @dataclass(frozen=True)
 class MigrationAuditSummary:
@@ -137,6 +153,21 @@ class MigrationAuditSummary:
             "migration_failures": self.migration_failures,
             "last_migration_iso": self.last_migration_iso,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> MigrationAuditSummary:
+        """Construct MigrationAuditSummary from a mapping representation."""
+        if not isinstance(data, Mapping):
+            raise ValidationError(f"Expected mapping for MigrationAuditSummary, got {type(data).__name__}")
+        return cls(
+            total_inspected=int(data.get("total_inspected", data.get("cumulative_total_inspected", 0))),
+            successful_migrations=int(data.get("successful_migrations", data.get("cumulative_successful_migrations", 0))),
+            direct_compatible_loads=int(data.get("direct_compatible_loads", data.get("cumulative_direct_compatible_loads", 0))),
+            unsupported_future_skipped=int(data.get("unsupported_future_skipped", data.get("cumulative_unsupported_future_skipped", 0))),
+            malformed_records_skipped=int(data.get("malformed_records_skipped", data.get("cumulative_malformed_records_skipped", 0))),
+            migration_failures=int(data.get("migration_failures", data.get("cumulative_migration_failures", 0))),
+            last_migration_iso=str(data.get("last_migration_iso")) if data.get("last_migration_iso") else None,
+        )
 
 
 class SchemaVersionError(ValidationError):
@@ -241,6 +272,19 @@ def sanitize_payload_text(text: Any, max_length: int = 512) -> str:
     if len(s) > max_length:
         s = s[: max_length - 3] + "..."
     return s
+
+
+def sanitize_audit_details(val: Any, max_length: int = 512) -> Any:
+    """Recursively sanitize mapping, sequence, or primitive values for migration audit records."""
+    if isinstance(val, str):
+        return sanitize_payload_text(val, max_length=max_length)
+    if isinstance(val, Mapping):
+        return {str(k): sanitize_audit_details(v, max_length=max_length) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [sanitize_audit_details(x, max_length=max_length) for x in val]
+    if isinstance(val, (int, float, bool)) or val is None:
+        return val
+    return sanitize_payload_text(str(val), max_length=max_length)
 
 
 # ==============================================================================

@@ -24,7 +24,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from app.analysis.opportunities.evolution.audit.diagnostics.models import (
     AuditAlert,
@@ -71,6 +71,7 @@ from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
     migrate_retention_stats_payload,
     query_compatibility_matrix,
     classify_payload_compatibility,
+    sanitize_audit_details,
     sanitize_payload_text,
 )
 
@@ -168,7 +169,7 @@ class HistoricalReviewAuditDiagnosticsService:
         self._evicted_alert_ids: collections.deque[str] = collections.deque(maxlen=self._max_alerts)
         self._unsupported_records_skipped: int = 0
 
-        # Migration auditability tracking (Phase 2, Step 44)
+        # Migration auditability tracking (Phase 2, Steps 44–45)
         self._migration_audit_records: collections.deque[MigrationAuditRecord] = collections.deque(maxlen=200)
         self._successful_migrations_count: int = 0
         self._direct_compatible_count: int = 0
@@ -176,6 +177,16 @@ class HistoricalReviewAuditDiagnosticsService:
         self._malformed_count: int = 0
         self._migration_failures_count: int = 0
         self._last_migration_timestamp: Optional[float] = None
+        self._audited_record_keys: Set[str] = set()
+
+        # Per-hydration attempt counters (transient for current / last run)
+        self._current_hydration_inspected: int = 0
+        self._current_hydration_migrated: int = 0
+        self._current_hydration_direct: int = 0
+        self._current_hydration_unsupported: int = 0
+        self._current_hydration_malformed: int = 0
+        self._current_hydration_failures: int = 0
+        self._current_hydration_re_read: int = 0
 
         # Hydrate from StateStore if explicitly requested
         if self._state_store is not None and auto_hydrate:
@@ -183,6 +194,21 @@ class HistoricalReviewAuditDiagnosticsService:
 
         if self._event_bus is not None and auto_subscribe:
             self._subscribe_to_event_bus()
+
+    def _compute_item_audit_key(self, record_type: str, item: Any, raw_v: Any) -> str:
+        """Compute deterministic audit cache key for a persisted item to prevent duplicate audits."""
+        if isinstance(item, Mapping):
+            rec_id = (
+                item.get("diagnostic_id")
+                or item.get("alert_id")
+                or item.get("export_id")
+                or item.get("reconciliation_id")
+                or "singleton"
+            )
+            ts = item.get("timestamp") or item.get("created_at") or ""
+            content_sig = f"{rec_id}:{raw_v}:{ts}"
+            return f"{record_type}:{content_sig}"
+        return f"{record_type}:non_mapping:{type(item).__name__}:{repr(item)[:32]}"
 
     def _record_migration_audit(
         self,
@@ -192,22 +218,23 @@ class HistoricalReviewAuditDiagnosticsService:
         target_ver: str,
         outcome: str,
         details: Optional[Dict[str, Any]] = None,
+        is_re_read: bool = False,
     ) -> None:
         """Record migration audit event with secret sanitization and counter updates."""
+        if is_re_read:
+            self._current_hydration_re_read += 1
+            return
+
         ts = self._time_provider()
         self._last_migration_timestamp = ts
-        clean_details = {}
-        if details:
-            for k, v in details.items():
-                if isinstance(v, str):
-                    clean_details[k] = sanitize_payload_text(v)
-                else:
-                    clean_details[k] = v
+        clean_details = sanitize_audit_details(details) if details else {}
+        clean_source_ver = sanitize_payload_text(source_ver) if source_ver is not None else None
+        clean_record_id = sanitize_payload_text(record_id) if record_id is not None else None
 
         audit_rec = MigrationAuditRecord(
             record_type=record_type,
-            record_id=record_id,
-            source_version=source_ver,
+            record_id=clean_record_id,
+            source_version=clean_source_ver,
             target_version=target_ver,
             outcome=outcome,
             timestamp=ts,
@@ -216,16 +243,63 @@ class HistoricalReviewAuditDiagnosticsService:
         )
         self._migration_audit_records.append(audit_rec)
 
+        self._current_hydration_inspected += 1
         if outcome == SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE.value:
             self._successful_migrations_count += 1
+            self._current_hydration_migrated += 1
         elif outcome == SchemaCompatibilityOutcome.DIRECT_COMPATIBLE.value:
             self._direct_compatible_count += 1
+            self._current_hydration_direct += 1
         elif outcome == SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value:
             self._unsupported_future_count += 1
+            self._current_hydration_unsupported += 1
         elif outcome == SchemaCompatibilityOutcome.MALFORMED.value:
             self._malformed_count += 1
+            self._current_hydration_malformed += 1
         elif outcome in (SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value, "FAILURE"):
             self._migration_failures_count += 1
+            self._current_hydration_failures += 1
+
+    def _persist_migration_audit(self) -> None:
+        """Persist cumulative migration audit summary to StateStore."""
+        if self._state_store is None:
+            return
+        with self._lock:
+            total = (
+                self._successful_migrations_count
+                + self._direct_compatible_count
+                + self._unsupported_future_count
+                + self._malformed_count
+                + self._migration_failures_count
+            )
+            iso_ts = (
+                format_utc_iso(self._last_migration_timestamp)
+                if self._last_migration_timestamp
+                else None
+            )
+            audit_payload = {
+                "schema_version": CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                "cumulative_total_inspected": total,
+                "cumulative_successful_migrations": self._successful_migrations_count,
+                "cumulative_direct_compatible_loads": self._direct_compatible_count,
+                "cumulative_unsupported_future_skipped": self._unsupported_future_count,
+                "cumulative_malformed_records_skipped": self._malformed_count,
+                "cumulative_migration_failures": self._migration_failures_count,
+                "cumulative_unsupported_records_skipped": self._unsupported_records_skipped,
+                "last_migration_timestamp": self._last_migration_timestamp,
+                "last_migration_iso": iso_ts,
+                "audited_record_keys": list(self._audited_record_keys)[-1000:],
+                "recent_audit_records": [
+                    r.to_dict() for r in list(self._migration_audit_records)[-50:]
+                ],
+            }
+            try:
+                self._state_store.set(
+                    "historical_review_diagnostics:migration_audit",
+                    audit_payload,
+                )
+            except Exception as exc:
+                logger.warning("Could not persist migration audit state to StateStore: %s", exc)
 
     # ==============================================================================
     # EventBus Subscriptions
@@ -463,6 +537,97 @@ class HistoricalReviewAuditDiagnosticsService:
             return
 
         with self._lock:
+            # Reset per-hydration statistics for this attempt
+            self._current_hydration_inspected = 0
+            self._current_hydration_migrated = 0
+            self._current_hydration_direct = 0
+            self._current_hydration_unsupported = 0
+            self._current_hydration_malformed = 0
+            self._current_hydration_failures = 0
+            self._current_hydration_re_read = 0
+
+            # 0. Hydrate persisted migration audit state if available
+            stored_audit = self._state_store.get(
+                "historical_review_diagnostics:migration_audit", None
+            )
+            if isinstance(stored_audit, Mapping):
+                total_in_mem = (
+                    self._successful_migrations_count
+                    + self._direct_compatible_count
+                    + self._unsupported_future_count
+                    + self._malformed_count
+                    + self._migration_failures_count
+                )
+                if total_in_mem == 0:
+                    self._successful_migrations_count = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_successful_migrations",
+                                stored_audit.get("successful_migrations", 0),
+                            )
+                        ),
+                    )
+                    self._direct_compatible_count = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_direct_compatible_loads",
+                                stored_audit.get("direct_compatible_loads", 0),
+                            )
+                        ),
+                    )
+                    self._unsupported_future_count = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_unsupported_future_skipped",
+                                stored_audit.get("unsupported_future_skipped", 0),
+                            )
+                        ),
+                    )
+                    self._malformed_count = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_malformed_records_skipped",
+                                stored_audit.get("malformed_records_skipped", 0),
+                            )
+                        ),
+                    )
+                    self._migration_failures_count = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_migration_failures",
+                                stored_audit.get("migration_failures", 0),
+                            )
+                        ),
+                    )
+                    self._unsupported_records_skipped = max(
+                        0,
+                        int(
+                            stored_audit.get(
+                                "cumulative_unsupported_records_skipped",
+                                stored_audit.get("unsupported_records_skipped", 0),
+                            )
+                        ),
+                    )
+                    self._last_migration_timestamp = stored_audit.get("last_migration_timestamp")
+                    stored_keys = stored_audit.get("audited_record_keys", [])
+                    if isinstance(stored_keys, Sequence):
+                        self._audited_record_keys.update(str(k) for k in stored_keys)
+                    stored_recs = stored_audit.get("recent_audit_records", [])
+                    if isinstance(stored_recs, Sequence) and not self._migration_audit_records:
+                        for r_dict in stored_recs:
+                            if isinstance(r_dict, Mapping):
+                                try:
+                                    self._migration_audit_records.append(
+                                        MigrationAuditRecord.from_dict(r_dict)
+                                    )
+                                except Exception:
+                                    pass
+
             # 1. Hydrate diagnostics history
             stored_diags = self._state_store.get("historical_review_diagnostics:history", [])
             if isinstance(stored_diags, list):
@@ -473,10 +638,13 @@ class HistoricalReviewAuditDiagnosticsService:
                         if isinstance(item, dict):
                             raw_v = item.get("schema_version")
                             d_id = str(item.get("diagnostic_id", "unknown"))
+                            audit_key = self._compute_item_audit_key("DIAGNOSTIC", item, raw_v)
+                            is_already_audited = audit_key in self._audited_record_keys
                             try:
                                 rec = AuditDiagnosticRecord.from_dict(item)
-                                self._diagnostics.append(rec)
-                                self._diagnostics_by_id[rec.diagnostic_id] = rec
+                                if rec.diagnostic_id not in self._diagnostics_by_id:
+                                    self._diagnostics.append(rec)
+                                    self._diagnostics_by_id[rec.diagnostic_id] = rec
                                 outcome = (
                                     SchemaCompatibilityOutcome.DIRECT_COMPATIBLE.value
                                     if raw_v == CURRENT_DIAGNOSTICS_SCHEMA_VERSION
@@ -488,10 +656,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     source_ver=raw_v,
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=outcome,
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except IncompatibleSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed diagnostic record in StateStore: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="DIAGNOSTIC",
                                     record_id=d_id,
@@ -499,10 +670,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except MalformedSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed diagnostic record in StateStore: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="DIAGNOSTIC",
                                     record_id=d_id,
@@ -510,7 +684,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except Exception as exc:
                                 self._record_migration_audit(
                                     record_type="DIAGNOSTIC",
@@ -519,8 +695,12 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                         else:
+                            audit_key = self._compute_item_audit_key("DIAGNOSTIC", item, None)
+                            is_already_audited = audit_key in self._audited_record_keys
                             self._record_migration_audit(
                                 record_type="DIAGNOSTIC",
                                 record_id=None,
@@ -528,7 +708,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                 details={"error": f"Non-mapping item {type(item).__name__}"},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
 
             # 2. Hydrate alerts history
             stored_alerts = self._state_store.get("historical_review_alerts:history", [])
@@ -541,12 +723,16 @@ class HistoricalReviewAuditDiagnosticsService:
                         if isinstance(item, dict):
                             raw_v = item.get("schema_version")
                             a_id = str(item.get("alert_id", "unknown"))
+                            audit_key = self._compute_item_audit_key("ALERT", item, raw_v)
+                            is_already_audited = audit_key in self._audited_record_keys
                             try:
                                 alt = AuditAlert.from_dict(item)
                                 if alt.status == AuditAlertStatus.SUPPRESSED_COOLDOWN:
-                                    self._suppressed_alerts.append(alt)
+                                    if alt not in self._suppressed_alerts:
+                                        self._suppressed_alerts.append(alt)
                                 else:
-                                    self._alerts.append(alt)
+                                    if alt not in self._alerts:
+                                        self._alerts.append(alt)
                                 self._alerts_by_id[alt.alert_id] = alt
                                 outcome = (
                                     SchemaCompatibilityOutcome.DIRECT_COMPATIBLE.value
@@ -559,10 +745,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     source_ver=raw_v,
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=outcome,
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except IncompatibleSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed alert in StateStore: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="ALERT",
                                     record_id=a_id,
@@ -570,10 +759,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except MalformedSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed alert in StateStore: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="ALERT",
                                     record_id=a_id,
@@ -581,7 +773,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except Exception as exc:
                                 self._record_migration_audit(
                                     record_type="ALERT",
@@ -590,8 +784,12 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                         else:
+                            audit_key = self._compute_item_audit_key("ALERT", item, None)
+                            is_already_audited = audit_key in self._audited_record_keys
                             self._record_migration_audit(
                                 record_type="ALERT",
                                 record_id=None,
@@ -599,15 +797,19 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                 details={"error": f"Non-mapping item {type(item).__name__}"},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
 
             # Hydrate suppressed alerts if stored separately
             stored_suppressed = self._state_store.get("historical_review_alerts:suppressed_history", [])
-            if isinstance(stored_suppressed, list):
+            if isinstance(stored_suppressed, list) and (not self._suppressed_alerts or force):
                 for item in stored_suppressed:
                     if isinstance(item, dict):
                         raw_v = item.get("schema_version")
                         a_id = str(item.get("alert_id", "unknown"))
+                        audit_key = self._compute_item_audit_key("ALERT", item, raw_v)
+                        is_already_audited = audit_key in self._audited_record_keys
                         try:
                             s_alt = AuditAlert.from_dict(item)
                             if s_alt not in self._suppressed_alerts:
@@ -624,10 +826,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                 source_ver=raw_v,
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=outcome,
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
                         except IncompatibleSchemaVersionError as exc:
                             logger.warning("Skipping unsupported/malformed suppressed alert: %s", exc)
-                            self._unsupported_records_skipped += 1
+                            if not is_already_audited:
+                                self._unsupported_records_skipped += 1
                             self._record_migration_audit(
                                 record_type="ALERT",
                                 record_id=a_id,
@@ -635,10 +840,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                                 details={"error": str(exc)},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
                         except MalformedSchemaVersionError as exc:
                             logger.warning("Skipping unsupported/malformed suppressed alert: %s", exc)
-                            self._unsupported_records_skipped += 1
+                            if not is_already_audited:
+                                self._unsupported_records_skipped += 1
                             self._record_migration_audit(
                                 record_type="ALERT",
                                 record_id=a_id,
@@ -646,7 +854,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                                 details={"error": str(exc)},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
                         except Exception as exc:
                             self._record_migration_audit(
                                 record_type="ALERT",
@@ -655,7 +865,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                 details={"error": str(exc)},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
 
             # 3. Hydrate active failures
             stored_fails = self._state_store.get("historical_review_diagnostics:active_failures", None)
@@ -697,6 +909,8 @@ class HistoricalReviewAuditDiagnosticsService:
             stored_stats = self._state_store.get("historical_review_diagnostics:retention_stats", None)
             if isinstance(stored_stats, dict):
                 raw_v = stored_stats.get("schema_version")
+                audit_key = self._compute_item_audit_key("RETENTION_STATS", stored_stats, raw_v)
+                is_already_audited = audit_key in self._audited_record_keys
                 try:
                     migrated_stats = migrate_retention_stats_payload(stored_stats)
                     outcome = (
@@ -710,7 +924,9 @@ class HistoricalReviewAuditDiagnosticsService:
                         source_ver=raw_v,
                         target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                         outcome=outcome,
+                        is_re_read=is_already_audited,
                     )
+                    self._audited_record_keys.add(audit_key)
                 except IncompatibleSchemaVersionError as exc:
                     logger.warning("Skipping incompatible retention stats: %s", exc)
                     migrated_stats = stored_stats
@@ -721,7 +937,9 @@ class HistoricalReviewAuditDiagnosticsService:
                         target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                         outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                         details={"error": str(exc)},
+                        is_re_read=is_already_audited,
                     )
+                    self._audited_record_keys.add(audit_key)
                 except MalformedSchemaVersionError as exc:
                     logger.warning("Skipping incompatible retention stats: %s", exc)
                     migrated_stats = stored_stats
@@ -732,7 +950,9 @@ class HistoricalReviewAuditDiagnosticsService:
                         target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                         outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                         details={"error": str(exc)},
+                        is_re_read=is_already_audited,
                     )
+                    self._audited_record_keys.add(audit_key)
                 except Exception as exc:
                     migrated_stats = stored_stats
                     self._record_migration_audit(
@@ -742,7 +962,9 @@ class HistoricalReviewAuditDiagnosticsService:
                         target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                         outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                         details={"error": str(exc)},
+                        is_re_read=is_already_audited,
                     )
+                    self._audited_record_keys.add(audit_key)
 
                 try:
                     self._evicted_diagnostics_count = max(0, int(migrated_stats.get("evicted_diagnostics_count", 0)))
@@ -819,10 +1041,13 @@ class HistoricalReviewAuditDiagnosticsService:
                         if isinstance(item, dict):
                             raw_v = item.get("schema_version")
                             e_id = str(item.get("export_id", "unknown"))
+                            audit_key = self._compute_item_audit_key("EXPORT", item, raw_v)
+                            is_already_audited = audit_key in self._audited_record_keys
                             try:
                                 exp = DiagnosticsExportResult.from_dict(item)
-                                self._exports.append(exp)
-                                self._exports_by_id[exp.export_id] = exp
+                                if exp.export_id not in self._exports_by_id:
+                                    self._exports.append(exp)
+                                    self._exports_by_id[exp.export_id] = exp
                                 outcome = (
                                     SchemaCompatibilityOutcome.DIRECT_COMPATIBLE.value
                                     if raw_v == CURRENT_DIAGNOSTICS_SCHEMA_VERSION
@@ -834,10 +1059,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     source_ver=raw_v,
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=outcome,
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except IncompatibleSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed export: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="EXPORT",
                                     record_id=e_id,
@@ -845,10 +1073,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except MalformedSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed export: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="EXPORT",
                                     record_id=e_id,
@@ -856,7 +1087,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except Exception as exc:
                                 self._record_migration_audit(
                                     record_type="EXPORT",
@@ -865,8 +1098,12 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                         else:
+                            audit_key = self._compute_item_audit_key("EXPORT", item, None)
+                            is_already_audited = audit_key in self._audited_record_keys
                             self._record_migration_audit(
                                 record_type="EXPORT",
                                 record_id=None,
@@ -874,7 +1111,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                 details={"error": f"Non-mapping item {type(item).__name__}"},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
 
             # 7. Hydrate reconciliations history
             stored_recons = self._state_store.get("historical_review_reconciliations:history", [])
@@ -886,10 +1125,13 @@ class HistoricalReviewAuditDiagnosticsService:
                         if isinstance(item, dict):
                             raw_v = item.get("schema_version")
                             r_id = str(item.get("reconciliation_id", "unknown"))
+                            audit_key = self._compute_item_audit_key("RECONCILIATION", item, raw_v)
+                            is_already_audited = audit_key in self._audited_record_keys
                             try:
                                 rpt = DiagnosticsReconciliationReport.from_dict(item)
-                                self._reconciliations.append(rpt)
-                                self._reconciliations_by_id[rpt.reconciliation_id] = rpt
+                                if rpt.reconciliation_id not in self._reconciliations_by_id:
+                                    self._reconciliations.append(rpt)
+                                    self._reconciliations_by_id[rpt.reconciliation_id] = rpt
                                 outcome = (
                                     SchemaCompatibilityOutcome.DIRECT_COMPATIBLE.value
                                     if raw_v == CURRENT_DIAGNOSTICS_SCHEMA_VERSION
@@ -901,10 +1143,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     source_ver=raw_v,
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=outcome,
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except IncompatibleSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed reconciliation: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="RECONCILIATION",
                                     record_id=r_id,
@@ -912,10 +1157,13 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.UNSUPPORTED_FUTURE.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except MalformedSchemaVersionError as exc:
                                 logger.warning("Skipping unsupported/malformed reconciliation: %s", exc)
-                                self._unsupported_records_skipped += 1
+                                if not is_already_audited:
+                                    self._unsupported_records_skipped += 1
                                 self._record_migration_audit(
                                     record_type="RECONCILIATION",
                                     record_id=r_id,
@@ -923,7 +1171,9 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.MALFORMED.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                             except Exception as exc:
                                 self._record_migration_audit(
                                     record_type="RECONCILIATION",
@@ -932,8 +1182,12 @@ class HistoricalReviewAuditDiagnosticsService:
                                     target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                     outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                     details={"error": str(exc)},
+                                    is_re_read=is_already_audited,
                                 )
+                                self._audited_record_keys.add(audit_key)
                         else:
+                            audit_key = self._compute_item_audit_key("RECONCILIATION", item, None)
+                            is_already_audited = audit_key in self._audited_record_keys
                             self._record_migration_audit(
                                 record_type="RECONCILIATION",
                                 record_id=None,
@@ -941,7 +1195,12 @@ class HistoricalReviewAuditDiagnosticsService:
                                 target_ver=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                                 outcome=SchemaCompatibilityOutcome.CORRUPT_PAYLOAD.value,
                                 details={"error": f"Non-mapping item {type(item).__name__}"},
+                                is_re_read=is_already_audited,
                             )
+                            self._audited_record_keys.add(audit_key)
+
+            # 8. Persist cumulative migration audit state to StateStore
+            self._persist_migration_audit()
 
     # ==============================================================================
     # Core Diagnostics & Alerting API
@@ -2525,6 +2784,14 @@ class HistoricalReviewAuditDiagnosticsService:
             self._malformed_count = 0
             self._migration_failures_count = 0
             self._last_migration_timestamp = None
+            self._audited_record_keys.clear()
+            self._current_hydration_inspected = 0
+            self._current_hydration_migrated = 0
+            self._current_hydration_direct = 0
+            self._current_hydration_unsupported = 0
+            self._current_hydration_malformed = 0
+            self._current_hydration_failures = 0
+            self._current_hydration_re_read = 0
             self._evicted_diagnostics_count = 0
             self._evicted_alerts_count = 0
             self._evicted_exports_count = 0
@@ -2542,6 +2809,7 @@ class HistoricalReviewAuditDiagnosticsService:
                 self._state_store.delete("historical_review_diagnostics:retention_stats")
                 self._state_store.delete("historical_review_exports:history")
                 self._state_store.delete("historical_review_reconciliations:history")
+                self._state_store.delete("historical_review_diagnostics:migration_audit")
 
     def get_migration_audit_summary(self) -> Dict[str, Any]:
         """Return read-only audit summary of schema migration and hydration activity."""
@@ -2568,9 +2836,28 @@ class HistoricalReviewAuditDiagnosticsService:
                 "unsupported_records_skipped": self._unsupported_records_skipped,
                 "last_migration_timestamp": self._last_migration_timestamp,
                 "last_migration_iso": iso_ts,
+                # Explicit cumulative aliases
+                "cumulative_total_inspected": total,
+                "cumulative_successful_migrations": self._successful_migrations_count,
+                "cumulative_direct_compatible_loads": self._direct_compatible_count,
+                "cumulative_unsupported_future_skipped": self._unsupported_future_count,
+                "cumulative_malformed_records_skipped": self._malformed_count,
+                "cumulative_migration_failures": self._migration_failures_count,
+                "cumulative_unsupported_records_skipped": self._unsupported_records_skipped,
+                # Per-hydration statistics (current attempt)
+                "current_hydration_inspected": self._current_hydration_inspected,
+                "current_hydration_successful_migrations": self._current_hydration_migrated,
+                "current_hydration_direct_compatible_loads": self._current_hydration_direct,
+                "current_hydration_unsupported_future_skipped": self._current_hydration_unsupported,
+                "current_hydration_malformed_records_skipped": self._current_hydration_malformed,
+                "current_hydration_migration_failures": self._current_hydration_failures,
+                "current_hydration_re_read_count": self._current_hydration_re_read,
+                # Audit records
                 "recent_audit_records": [
                     r.to_dict() for r in list(self._migration_audit_records)[-20:]
                 ],
+                "audit_persistence_key": "historical_review_diagnostics:migration_audit",
+                "audit_persistence_status": "PERSISTED" if self._state_store is not None else "IN_MEMORY_ONLY",
                 "persistence_transaction_mode": "SINGLE_KEY_ISOLATED_IN_MEMORY",
                 "atomic_rollback_supported": False,
                 "rollback_guarantee_notes": (

@@ -48,6 +48,7 @@ from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
     migrate_reconciliation_payload,
     migrate_retention_stats_payload,
     query_compatibility_matrix,
+    sanitize_audit_details,
     sanitize_payload_text,
 )
 from app.analysis.opportunities.evolution.audit.diagnostics.service import (
@@ -96,5 +97,6 @@ __all__ = [
     "migrate_retention_stats_payload",
     "query_compatibility_matrix",
     "register_audit_diagnostics_handlers",
+    "sanitize_audit_details",
     "sanitize_payload_text",
 ]
