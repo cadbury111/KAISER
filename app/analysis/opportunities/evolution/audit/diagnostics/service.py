@@ -342,6 +342,8 @@ class HistoricalReviewAuditDiagnosticsService:
             "evicted_alerts_count": self._evicted_alerts_count,
             "evicted_diagnostics_by_inv": dict(self._evicted_diagnostics_by_inv),
             "evicted_alerts_by_inv": dict(self._evicted_alerts_by_inv),
+            "evicted_diagnostic_ids": list(self._evicted_diagnostic_ids),
+            "evicted_alert_ids": list(self._evicted_alert_ids),
         }
         self._state_store.set("historical_review_diagnostics:retention_stats", data)
 
@@ -423,25 +425,62 @@ class HistoricalReviewAuditDiagnosticsService:
                         parts = key_str.split(":", 2)
                         if len(parts) == 3:
                             inv_id, cat_str, sev_str = parts
-                            ts = float(cd_val.get("last_timestamp", 0.0))
-                            alt_id = str(cd_val.get("last_alert_id", ""))
-                            supp = int(cd_val.get("suppressed", 0))
-                            tup = (inv_id, cat_str, sev_str)
-                            self._last_alert_time[tup] = (ts, alt_id)
-                            if supp > 0:
-                                self._suppressed_counts[tup] = supp
+                            try:
+                                ts = float(cd_val.get("last_timestamp", 0.0))
+                                alt_id = str(cd_val.get("last_alert_id", ""))
+                                supp = int(cd_val.get("suppressed", 0))
+                                tup = (inv_id, cat_str, sev_str)
+                                self._last_alert_time[tup] = (ts, alt_id)
+                                if supp > 0:
+                                    self._suppressed_counts[tup] = supp
+                            except (ValueError, TypeError):
+                                pass
 
             # 5. Hydrate retention statistics
             stored_stats = self._state_store.get("historical_review_diagnostics:retention_stats", None)
             if isinstance(stored_stats, dict):
-                self._evicted_diagnostics_count = int(stored_stats.get("evicted_diagnostics_count", 0))
-                self._evicted_alerts_count = int(stored_stats.get("evicted_alerts_count", 0))
+                try:
+                    self._evicted_diagnostics_count = max(0, int(stored_stats.get("evicted_diagnostics_count", 0)))
+                except (ValueError, TypeError):
+                    self._evicted_diagnostics_count = 0
+                try:
+                    self._evicted_alerts_count = max(0, int(stored_stats.get("evicted_alerts_count", 0)))
+                except (ValueError, TypeError):
+                    self._evicted_alerts_count = 0
+
                 inv_d = stored_stats.get("evicted_diagnostics_by_inv", {})
                 if isinstance(inv_d, dict):
-                    self._evicted_diagnostics_by_inv = collections.defaultdict(int, {k: int(v) for k, v in inv_d.items()})
+                    cleaned_inv_d = {}
+                    for k, v in inv_d.items():
+                        try:
+                            cleaned_inv_d[str(k)] = max(0, int(v))
+                        except (ValueError, TypeError):
+                            pass
+                    self._evicted_diagnostics_by_inv = collections.defaultdict(int, cleaned_inv_d)
+
                 inv_a = stored_stats.get("evicted_alerts_by_inv", {})
                 if isinstance(inv_a, dict):
-                    self._evicted_alerts_by_inv = collections.defaultdict(int, {k: int(v) for k, v in inv_a.items()})
+                    cleaned_inv_a = {}
+                    for k, v in inv_a.items():
+                        try:
+                            cleaned_inv_a[str(k)] = max(0, int(v))
+                        except (ValueError, TypeError):
+                            pass
+                    self._evicted_alerts_by_inv = collections.defaultdict(int, cleaned_inv_a)
+
+                e_diags = stored_stats.get("evicted_diagnostic_ids", [])
+                if isinstance(e_diags, list):
+                    self._evicted_diagnostic_ids = collections.deque(
+                        [str(x) for x in e_diags if isinstance(x, (str, int))],
+                        maxlen=self._max_diagnostics,
+                    )
+
+                e_alts = stored_stats.get("evicted_alert_ids", [])
+                if isinstance(e_alts, list):
+                    self._evicted_alert_ids = collections.deque(
+                        [str(x) for x in e_alts if isinstance(x, (str, int))],
+                        maxlen=self._max_alerts,
+                    )
 
     # ==============================================================================
     # Core Diagnostics & Alerting API
@@ -1184,10 +1223,10 @@ class HistoricalReviewAuditDiagnosticsService:
             evicted_diags = self._evicted_diagnostics_by_inv.get(clean_inv, 0)
             evicted_alts = self._evicted_alerts_by_inv.get(clean_inv, 0)
             is_truncated = (evicted_diags > 0 or evicted_alts > 0)
-            if not matching_diags and not matching_alerts:
-                retention_status = "NO_DATA"
-            elif is_truncated:
+            if is_truncated:
                 retention_status = "TRUNCATED_TO_CAPACITY"
+            elif not matching_diags and not matching_alerts:
+                retention_status = "NO_DATA"
             else:
                 retention_status = "COMPLETE"
 
@@ -1219,6 +1258,7 @@ class HistoricalReviewAuditDiagnosticsService:
             self._diagnostics.clear()
             self._diagnostics_by_id.clear()
             self._alerts.clear()
+            self._suppressed_alerts.clear()
             self._alerts_by_id.clear()
             self._last_alert_time.clear()
             self._suppressed_counts.clear()
@@ -1232,6 +1272,7 @@ class HistoricalReviewAuditDiagnosticsService:
             if self._state_store is not None:
                 self._state_store.delete("historical_review_diagnostics:history")
                 self._state_store.delete("historical_review_alerts:history")
+                self._state_store.delete("historical_review_alerts:suppressed_history")
                 self._state_store.delete("historical_review_diagnostics:active_failures")
                 self._state_store.delete("historical_review_diagnostics:cooldown_state")
                 self._state_store.delete("historical_review_diagnostics:retention_stats")
