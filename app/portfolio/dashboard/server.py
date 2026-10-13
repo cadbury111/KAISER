@@ -2982,6 +2982,204 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
+                # Case 2c: Sub-resource /exports
+                if parts and parts[0] == "exports":
+                    if len(parts) > 2:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if len(parts) == 2:
+                        export_id = parts[1].strip()
+                        if not SAFE_ID_PATTERN.match(export_id) or ".." in export_id or "/" in export_id or "\\" in export_id or len(export_id) > 128:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid export_id '{export_id}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                        export_obj = diagnostics_service.get_export(export_id) if diagnostics_service is not None else None
+                        if export_obj is None and state_store is not None:
+                            stored = state_store.get(f"historical_review_exports:{export_id}", None)
+                            if isinstance(stored, dict):
+                                export_obj = stored
+
+                        if export_obj is None:
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Diagnostics export '{export_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "export": export_obj.to_dict() if hasattr(export_obj, "to_dict") else export_obj,
+                        })
+                        return
+
+                    # Listing exports
+                    try:
+                        limit_val = int(query.get("limit", ["50"])[0])
+                        offset_val = int(query.get("offset", ["0"])[0])
+                    except (ValueError, TypeError):
+                        limit_val = 50
+                        offset_val = 0
+                    limit_clamped = max(1, min(100, limit_val))
+                    offset_clamped = max(0, offset_val)
+
+                    inv_id_param = query.get("investigation_id", [None])[0]
+                    if inv_id_param is not None:
+                        inv_id_param = inv_id_param.strip()
+                        if not SAFE_ID_PATTERN.match(inv_id_param) or ".." in inv_id_param:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid investigation_id '{inv_id_param}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                    exports_data = []
+                    if diagnostics_service is not None:
+                        exports_list = diagnostics_service.list_exports(
+                            investigation_id=inv_id_param,
+                            limit=limit_clamped,
+                            offset=offset_clamped,
+                        )
+                        exports_data = [e.to_dict() if hasattr(e, "to_dict") else e for e in exports_list]
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(exports_data),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "exports": exports_data,
+                    })
+                    return
+
+                # Case 2d: Sub-resource /reconciliations
+                if parts and parts[0] == "reconciliations":
+                    if len(parts) > 2:
+                        self._send_json_response(
+                            {
+                                "status": "not_found",
+                                "message": f"Resource path '{path}' not found.",
+                                "read_only": True,
+                                "execution_locked": True,
+                            },
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    if len(parts) == 2:
+                        recon_id = parts[1].strip()
+                        if not SAFE_ID_PATTERN.match(recon_id) or ".." in recon_id or "/" in recon_id or "\\" in recon_id or len(recon_id) > 128:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid reconciliation_id '{recon_id}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                        recon_obj = diagnostics_service.get_reconciliation(recon_id) if diagnostics_service is not None else None
+                        if recon_obj is None and state_store is not None:
+                            stored = state_store.get(f"historical_review_reconciliations:{recon_id}", None)
+                            if isinstance(stored, dict):
+                                recon_obj = stored
+
+                        if recon_obj is None:
+                            self._send_json_response(
+                                {
+                                    "status": "not_found",
+                                    "message": f"Diagnostics reconciliation report '{recon_id}' not found.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.NOT_FOUND,
+                            )
+                            return
+
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "reconciliation": recon_obj.to_dict() if hasattr(recon_obj, "to_dict") else recon_obj,
+                        })
+                        return
+
+                    # Listing reconciliations
+                    try:
+                        limit_val = int(query.get("limit", ["50"])[0])
+                        offset_val = int(query.get("offset", ["0"])[0])
+                    except (ValueError, TypeError):
+                        limit_val = 50
+                        offset_val = 0
+                    limit_clamped = max(1, min(100, limit_val))
+                    offset_clamped = max(0, offset_val)
+
+                    export_id_param = query.get("export_id", [None])[0]
+                    if export_id_param is not None:
+                        export_id_param = export_id_param.strip()
+                        if not SAFE_ID_PATTERN.match(export_id_param) or ".." in export_id_param:
+                            self._send_json_response(
+                                {
+                                    "status": "invalid_parameter",
+                                    "message": f"Invalid export_id '{export_id_param}'. Must be a safe identifier.",
+                                    "read_only": True,
+                                    "execution_locked": True,
+                                },
+                                status=HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+
+                    recons_data = []
+                    if diagnostics_service is not None:
+                        recons_list = diagnostics_service.list_reconciliations(
+                            export_id=export_id_param,
+                            limit=limit_clamped,
+                            offset=offset_clamped,
+                        )
+                        recons_data = [r.to_dict() if hasattr(r, "to_dict") else r for r in recons_list]
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "count": len(recons_data),
+                        "limit": limit_clamped,
+                        "offset": offset_clamped,
+                        "reconciliations": recons_data,
+                    })
+                    return
+
                 # Case 3: Specific diagnostic record by ID: /api/historical-review-diagnostics/<diag_id>
                 if parts:
                     if len(parts) > 1:

@@ -450,3 +450,324 @@ class AuditDiagnosticSummary:
             oldest_timestamp_iso=data.get("oldest_timestamp_iso"),
             capacity=int(data.get("capacity", 100)),
         )
+
+
+# ==============================================================================
+# Phase 2, Step 40: Export & Reconciliation Models
+# ==============================================================================
+
+class DiagnosticsReconciliationStatus(str, Enum):
+    """Integrity and reconciliation status of exported diagnostics against source state."""
+
+    MATCHED = "MATCHED"
+    MISMATCHED = "MISMATCHED"
+    INCOMPLETE = "INCOMPLETE"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNVERIFIABLE = "UNVERIFIABLE"
+
+
+def compute_export_canonical_dict(
+    schema_version: str,
+    investigation_id: Optional[str],
+    diagnostics: Sequence[AuditDiagnosticRecord],
+    alerts: Sequence[AuditAlert],
+    source_references: Sequence[str],
+    retention_status: str,
+    is_truncated: bool,
+) -> Dict[str, Any]:
+    """Build a deterministically sorted canonical dictionary for fingerprint generation."""
+    sorted_diags = sorted(
+        [d.to_dict() for d in diagnostics],
+        key=lambda d: (d.get("timestamp", 0.0), d.get("diagnostic_id", "")),
+    )
+    sorted_alerts = sorted(
+        [a.to_dict() for a in alerts],
+        key=lambda a: (a.get("timestamp", 0.0), a.get("alert_id", "")),
+    )
+    sorted_refs = sorted(set(str(r) for r in source_references))
+    return {
+        "schema_version": str(schema_version),
+        "investigation_id": str(investigation_id) if investigation_id else None,
+        "diagnostics": sorted_diags,
+        "alerts": sorted_alerts,
+        "record_counts": {
+            "diagnostics": len(sorted_diags),
+            "alerts": len(sorted_alerts),
+        },
+        "source_references": sorted_refs,
+        "retention_status": str(retention_status),
+        "is_truncated": bool(is_truncated),
+    }
+
+
+def compute_export_content_fingerprint(canonical_dict: Dict[str, Any]) -> str:
+    """Generate deterministic SHA-256 fingerprint for canonical export representation."""
+    canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def compute_deterministic_export_id(created_at: float, content_fingerprint: str) -> str:
+    """Generate a deterministic export ID based on creation time and content fingerprint."""
+    safe_ts = 0.0 if (created_at is None or math.isnan(created_at) or math.isinf(created_at)) else created_at
+    h = hashlib.sha256(f"{safe_ts}:{content_fingerprint}".encode("utf-8")).hexdigest()[:16]
+    return f"export_{h}"
+
+
+def compute_deterministic_reconciliation_id(export_id: str, timestamp: float) -> str:
+    """Generate a deterministic reconciliation report ID."""
+    safe_ts = 0.0 if (timestamp is None or math.isnan(timestamp) or math.isinf(timestamp)) else timestamp
+    h = hashlib.sha256(f"{export_id}:{safe_ts}".encode("utf-8")).hexdigest()[:16]
+    return f"recon_{h}"
+
+
+@dataclass(frozen=True)
+class DiagnosticsExportRequest:
+    """Immutable parameter specification for diagnostic and alert export."""
+
+    investigation_id: Optional[str] = None
+    category: Optional[AuditDiagnosticCategory] = None
+    severity: Optional[AuditDiagnosticSeverity] = None
+    include_alerts: bool = True
+    include_suppressed: bool = False
+    active_only: bool = False
+    include_audit_references: bool = True
+    include_reliability_references: bool = True
+    limit: int = 100
+    schema_version: str = "1.0.0"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.investigation_id:
+            validate_safe_id(self.investigation_id, "investigation_id")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize export request to dictionary."""
+        return {
+            "investigation_id": self.investigation_id,
+            "category": self.category.value if self.category else None,
+            "severity": self.severity.value if self.severity else None,
+            "include_alerts": self.include_alerts,
+            "include_suppressed": self.include_suppressed,
+            "active_only": self.active_only,
+            "include_audit_references": self.include_audit_references,
+            "include_reliability_references": self.include_reliability_references,
+            "limit": self.limit,
+            "schema_version": self.schema_version,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsExportRequest:
+        """Deserialize export request from dictionary."""
+        cat_val = None
+        if data.get("category"):
+            try:
+                cat_val = AuditDiagnosticCategory(str(data["category"]))
+            except ValueError:
+                pass
+
+        sev_val = None
+        if data.get("severity"):
+            try:
+                sev_val = AuditDiagnosticSeverity(str(data["severity"]))
+            except ValueError:
+                pass
+
+        return cls(
+            investigation_id=data.get("investigation_id"),
+            category=cat_val,
+            severity=sev_val,
+            include_alerts=bool(data.get("include_alerts", True)),
+            include_suppressed=bool(data.get("include_suppressed", False)),
+            active_only=bool(data.get("active_only", False)),
+            include_audit_references=bool(data.get("include_audit_references", True)),
+            include_reliability_references=bool(data.get("include_reliability_references", True)),
+            limit=int(data.get("limit", 100)),
+            schema_version=str(data.get("schema_version", "1.0.0")),
+            metadata=dict(data.get("metadata", {})),
+        )
+
+
+@dataclass(frozen=True)
+class DiagnosticsExportResult:
+    """Immutable, deterministic export snapshot of diagnostics, alerts, and retention metadata."""
+
+    export_id: str
+    request: DiagnosticsExportRequest
+    created_at: float
+    created_at_iso: str
+    schema_version: str
+    diagnostics: Tuple[AuditDiagnosticRecord, ...]
+    alerts: Tuple[AuditAlert, ...]
+    record_counts: Dict[str, int]
+    source_references: Tuple[str, ...]
+    retention_status: str
+    is_truncated: bool
+    content_fingerprint: str
+    omitted_reasons: Dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_safe_id(self.export_id, "export_id")
+
+    def to_canonical_json(self) -> str:
+        """Produce deterministic canonical JSON string."""
+        can_dict = compute_export_canonical_dict(
+            schema_version=self.schema_version,
+            investigation_id=self.request.investigation_id,
+            diagnostics=self.diagnostics,
+            alerts=self.alerts,
+            source_references=self.source_references,
+            retention_status=self.retention_status,
+            is_truncated=self.is_truncated,
+        )
+        return json.dumps(can_dict, sort_keys=True, separators=(",", ":"))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize export result to dictionary."""
+        return {
+            "export_id": self.export_id,
+            "request": self.request.to_dict(),
+            "created_at": self.created_at,
+            "created_at_iso": self.created_at_iso,
+            "schema_version": self.schema_version,
+            "diagnostics": [d.to_dict() for d in self.diagnostics],
+            "alerts": [a.to_dict() for a in self.alerts],
+            "record_counts": dict(self.record_counts),
+            "source_references": list(self.source_references),
+            "retention_status": self.retention_status,
+            "is_truncated": self.is_truncated,
+            "content_fingerprint": self.content_fingerprint,
+            "omitted_reasons": dict(self.omitted_reasons),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsExportResult:
+        """Deserialize export result from dictionary."""
+        req = DiagnosticsExportRequest.from_dict(data.get("request", {}))
+        diags = tuple(AuditDiagnosticRecord.from_dict(d) for d in data.get("diagnostics", []))
+        alerts = tuple(AuditAlert.from_dict(a) for a in data.get("alerts", []))
+        ts = float(data.get("created_at", 0.0))
+        return cls(
+            export_id=str(data["export_id"]),
+            request=req,
+            created_at=ts,
+            created_at_iso=str(data.get("created_at_iso", format_utc_iso(ts))),
+            schema_version=str(data.get("schema_version", "1.0.0")),
+            diagnostics=diags,
+            alerts=alerts,
+            record_counts=dict(data.get("record_counts", {})),
+            source_references=tuple(str(s) for s in data.get("source_references", ())),
+            retention_status=str(data.get("retention_status", "COMPLETE")),
+            is_truncated=bool(data.get("is_truncated", False)),
+            content_fingerprint=str(data.get("content_fingerprint", "")),
+            omitted_reasons=dict(data.get("omitted_reasons", {})),
+        )
+
+
+@dataclass(frozen=True)
+class DiagnosticsReconciliationDiscrepancy:
+    """Individual discrepancy identified during export reconciliation against source evidence."""
+
+    discrepancy_type: str
+    record_id: Optional[str] = None
+    investigation_id: Optional[str] = None
+    description: str = ""
+    expected: Optional[Any] = None
+    actual: Optional[Any] = None
+    is_retention_limitation: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize discrepancy to dictionary."""
+        return {
+            "discrepancy_type": self.discrepancy_type,
+            "record_id": self.record_id,
+            "investigation_id": self.investigation_id,
+            "description": self.description,
+            "expected": self.expected,
+            "actual": self.actual,
+            "is_retention_limitation": self.is_retention_limitation,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsReconciliationDiscrepancy:
+        """Deserialize discrepancy from dictionary."""
+        return cls(
+            discrepancy_type=str(data.get("discrepancy_type", "UNKNOWN")),
+            record_id=data.get("record_id"),
+            investigation_id=data.get("investigation_id"),
+            description=str(data.get("description", "")),
+            expected=data.get("expected"),
+            actual=data.get("actual"),
+            is_retention_limitation=bool(data.get("is_retention_limitation", False)),
+        )
+
+
+@dataclass(frozen=True)
+class DiagnosticsReconciliationReport:
+    """Immutable reconciliation report comparing exported diagnostic records with active source state."""
+
+    reconciliation_id: str
+    export_id: str
+    timestamp: float
+    timestamp_iso: str
+    status: DiagnosticsReconciliationStatus
+    total_exported_diagnostics: int
+    total_exported_alerts: int
+    matched_diagnostics: int
+    matched_alerts: int
+    discrepancies: Tuple[DiagnosticsReconciliationDiscrepancy, ...]
+    source_retention_status: str
+    is_source_truncated: bool
+    fingerprint_verified: bool
+    summary_notes: str = ""
+
+    def __post_init__(self) -> None:
+        validate_safe_id(self.reconciliation_id, "reconciliation_id")
+        validate_safe_id(self.export_id, "export_id")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize reconciliation report to dictionary."""
+        return {
+            "reconciliation_id": self.reconciliation_id,
+            "export_id": self.export_id,
+            "timestamp": self.timestamp,
+            "timestamp_iso": self.timestamp_iso,
+            "status": self.status.value,
+            "total_exported_diagnostics": self.total_exported_diagnostics,
+            "total_exported_alerts": self.total_exported_alerts,
+            "matched_diagnostics": self.matched_diagnostics,
+            "matched_alerts": self.matched_alerts,
+            "discrepancies": [d.to_dict() for d in self.discrepancies],
+            "source_retention_status": self.source_retention_status,
+            "is_source_truncated": self.is_source_truncated,
+            "fingerprint_verified": self.fingerprint_verified,
+            "summary_notes": self.summary_notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DiagnosticsReconciliationReport:
+        """Deserialize reconciliation report from dictionary."""
+        stat_raw = data.get("status", DiagnosticsReconciliationStatus.UNVERIFIABLE.value)
+        try:
+            status = DiagnosticsReconciliationStatus(stat_raw)
+        except ValueError:
+            status = DiagnosticsReconciliationStatus.UNVERIFIABLE
+
+        discrepancies = tuple(DiagnosticsReconciliationDiscrepancy.from_dict(d) for d in data.get("discrepancies", []))
+        ts = float(data.get("timestamp", 0.0))
+        return cls(
+            reconciliation_id=str(data["reconciliation_id"]),
+            export_id=str(data["export_id"]),
+            timestamp=ts,
+            timestamp_iso=str(data.get("timestamp_iso", format_utc_iso(ts))),
+            status=status,
+            total_exported_diagnostics=int(data.get("total_exported_diagnostics", 0)),
+            total_exported_alerts=int(data.get("total_exported_alerts", 0)),
+            matched_diagnostics=int(data.get("matched_diagnostics", 0)),
+            matched_alerts=int(data.get("matched_alerts", 0)),
+            discrepancies=discrepancies,
+            source_retention_status=str(data.get("source_retention_status", "COMPLETE")),
+            is_source_truncated=bool(data.get("is_source_truncated", False)),
+            fingerprint_verified=bool(data.get("fingerprint_verified", False)),
+            summary_notes=str(data.get("summary_notes", "")),
+        )

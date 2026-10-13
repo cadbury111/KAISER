@@ -23,7 +23,9 @@ from app.analysis.opportunities.evolution.audit.diagnostics.models import (
     AuditDiagnosticCategory,
     AuditDiagnosticSeverity,
     AuditEvidenceNature,
+    DiagnosticsExportRequest,
     SAFE_ID_PATTERN,
+    validate_safe_id,
 )
 from app.analysis.opportunities.evolution.audit.diagnostics.service import (
     HistoricalReviewAuditDiagnosticsService,
@@ -263,6 +265,84 @@ def register_audit_diagnostics_handlers(
             "retention": status_info,
         }
 
+    def handle_export_historical_review_diagnostics(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'export_historical_review_diagnostics'."""
+        params = _extract_params(req)
+        export_req = DiagnosticsExportRequest.from_dict(params)
+        result = diagnostics_service.export_diagnostics(
+            request=export_req,
+            correlation_id=params.get("correlation_id"),
+        )
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "export": result.to_dict(),
+        }
+
+    def handle_get_historical_review_diagnostics_export(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'get_historical_review_diagnostics_export'."""
+        params = _extract_params(req)
+        export_id = params.get("export_id")
+        if not export_id or not isinstance(export_id, str):
+            raise ValidationError("Missing or invalid 'export_id' parameter.")
+
+        validate_safe_id(export_id, "export_id")
+        result = diagnostics_service.get_export(export_id)
+        if result is None:
+            return {
+                "status": "not_found",
+                "read_only": True,
+                "execution_locked": True,
+                "message": f"Diagnostics export '{export_id}' not found.",
+            }
+
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "export": result.to_dict(),
+        }
+
+    def handle_list_historical_review_diagnostics_exports(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'list_historical_review_diagnostics_exports'."""
+        params = _extract_params(req)
+        inv_id = params.get("investigation_id")
+        limit = int(params.get("limit", 50))
+        offset = int(params.get("offset", 0))
+
+        exports = diagnostics_service.list_exports(
+            investigation_id=inv_id,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "count": len(exports),
+            "exports": [e.to_dict() for e in exports],
+        }
+
+    def handle_reconcile_historical_review_diagnostics_export(req: OrchestratorRequest) -> Dict[str, Any]:
+        """Handler for 'reconcile_historical_review_diagnostics_export'."""
+        params = _extract_params(req)
+        export_id = params.get("export_id")
+        if not export_id or not isinstance(export_id, str):
+            raise ValidationError("Missing or invalid 'export_id' parameter.")
+
+        validate_safe_id(export_id, "export_id")
+        report = diagnostics_service.reconcile_export(
+            export_id=export_id,
+            correlation_id=params.get("correlation_id"),
+        )
+        return {
+            "status": "success",
+            "read_only": True,
+            "execution_locked": True,
+            "reconciliation": report.to_dict(),
+        }
+
     handlers = {
         "record_historical_review_diagnostic": handle_record_historical_review_diagnostic,
         "get_historical_review_diagnostic": handle_get_historical_review_diagnostic,
@@ -273,6 +353,10 @@ def register_audit_diagnostics_handlers(
         "acknowledge_historical_review_alert": handle_acknowledge_historical_review_alert,
         "resolve_historical_review_alert": handle_resolve_historical_review_alert,
         "get_historical_review_retention_status": handle_get_historical_review_retention_status,
+        "export_historical_review_diagnostics": handle_export_historical_review_diagnostics,
+        "get_historical_review_diagnostics_export": handle_get_historical_review_diagnostics_export,
+        "list_historical_review_diagnostics_exports": handle_list_historical_review_diagnostics_exports,
+        "reconcile_historical_review_diagnostics_export": handle_reconcile_historical_review_diagnostics_export,
     }
 
     for cmd, handler_func in handlers.items():

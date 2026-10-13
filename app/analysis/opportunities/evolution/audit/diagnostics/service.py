@@ -35,9 +35,18 @@ from app.analysis.opportunities.evolution.audit.diagnostics.models import (
     AuditDiagnosticSummary,
     AuditEvidenceNature,
     CREDENTIAL_KEY_REGEX,
+    DiagnosticsExportRequest,
+    DiagnosticsExportResult,
+    DiagnosticsReconciliationDiscrepancy,
+    DiagnosticsReconciliationReport,
+    DiagnosticsReconciliationStatus,
     SAFE_ID_PATTERN,
     compute_deterministic_alert_id,
     compute_deterministic_diagnostic_id,
+    compute_deterministic_export_id,
+    compute_deterministic_reconciliation_id,
+    compute_export_canonical_dict,
+    compute_export_content_fingerprint,
     format_utc_iso,
     sanitize_text,
     validate_safe_id,
@@ -51,6 +60,8 @@ logger = logging.getLogger("kaiser.analysis.evolution.audit.diagnostics")
 
 DEFAULT_MAX_DIAGNOSTICS = 100
 DEFAULT_MAX_ALERTS = 100
+DEFAULT_MAX_EXPORTS = 50
+DEFAULT_MAX_RECONCILIATIONS = 50
 DEFAULT_ALERT_COOLDOWN_SECONDS = 60.0
 
 SAFE_REF_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.\:\@]+$")
@@ -65,18 +76,22 @@ class HistoricalReviewAuditDiagnosticsService:
         state_store: Optional[StateStore] = None,
         max_diagnostics: int = DEFAULT_MAX_DIAGNOSTICS,
         max_alerts: int = DEFAULT_MAX_ALERTS,
+        max_exports: int = DEFAULT_MAX_EXPORTS,
+        max_reconciliations: int = DEFAULT_MAX_RECONCILIATIONS,
         alert_cooldown_seconds: float = DEFAULT_ALERT_COOLDOWN_SECONDS,
         time_provider: Optional[Callable[[], float]] = None,
         auto_subscribe: bool = True,
         auto_hydrate: bool = False,
     ) -> None:
-        """Initialize the diagnostics and alerting service.
+        """Initialize the diagnostics, alerting, export, and reconciliation service.
 
         Args:
             event_bus: Optional EventBus for receiving and publishing events.
             state_store: Optional StateStore for persistent snapshot storage.
             max_diagnostics: Maximum number of diagnostic records to retain.
             max_alerts: Maximum number of alert records to retain.
+            max_exports: Maximum number of diagnostic export snapshots to retain.
+            max_reconciliations: Maximum number of reconciliation reports to retain.
             alert_cooldown_seconds: Minimum seconds before re-triggering an identical alert.
             time_provider: Injectable timestamp function (defaults to time.time).
             auto_subscribe: If True and event_bus provided, automatically subscribes to audit events.
@@ -86,6 +101,8 @@ class HistoricalReviewAuditDiagnosticsService:
         self._state_store = state_store
         self._max_diagnostics = max(10, min(1000, max_diagnostics))
         self._max_alerts = max(10, min(1000, max_alerts))
+        self._max_exports = max(5, min(500, max_exports))
+        self._max_reconciliations = max(5, min(500, max_reconciliations))
         self._alert_cooldown_seconds = max(0.0, alert_cooldown_seconds)
         self._time_provider = time_provider or time.time
         self._lock = threading.RLock()
@@ -99,6 +116,21 @@ class HistoricalReviewAuditDiagnosticsService:
         self._alerts: collections.deque[AuditAlert] = collections.deque(maxlen=self._max_alerts)
         self._suppressed_alerts: collections.deque[AuditAlert] = collections.deque(maxlen=self._max_alerts)
         self._alerts_by_id: Dict[str, AuditAlert] = {}
+
+        # Export and reconciliation storage
+        self._exports: collections.deque[DiagnosticsExportResult] = collections.deque(
+            maxlen=self._max_exports
+        )
+        self._exports_by_id: Dict[str, DiagnosticsExportResult] = {}
+        self._evicted_export_ids: collections.deque[str] = collections.deque(maxlen=self._max_exports)
+
+        self._reconciliations: collections.deque[DiagnosticsReconciliationReport] = collections.deque(
+            maxlen=self._max_reconciliations
+        )
+        self._reconciliations_by_id: Dict[str, DiagnosticsReconciliationReport] = {}
+        self._evicted_reconciliation_ids: collections.deque[str] = collections.deque(
+            maxlen=self._max_reconciliations
+        )
 
         # Alert deduplication and cooldown tracking: (investigation_id, category, severity) -> (last_timestamp, last_alert_id)
         self._last_alert_time: Dict[Tuple[str, str, str], Tuple[float, str]] = {}
@@ -482,6 +514,36 @@ class HistoricalReviewAuditDiagnosticsService:
                         maxlen=self._max_alerts,
                     )
 
+            # 6. Hydrate exports history
+            stored_exports = self._state_store.get("historical_review_exports:history", [])
+            if isinstance(stored_exports, list):
+                if not self._exports or force:
+                    self._exports.clear()
+                    self._exports_by_id.clear()
+                    for item in reversed(stored_exports[: self._max_exports]):
+                        if isinstance(item, dict):
+                            try:
+                                exp = DiagnosticsExportResult.from_dict(item)
+                                self._exports.append(exp)
+                                self._exports_by_id[exp.export_id] = exp
+                            except Exception:
+                                pass
+
+            # 7. Hydrate reconciliations history
+            stored_recons = self._state_store.get("historical_review_reconciliations:history", [])
+            if isinstance(stored_recons, list):
+                if not self._reconciliations or force:
+                    self._reconciliations.clear()
+                    self._reconciliations_by_id.clear()
+                    for item in reversed(stored_recons[: self._max_reconciliations]):
+                        if isinstance(item, dict):
+                            try:
+                                rpt = DiagnosticsReconciliationReport.from_dict(item)
+                                self._reconciliations.append(rpt)
+                                self._reconciliations_by_id[rpt.reconciliation_id] = rpt
+                            except Exception:
+                                pass
+
     # ==============================================================================
     # Core Diagnostics & Alerting API
     # ==============================================================================
@@ -573,6 +635,8 @@ class HistoricalReviewAuditDiagnosticsService:
                 self._evicted_diagnostics_count += 1
                 self._evicted_diagnostics_by_inv[oldest.investigation_id] += 1
                 self._evicted_diagnostic_ids.append(oldest.diagnostic_id)
+                if self._state_store is not None:
+                    self._state_store.delete(f"historical_review_diagnostics:{oldest.diagnostic_id}")
                 self._persist_retention_stats()
 
             self._diagnostics.append(record)
@@ -728,6 +792,8 @@ class HistoricalReviewAuditDiagnosticsService:
             self._evicted_alerts_count += 1
             self._evicted_alerts_by_inv[oldest.investigation_id] += 1
             self._evicted_alert_ids.append(oldest.alert_id)
+            if self._state_store is not None:
+                self._state_store.delete(f"historical_review_alerts:{oldest.alert_id}")
             self._persist_retention_stats()
 
         self._alerts.append(alert)
@@ -1036,6 +1102,12 @@ class HistoricalReviewAuditDiagnosticsService:
                 "active_failures_tracked": len(self._active_failures),
                 "cooldown_entries_active": len(self._last_alert_time),
                 "state_store_configured": self._state_store is not None,
+                "max_exports_capacity": self._max_exports,
+                "current_exports_count": len(self._exports),
+                "total_exports_evicted": len(self._evicted_export_ids),
+                "max_reconciliations_capacity": self._max_reconciliations,
+                "current_reconciliations_count": len(self._reconciliations),
+                "total_reconciliations_evicted": len(self._evicted_reconciliation_ids),
             }
 
     # ==============================================================================
@@ -1049,6 +1121,9 @@ class HistoricalReviewAuditDiagnosticsService:
             return None
 
         with self._lock:
+            if clean_id in self._evicted_diagnostic_ids:
+                return None
+
             if clean_id in self._diagnostics_by_id:
                 return self._diagnostics_by_id[clean_id]
 
@@ -1104,6 +1179,9 @@ class HistoricalReviewAuditDiagnosticsService:
             return None
 
         with self._lock:
+            if clean_id in self._evicted_alert_ids:
+                return None
+
             if clean_id in self._alerts_by_id:
                 return self._alerts_by_id[clean_id]
 
@@ -1252,6 +1330,633 @@ class HistoricalReviewAuditDiagnosticsService:
                 capacity=self._max_diagnostics,
             )
 
+    # ==============================================================================
+    # Historical Review Diagnostics Auditability, Export & Reconciliation (Phase 2, Step 40)
+    # ==============================================================================
+
+    def export_diagnostics(
+        self,
+        request: Optional[DiagnosticsExportRequest] = None,
+        correlation_id: Optional[str] = None,
+    ) -> DiagnosticsExportResult:
+        """Create a deterministic, read-only snapshot export of diagnostic records and alerts."""
+        req = request or DiagnosticsExportRequest()
+        clean_inv = None
+        if req.investigation_id:
+            clean_inv = validate_safe_id(req.investigation_id, "investigation_id")
+
+        with self._lock:
+            # 1. Hydrate if empty and store present
+            if not self._diagnostics and not self._alerts and self._state_store is not None:
+                self.hydrate_from_state_store()
+
+            # 2. Filter diagnostics
+            matching_diags = list(self._diagnostics)
+            if clean_inv:
+                matching_diags = [d for d in matching_diags if d.investigation_id == clean_inv]
+            if req.category:
+                matching_diags = [d for d in matching_diags if d.category == req.category]
+            if req.severity:
+                matching_diags = [d for d in matching_diags if d.severity == req.severity]
+
+            # 3. Filter alerts
+            total_matching_alerts = 0
+            matching_alerts: List[AuditAlert] = []
+            matching_suppressed_alerts: List[AuditAlert] = []
+            if req.include_alerts:
+                alert_pool = list(self._alerts)
+                if clean_inv:
+                    alert_pool = [a for a in alert_pool if a.investigation_id == clean_inv]
+                if req.category:
+                    alert_pool = [a for a in alert_pool if a.category == req.category]
+                if req.severity:
+                    alert_pool = [a for a in alert_pool if a.severity == req.severity]
+
+                # Count suppressed alerts
+                supp_pool = list(self._suppressed_alerts)
+                if clean_inv:
+                    supp_pool = [a for a in supp_pool if a.investigation_id == clean_inv]
+                if req.category:
+                    supp_pool = [a for a in supp_pool if a.category == req.category]
+                if req.severity:
+                    supp_pool = [a for a in supp_pool if a.severity == req.severity]
+                matching_suppressed_alerts = supp_pool
+
+                if req.include_suppressed:
+                    alert_pool.extend(supp_pool)
+
+                if req.active_only:
+                    alert_pool = [
+                        a for a in alert_pool
+                        if a.status in (AuditAlertStatus.TRIGGERED, AuditAlertStatus.ACTIVE, AuditAlertStatus.ACKNOWLEDGED)
+                    ]
+
+                total_matching_alerts = len(alert_pool)
+                matching_alerts = alert_pool
+            else:
+                alert_pool = list(self._alerts)
+                if clean_inv:
+                    alert_pool = [a for a in alert_pool if a.investigation_id == clean_inv]
+                total_matching_alerts = len(alert_pool)
+
+            # 4. Limits and omission tracking
+            clamped_limit = max(1, min(1000, req.limit))
+            omitted_reasons: Dict[str, int] = collections.defaultdict(int)
+
+            if len(matching_diags) > clamped_limit:
+                omitted_reasons["diagnostics_limit_exceeded"] = len(matching_diags) - clamped_limit
+                final_diags = matching_diags[:clamped_limit]
+            else:
+                final_diags = matching_diags
+
+            if len(matching_alerts) > clamped_limit:
+                omitted_reasons["alerts_limit_exceeded"] = len(matching_alerts) - clamped_limit
+                final_alerts = matching_alerts[:clamped_limit]
+            else:
+                final_alerts = matching_alerts
+
+            if not req.include_alerts and total_matching_alerts > 0:
+                omitted_reasons["alerts_excluded_by_request"] = total_matching_alerts
+
+            if req.include_alerts and not req.include_suppressed and matching_suppressed_alerts:
+                omitted_reasons["suppressed_alerts_excluded"] = len(matching_suppressed_alerts)
+
+            # 5. Extract source references
+            ref_set: Set[str] = set()
+            for d in final_diags:
+                for r in d.source_references:
+                    if r:
+                        ref_set.add(str(r))
+                if req.include_audit_references and d.report_id:
+                    ref_set.add(str(d.report_id))
+                if req.include_reliability_references and d.evaluation_id:
+                    ref_set.add(str(d.evaluation_id))
+
+            for a in final_alerts:
+                for r in a.source_references:
+                    if r:
+                        ref_set.add(str(r))
+                if req.include_audit_references and a.report_id:
+                    ref_set.add(str(a.report_id))
+                if req.include_reliability_references and a.evaluation_id:
+                    ref_set.add(str(a.evaluation_id))
+
+            sorted_refs = tuple(sorted(ref_set))
+
+            # 6. Retention and truncation status
+            if clean_inv:
+                evicted_d = self._evicted_diagnostics_by_inv.get(clean_inv, 0)
+                evicted_a = self._evicted_alerts_by_inv.get(clean_inv, 0)
+            else:
+                evicted_d = self._evicted_diagnostics_count
+                evicted_a = self._evicted_alerts_count
+
+            total_evicted = evicted_d + evicted_a
+            if total_evicted > 0:
+                omitted_reasons["evicted_due_to_retention"] = total_evicted
+
+            if total_evicted > 0:
+                retention_status = "TRUNCATED_TO_CAPACITY"
+                is_truncated = True
+            elif (
+                omitted_reasons.get("diagnostics_limit_exceeded", 0) > 0
+                or omitted_reasons.get("alerts_limit_exceeded", 0) > 0
+            ):
+                retention_status = "TRUNCATED_TO_LIMIT"
+                is_truncated = True
+            elif not final_diags and not final_alerts:
+                retention_status = "NO_DATA"
+                is_truncated = False
+            else:
+                retention_status = "COMPLETE"
+                is_truncated = False
+
+            # 7. Canonical sorting of records for deterministic snapshot
+            sorted_diags = tuple(sorted(final_diags, key=lambda d: (d.timestamp, d.diagnostic_id)))
+            sorted_alerts = tuple(sorted(final_alerts, key=lambda a: (a.timestamp, a.alert_id)))
+
+            # 8. Compute canonical dict, fingerprint, and deterministic export ID
+            can_dict = compute_export_canonical_dict(
+                schema_version=req.schema_version,
+                investigation_id=clean_inv,
+                diagnostics=sorted_diags,
+                alerts=sorted_alerts,
+                source_references=sorted_refs,
+                retention_status=retention_status,
+                is_truncated=is_truncated,
+            )
+            content_fingerprint = compute_export_content_fingerprint(can_dict)
+            created_at = self._time_provider()
+            created_at_iso = format_utc_iso(created_at)
+            export_id = compute_deterministic_export_id(created_at, content_fingerprint)
+
+            export_result = DiagnosticsExportResult(
+                export_id=export_id,
+                request=req,
+                created_at=created_at,
+                created_at_iso=created_at_iso,
+                schema_version=req.schema_version,
+                diagnostics=sorted_diags,
+                alerts=sorted_alerts,
+                record_counts={
+                    "diagnostics": len(sorted_diags),
+                    "alerts": len(sorted_alerts),
+                },
+                source_references=sorted_refs,
+                retention_status=retention_status,
+                is_truncated=is_truncated,
+                content_fingerprint=content_fingerprint,
+                omitted_reasons=dict(omitted_reasons),
+            )
+
+            # 9. In-memory bounded storage & eviction tracking
+            if len(self._exports) == self._exports.maxlen:
+                evicted_exp = self._exports[0]
+                self._evicted_export_ids.append(evicted_exp.export_id)
+                self._exports_by_id.pop(evicted_exp.export_id, None)
+
+            self._exports.append(export_result)
+            self._exports_by_id[export_id] = export_result
+
+            # 10. Persist metadata into StateStore if configured
+            if self._state_store is not None:
+                self._state_store.set(f"historical_review_exports:{export_id}", export_result.to_dict())
+                exp_history = self._state_store.get("historical_review_exports:history", [])
+                if not isinstance(exp_history, list):
+                    exp_history = []
+                updated_exp_history = [export_result.to_dict()] + [
+                    h for h in exp_history if isinstance(h, dict) and h.get("export_id") != export_id
+                ]
+                self._state_store.set(
+                    "historical_review_exports:history",
+                    updated_exp_history[: self._max_exports],
+                )
+
+            # 11. Publish EventBus event
+            if self._event_bus is not None:
+                try:
+                    self._event_bus.publish(
+                        Event.create(
+                            event_type=EventType.HISTORICAL_REVIEW_DIAGNOSTICS_EXPORTED,
+                            source="HistoricalReviewAuditDiagnosticsService",
+                            correlation_id=correlation_id or export_id,
+                            payload={
+                                "export_id": export_id,
+                                "investigation_id": clean_inv,
+                                "record_counts": export_result.record_counts,
+                                "content_fingerprint": content_fingerprint,
+                                "retention_status": retention_status,
+                                "is_truncated": is_truncated,
+                                "schema_version": req.schema_version,
+                                "created_at": created_at,
+                                "created_at_iso": created_at_iso,
+                            },
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to publish HISTORICAL_REVIEW_DIAGNOSTICS_EXPORTED event: %s", exc)
+
+            return export_result
+
+    def get_export(self, export_id: str) -> Optional[DiagnosticsExportResult]:
+        """Retrieve an export snapshot by ID."""
+        clean_id = (export_id or "").strip()
+        if not clean_id or not SAFE_ID_PATTERN.match(clean_id):
+            return None
+
+        with self._lock:
+            if clean_id in self._exports_by_id:
+                return self._exports_by_id[clean_id]
+
+            if self._state_store is not None:
+                item = self._state_store.get(f"historical_review_exports:{clean_id}", None)
+                if isinstance(item, dict):
+                    exp = DiagnosticsExportResult.from_dict(item)
+                    return exp
+
+            return None
+
+    def list_exports(
+        self,
+        investigation_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[DiagnosticsExportResult]:
+        """List historical review diagnostic exports with optional filters and pagination."""
+        clamped_limit = max(1, min(100, limit))
+        clamped_offset = max(0, offset)
+
+        with self._lock:
+            if not self._exports and self._state_store is not None:
+                self.hydrate_from_state_store()
+
+            results = list(self._exports)
+            if investigation_id:
+                clean_inv = investigation_id.strip()
+                results = [e for e in results if e.request.investigation_id == clean_inv]
+
+            results.sort(key=lambda e: e.created_at, reverse=True)
+            return results[clamped_offset : clamped_offset + clamped_limit]
+
+    def reconcile_export(
+        self,
+        export_id: str,
+        correlation_id: Optional[str] = None,
+    ) -> DiagnosticsReconciliationReport:
+        """Reconcile exported diagnostic and alert records against currently active source records."""
+        clean_id = validate_safe_id(export_id, "export_id")
+        recon_ts = self._time_provider()
+        recon_ts_iso = format_utc_iso(recon_ts)
+        recon_id = compute_deterministic_reconciliation_id(clean_id, recon_ts)
+
+        with self._lock:
+            # 1. Retrieve export snapshot
+            export = self.get_export(clean_id)
+            if export is None:
+                is_evicted = self.is_export_evicted(clean_id)
+                status = (
+                    DiagnosticsReconciliationStatus.UNAVAILABLE
+                    if is_evicted
+                    else DiagnosticsReconciliationStatus.UNAVAILABLE
+                )
+                note = (
+                    f"Export record '{clean_id}' was evicted due to retention limits."
+                    if is_evicted
+                    else f"Export record '{clean_id}' not found."
+                )
+                report = DiagnosticsReconciliationReport(
+                    reconciliation_id=recon_id,
+                    export_id=clean_id,
+                    timestamp=recon_ts,
+                    timestamp_iso=recon_ts_iso,
+                    status=status,
+                    total_exported_diagnostics=0,
+                    total_exported_alerts=0,
+                    matched_diagnostics=0,
+                    matched_alerts=0,
+                    discrepancies=(),
+                    source_retention_status="UNKNOWN",
+                    is_source_truncated=False,
+                    fingerprint_verified=False,
+                    summary_notes=note,
+                )
+                self._record_reconciliation_report(report, correlation_id)
+                return report
+
+            # 2. Verify content fingerprint
+            can_dict = compute_export_canonical_dict(
+                schema_version=export.schema_version,
+                investigation_id=export.request.investigation_id,
+                diagnostics=export.diagnostics,
+                alerts=export.alerts,
+                source_references=export.source_references,
+                retention_status=export.retention_status,
+                is_truncated=export.is_truncated,
+            )
+            recalculated_fp = compute_export_content_fingerprint(can_dict)
+            fp_verified = (recalculated_fp == export.content_fingerprint)
+
+            discrepancies: List[DiagnosticsReconciliationDiscrepancy] = []
+            if not fp_verified:
+                discrepancies.append(
+                    DiagnosticsReconciliationDiscrepancy(
+                        discrepancy_type="FINGERPRINT_MISMATCH",
+                        record_id=export.export_id,
+                        investigation_id=export.request.investigation_id,
+                        description="Export content fingerprint mismatch detected during reconciliation.",
+                        expected=export.content_fingerprint,
+                        actual=recalculated_fp,
+                        is_retention_limitation=False,
+                    )
+                )
+
+            # 3. Compare diagnostics
+            seen_diags: Set[str] = set()
+            matched_diags = 0
+            for d in export.diagnostics:
+                if d.diagnostic_id in seen_diags:
+                    discrepancies.append(
+                        DiagnosticsReconciliationDiscrepancy(
+                            discrepancy_type="DUPLICATED_EXPORT_RECORD",
+                            record_id=d.diagnostic_id,
+                            investigation_id=d.investigation_id,
+                            description=f"Export contains duplicate diagnostic ID '{d.diagnostic_id}'.",
+                            expected="UNIQUE_RECORD",
+                            actual="DUPLICATE",
+                            is_retention_limitation=False,
+                        )
+                    )
+                seen_diags.add(d.diagnostic_id)
+
+                if self.is_diagnostic_evicted(d.diagnostic_id):
+                    discrepancies.append(
+                        DiagnosticsReconciliationDiscrepancy(
+                            discrepancy_type="EVICTED_SOURCE_RECORD",
+                            record_id=d.diagnostic_id,
+                            investigation_id=d.investigation_id,
+                            description="Source diagnostic record was evicted due to retention boundary limits.",
+                            expected="ACTIVE_RECORD",
+                            actual="EVICTED",
+                            is_retention_limitation=True,
+                        )
+                    )
+                else:
+                    src_diag = self.get_diagnostic(d.diagnostic_id)
+                    if src_diag is not None:
+                        # Compare essential diagnostic attributes
+                        if (
+                            src_diag.category != d.category
+                            or src_diag.severity != d.severity
+                            or src_diag.evidence_nature != d.evidence_nature
+                            or src_diag.message != d.message
+                            or abs(src_diag.timestamp - d.timestamp) > 1e-6
+                        ):
+                            discrepancies.append(
+                                DiagnosticsReconciliationDiscrepancy(
+                                    discrepancy_type="ALTERED_RECORD",
+                                    record_id=d.diagnostic_id,
+                                    investigation_id=d.investigation_id,
+                                    description="Diagnostic record content differs between export and active source.",
+                                    expected=d.to_dict(),
+                                    actual=src_diag.to_dict(),
+                                    is_retention_limitation=False,
+                                )
+                            )
+                        else:
+                            matched_diags += 1
+                    else:
+                        discrepancies.append(
+                            DiagnosticsReconciliationDiscrepancy(
+                                discrepancy_type="MISSING_SOURCE_RECORD",
+                                record_id=d.diagnostic_id,
+                                investigation_id=d.investigation_id,
+                                description="Exported diagnostic record was not found in active source state.",
+                                expected="ACTIVE_RECORD",
+                                actual="MISSING",
+                                is_retention_limitation=False,
+                            )
+                        )
+
+            # 4. Compare alerts
+            seen_alerts: Set[str] = set()
+            matched_alerts = 0
+            for a in export.alerts:
+                if a.alert_id in seen_alerts:
+                    discrepancies.append(
+                        DiagnosticsReconciliationDiscrepancy(
+                            discrepancy_type="DUPLICATED_EXPORT_RECORD",
+                            record_id=a.alert_id,
+                            investigation_id=a.investigation_id,
+                            description=f"Export contains duplicate alert ID '{a.alert_id}'.",
+                            expected="UNIQUE_RECORD",
+                            actual="DUPLICATE",
+                            is_retention_limitation=False,
+                        )
+                    )
+                seen_alerts.add(a.alert_id)
+
+                if self.is_alert_evicted(a.alert_id):
+                    discrepancies.append(
+                        DiagnosticsReconciliationDiscrepancy(
+                            discrepancy_type="EVICTED_SOURCE_RECORD",
+                            record_id=a.alert_id,
+                            investigation_id=a.investigation_id,
+                            description="Source alert record was evicted due to retention boundary limits.",
+                            expected="ACTIVE_RECORD",
+                            actual="EVICTED",
+                            is_retention_limitation=True,
+                        )
+                    )
+                else:
+                    src_alert = self.get_alert(a.alert_id)
+                    if src_alert is not None:
+                        # Core fields comparison
+                        if (
+                            src_alert.category != a.category
+                            or src_alert.severity != a.severity
+                            or abs(src_alert.timestamp - a.timestamp) > 1e-6
+                        ):
+                            discrepancies.append(
+                                DiagnosticsReconciliationDiscrepancy(
+                                    discrepancy_type="ALTERED_RECORD",
+                                    record_id=a.alert_id,
+                                    investigation_id=a.investigation_id,
+                                    description="Alert core fields differ between export and active source.",
+                                    expected=a.to_dict(),
+                                    actual=src_alert.to_dict(),
+                                    is_retention_limitation=False,
+                                )
+                            )
+                        else:
+                            matched_alerts += 1
+                    else:
+                        discrepancies.append(
+                            DiagnosticsReconciliationDiscrepancy(
+                                discrepancy_type="MISSING_SOURCE_RECORD",
+                                record_id=a.alert_id,
+                                investigation_id=a.investigation_id,
+                                description="Exported alert record was not found in active source state.",
+                                expected="ACTIVE_RECORD",
+                                actual="MISSING",
+                                is_retention_limitation=False,
+                            )
+                        )
+
+            # 5. Check active retention state
+            cur_ret = self.get_retention_status()
+            src_evicted_count = cur_ret.get("total_diagnostics_evicted", 0) + cur_ret.get("total_alerts_evicted", 0)
+            is_src_truncated = src_evicted_count > 0
+            if is_src_truncated:
+                src_ret_status = "TRUNCATED_TO_CAPACITY"
+            elif cur_ret.get("current_diagnostics_count", 0) == 0 and cur_ret.get("current_alerts_count", 0) == 0:
+                src_ret_status = "NO_DATA"
+            else:
+                src_ret_status = "COMPLETE"
+
+            # 6. Evaluate reconciliation status
+            has_corruption = any(not d.is_retention_limitation for d in discrepancies)
+            has_retention_limitation = any(d.is_retention_limitation for d in discrepancies) or export.is_truncated
+
+            if has_corruption:
+                final_status = DiagnosticsReconciliationStatus.MISMATCHED
+            elif has_retention_limitation:
+                final_status = DiagnosticsReconciliationStatus.INCOMPLETE
+            elif (
+                matched_diags == len(export.diagnostics)
+                and matched_alerts == len(export.alerts)
+                and fp_verified
+            ):
+                final_status = DiagnosticsReconciliationStatus.MATCHED
+            else:
+                final_status = DiagnosticsReconciliationStatus.UNVERIFIABLE
+
+            note = (
+                f"Reconciliation {final_status.value}: "
+                f"{matched_diags}/{len(export.diagnostics)} diagnostics matched, "
+                f"{matched_alerts}/{len(export.alerts)} alerts matched. "
+                f"{len(discrepancies)} discrepancy(ies) detected."
+            )
+
+            report = DiagnosticsReconciliationReport(
+                reconciliation_id=recon_id,
+                export_id=clean_id,
+                timestamp=recon_ts,
+                timestamp_iso=recon_ts_iso,
+                status=final_status,
+                total_exported_diagnostics=len(export.diagnostics),
+                total_exported_alerts=len(export.alerts),
+                matched_diagnostics=matched_diags,
+                matched_alerts=matched_alerts,
+                discrepancies=tuple(discrepancies),
+                source_retention_status=src_ret_status,
+                is_source_truncated=is_src_truncated,
+                fingerprint_verified=fp_verified,
+                summary_notes=note,
+            )
+
+            self._record_reconciliation_report(report, correlation_id)
+            return report
+
+    def _record_reconciliation_report(
+        self,
+        report: DiagnosticsReconciliationReport,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        """Store and publish a reconciliation report."""
+        if len(self._reconciliations) == self._reconciliations.maxlen:
+            evicted = self._reconciliations[0]
+            self._evicted_reconciliation_ids.append(evicted.reconciliation_id)
+            self._reconciliations_by_id.pop(evicted.reconciliation_id, None)
+
+        self._reconciliations.append(report)
+        self._reconciliations_by_id[report.reconciliation_id] = report
+
+        if self._state_store is not None:
+            self._state_store.set(f"historical_review_reconciliations:{report.reconciliation_id}", report.to_dict())
+            rec_history = self._state_store.get("historical_review_reconciliations:history", [])
+            if not isinstance(rec_history, list):
+                rec_history = []
+            updated_rec_history = [report.to_dict()] + [
+                h for h in rec_history if isinstance(h, dict) and h.get("reconciliation_id") != report.reconciliation_id
+            ]
+            self._state_store.set(
+                "historical_review_reconciliations:history",
+                updated_rec_history[: self._max_reconciliations],
+            )
+
+        if self._event_bus is not None:
+            try:
+                self._event_bus.publish(
+                    Event.create(
+                        event_type=EventType.HISTORICAL_REVIEW_DIAGNOSTICS_RECONCILED,
+                        source="HistoricalReviewAuditDiagnosticsService",
+                        correlation_id=correlation_id or report.reconciliation_id,
+                        payload={
+                            "reconciliation_id": report.reconciliation_id,
+                            "export_id": report.export_id,
+                            "status": report.status.value,
+                            "matched_diagnostics": report.matched_diagnostics,
+                            "matched_alerts": report.matched_alerts,
+                            "discrepancies_count": len(report.discrepancies),
+                            "fingerprint_verified": report.fingerprint_verified,
+                            "timestamp": report.timestamp,
+                            "timestamp_iso": report.timestamp_iso,
+                        },
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Failed to publish HISTORICAL_REVIEW_DIAGNOSTICS_RECONCILED event: %s", exc)
+
+    def get_reconciliation(self, reconciliation_id: str) -> Optional[DiagnosticsReconciliationReport]:
+        """Retrieve a reconciliation report by ID."""
+        clean_id = (reconciliation_id or "").strip()
+        if not clean_id or not SAFE_ID_PATTERN.match(clean_id):
+            return None
+
+        with self._lock:
+            if clean_id in self._reconciliations_by_id:
+                return self._reconciliations_by_id[clean_id]
+
+            if self._state_store is not None:
+                item = self._state_store.get(f"historical_review_reconciliations:{clean_id}", None)
+                if isinstance(item, dict):
+                    rpt = DiagnosticsReconciliationReport.from_dict(item)
+                    return rpt
+
+            return None
+
+    def list_reconciliations(
+        self,
+        export_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[DiagnosticsReconciliationReport]:
+        """List historical review diagnostic reconciliation reports."""
+        clamped_limit = max(1, min(100, limit))
+        clamped_offset = max(0, offset)
+
+        with self._lock:
+            if not self._reconciliations and self._state_store is not None:
+                self.hydrate_from_state_store()
+
+            results = list(self._reconciliations)
+            if export_id:
+                clean_exp = export_id.strip()
+                results = [r for r in results if r.export_id == clean_exp]
+
+            results.sort(key=lambda r: r.timestamp, reverse=True)
+            return results[clamped_offset : clamped_offset + clamped_limit]
+
+    def is_export_evicted(self, export_id: str) -> bool:
+        """Check if an export record was evicted due to retention bounds."""
+        with self._lock:
+            return export_id in self._evicted_export_ids
+
+    def is_reconciliation_evicted(self, reconciliation_id: str) -> bool:
+        """Check if a reconciliation report was evicted due to retention bounds."""
+        with self._lock:
+            return reconciliation_id in self._evicted_reconciliation_ids
+
     def clear_history(self) -> None:
         """Clear in-memory diagnostics and alerts history (test utility)."""
         with self._lock:
@@ -1260,6 +1965,12 @@ class HistoricalReviewAuditDiagnosticsService:
             self._alerts.clear()
             self._suppressed_alerts.clear()
             self._alerts_by_id.clear()
+            self._exports.clear()
+            self._exports_by_id.clear()
+            self._evicted_export_ids.clear()
+            self._reconciliations.clear()
+            self._reconciliations_by_id.clear()
+            self._evicted_reconciliation_ids.clear()
             self._last_alert_time.clear()
             self._suppressed_counts.clear()
             self._active_failures.clear()
@@ -1276,3 +1987,5 @@ class HistoricalReviewAuditDiagnosticsService:
                 self._state_store.delete("historical_review_diagnostics:active_failures")
                 self._state_store.delete("historical_review_diagnostics:cooldown_state")
                 self._state_store.delete("historical_review_diagnostics:retention_stats")
+                self._state_store.delete("historical_review_exports:history")
+                self._state_store.delete("historical_review_reconciliations:history")
