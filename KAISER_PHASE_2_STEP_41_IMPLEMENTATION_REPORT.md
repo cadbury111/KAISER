@@ -118,3 +118,11 @@ Command: `python run.py`
 ### 7. Known Limitations & Unverified Guarantees
 
 - **Evicted Source Detail Loss**: Once diagnostic or alert records are evicted due to retention capacity constraints, their field-level contents cannot be reconstructed for reconciliation diffs. The system correctly identifies this limitation as `INCOMPLETE` with `is_retention_limitation = True` rather than falsely asserting complete integrity or flagging false data corruption.
+
+---
+
+### 8. Git Commit & Documentation State
+
+- **Pre-commit Hash:** `964601e` (Step 40 final commit)
+- **Step 41 Implementation Commit:** `89cd9ca`
+
