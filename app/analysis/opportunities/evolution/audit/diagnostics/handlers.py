@@ -346,12 +346,14 @@ def register_audit_diagnostics_handlers(
     def handle_get_historical_review_migration_audit_summary(req: OrchestratorRequest) -> Dict[str, Any]:
         """Handler for 'get_historical_review_migration_audit_summary'."""
         params = _extract_params(req)
-        allowed_params = {"correlation_id", "trace_id", "read_only"}
+        allowed_params = {"correlation_id", "trace_id", "read_only", "verify_integrity"}
         unsupported = set(params.keys()) - allowed_params
         if unsupported:
             raise ValidationError(
                 f"Unsupported parameter(s) for migration audit summary: {sorted(unsupported)}"
             )
+        if params.get("verify_integrity"):
+            diagnostics_service.verify_migration_audit_integrity()
         summary = diagnostics_service.get_migration_audit_summary()
         return {
             "status": "success",

@@ -21,13 +21,14 @@ import hashlib
 import json
 import math
 import re
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from app.core.exceptions import ValidationError
 from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
     CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
     SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS,
     LEGACY_UNVERSIONED,
+    MigrationAuditRecord,
     SchemaVersionCompatibilityStatus,
     SchemaVersionError,
     IncompatibleSchemaVersionError,
@@ -37,6 +38,8 @@ from app.analysis.opportunities.evolution.audit.diagnostics.schema import (
     migrate_alert_payload,
     migrate_export_payload,
     migrate_reconciliation_payload,
+    sanitize_audit_details,
+    sanitize_payload_text,
 )
 
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-\.]+$")
@@ -839,3 +842,530 @@ class DiagnosticsReconciliationReport:
             summary_notes=str(migrated_data.get("summary_notes", "")),
             schema_version=str(migrated_data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
         )
+
+
+# ==============================================================================
+# Migration Audit Integrity, Tamper Detection & Reconstruction Consistency (Step 46)
+# ==============================================================================
+
+
+class MigrationAuditIntegrityStatus(str, Enum):
+    """Integrity and verification classification for persisted migration audit state."""
+
+    VERIFIED = "VERIFIED"
+    INCOMPLETE = "INCOMPLETE"
+    CORRUPT_OR_INCONSISTENT = "CORRUPT_OR_INCONSISTENT"
+    UNSUPPORTED_SCHEMA = "UNSUPPORTED_SCHEMA"
+    MISSING_EVIDENCE = "MISSING_EVIDENCE"
+
+
+@dataclass(frozen=True)
+class MigrationAuditDiscrepancy:
+    """Individual discrepancy identified during migration audit integrity verification."""
+
+    discrepancy_type: str
+    field_name: Optional[str] = None
+    description: str = ""
+    expected: Optional[Any] = None
+    actual: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        """Sanitize description, actual, and expected fields to scrub sensitive tokens and paths."""
+        object.__setattr__(self, "description", sanitize_payload_text(self.description))
+        if isinstance(self.actual, str):
+            object.__setattr__(self, "actual", sanitize_payload_text(self.actual))
+        elif isinstance(self.actual, (Mapping, list, tuple)):
+            object.__setattr__(self, "actual", sanitize_audit_details(self.actual))
+        if isinstance(self.expected, str):
+            object.__setattr__(self, "expected", sanitize_payload_text(self.expected))
+        elif isinstance(self.expected, (Mapping, list, tuple)):
+            object.__setattr__(self, "expected", sanitize_audit_details(self.expected))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize discrepancy to dictionary."""
+        return {
+            "discrepancy_type": self.discrepancy_type,
+            "field_name": self.field_name,
+            "description": self.description,
+            "expected": self.expected,
+            "actual": self.actual,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> MigrationAuditDiscrepancy:
+        """Deserialize discrepancy from dictionary."""
+        return cls(
+            discrepancy_type=str(data.get("discrepancy_type", "UNKNOWN")),
+            field_name=str(data.get("field_name")) if data.get("field_name") is not None else None,
+            description=str(data.get("description", "")),
+            expected=data.get("expected"),
+            actual=data.get("actual"),
+        )
+
+
+@dataclass(frozen=True)
+class MigrationAuditIntegrityReport:
+    """Immutable integrity verification report for persisted migration audit state."""
+
+    status: MigrationAuditIntegrityStatus
+    is_verified: bool
+    schema_version: str
+    stored_fingerprint: Optional[str]
+    calculated_fingerprint: Optional[str]
+    discrepancies: Tuple[MigrationAuditDiscrepancy, ...]
+    details: Dict[str, Any]
+    timestamp: float
+    timestamp_iso: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize integrity report to dictionary."""
+        return {
+            "status": self.status.value,
+            "is_verified": self.is_verified,
+            "schema_version": self.schema_version,
+            "stored_fingerprint": self.stored_fingerprint,
+            "calculated_fingerprint": self.calculated_fingerprint,
+            "discrepancies": [d.to_dict() for d in self.discrepancies],
+            "details": dict(self.details),
+            "timestamp": self.timestamp,
+            "timestamp_iso": self.timestamp_iso,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> MigrationAuditIntegrityReport:
+        """Deserialize integrity report from dictionary."""
+        status_val = str(data.get("status", MigrationAuditIntegrityStatus.MISSING_EVIDENCE.value))
+        try:
+            stat_obj = MigrationAuditIntegrityStatus(status_val)
+        except ValueError:
+            stat_obj = MigrationAuditIntegrityStatus.CORRUPT_OR_INCONSISTENT
+
+        disc_list = [
+            MigrationAuditDiscrepancy.from_dict(d)
+            for d in data.get("discrepancies", [])
+            if isinstance(d, Mapping)
+        ]
+        return cls(
+            status=stat_obj,
+            is_verified=bool(data.get("is_verified", False)),
+            schema_version=str(data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
+            stored_fingerprint=str(data.get("stored_fingerprint")) if data.get("stored_fingerprint") is not None else None,
+            calculated_fingerprint=str(data.get("calculated_fingerprint")) if data.get("calculated_fingerprint") is not None else None,
+            discrepancies=tuple(disc_list),
+            details=dict(data.get("details", {})),
+            timestamp=float(data.get("timestamp", 0.0)),
+            timestamp_iso=str(data.get("timestamp_iso", "")),
+        )
+
+
+def compute_migration_audit_canonical_dict(data: Mapping[str, Any]) -> Dict[str, Any]:
+    """Build a deterministically sorted canonical dictionary for migration audit fingerprint generation."""
+    raw_keys = data.get("audited_record_keys", [])
+    if isinstance(raw_keys, (list, tuple, set)):
+        clean_keys = sorted(set(str(k) for k in raw_keys if k is not None))
+    else:
+        clean_keys = []
+
+    clean_recs = []
+    raw_recs = data.get("recent_audit_records", [])
+    if isinstance(raw_recs, (list, tuple)):
+        for r in raw_recs:
+            if isinstance(r, Mapping):
+                details_raw = r.get("details", {})
+                clean_details = (
+                    dict(sorted((str(k), v) for k, v in details_raw.items()))
+                    if isinstance(details_raw, Mapping)
+                    else {}
+                )
+                ts_val = r.get("timestamp", 0.0)
+                safe_ts = 0.0 if (ts_val is None or not isinstance(ts_val, (int, float)) or math.isnan(ts_val) or math.isinf(ts_val)) else float(ts_val)
+                clean_recs.append(
+                    {
+                        "details": clean_details,
+                        "outcome": str(r.get("outcome", "")),
+                        "record_id": str(r["record_id"]) if r.get("record_id") is not None else None,
+                        "record_type": str(r.get("record_type", "")),
+                        "source_version": str(r["source_version"]) if r.get("source_version") is not None else None,
+                        "target_version": str(r.get("target_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
+                        "timestamp": safe_ts,
+                        "timestamp_iso": str(r.get("timestamp_iso", "")),
+                    }
+                )
+    clean_recs.sort(
+        key=lambda x: (
+            x.get("timestamp", 0.0),
+            x.get("record_type", ""),
+            x.get("record_id") or "",
+        )
+    )
+
+    mig_ts = data.get("last_migration_timestamp")
+    safe_mig_ts = None if (mig_ts is None or not isinstance(mig_ts, (int, float)) or math.isnan(mig_ts) or math.isinf(mig_ts)) else float(mig_ts)
+
+    return {
+        "audited_record_keys": clean_keys,
+        "cumulative_direct_compatible_loads": int(
+            data.get("cumulative_direct_compatible_loads", data.get("direct_compatible_loads", 0))
+        ),
+        "cumulative_malformed_records_skipped": int(
+            data.get("cumulative_malformed_records_skipped", data.get("malformed_records_skipped", 0))
+        ),
+        "cumulative_migration_failures": int(
+            data.get("cumulative_migration_failures", data.get("migration_failures", 0))
+        ),
+        "cumulative_successful_migrations": int(
+            data.get("cumulative_successful_migrations", data.get("successful_migrations", 0))
+        ),
+        "cumulative_total_inspected": int(
+            data.get("cumulative_total_inspected", data.get("total_inspected", 0))
+        ),
+        "cumulative_unsupported_future_skipped": int(
+            data.get("cumulative_unsupported_future_skipped", data.get("unsupported_future_skipped", 0))
+        ),
+        "cumulative_unsupported_records_skipped": int(
+            data.get("cumulative_unsupported_records_skipped", data.get("unsupported_records_skipped", 0))
+        ),
+        "last_migration_iso": str(data.get("last_migration_iso")) if data.get("last_migration_iso") is not None else None,
+        "last_migration_timestamp": safe_mig_ts,
+        "recent_audit_records": clean_recs,
+        "schema_version": str(data.get("schema_version", CURRENT_DIAGNOSTICS_SCHEMA_VERSION)),
+    }
+
+
+def compute_migration_audit_fingerprint(canonical_dict: Dict[str, Any]) -> str:
+    """Generate deterministic SHA-256 fingerprint for canonical migration audit representation."""
+    canonical_json = json.dumps(canonical_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def verify_migration_audit_payload(
+    raw_payload: Any,
+    time_provider: Optional[Callable[[], float]] = None,
+) -> MigrationAuditIntegrityReport:
+    """Verify integrity, internal consistency, and content fingerprint of persisted migration audit state."""
+    now = time_provider() if time_provider is not None else datetime.now(timezone.utc).timestamp()
+    iso = format_utc_iso(now)
+
+    # 1. Missing evidence check
+    if raw_payload is None:
+        disc = MigrationAuditDiscrepancy(
+            discrepancy_type="MISSING_EVIDENCE",
+            field_name=None,
+            description="No persisted migration audit payload found in storage.",
+            expected="Mapping",
+            actual=None,
+        )
+        return MigrationAuditIntegrityReport(
+            status=MigrationAuditIntegrityStatus.MISSING_EVIDENCE,
+            is_verified=False,
+            schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+            stored_fingerprint=None,
+            calculated_fingerprint=None,
+            discrepancies=(disc,),
+            details={"discrepancies_count": 1, "discrepancy_types": ["MISSING_EVIDENCE"]},
+            timestamp=now,
+            timestamp_iso=iso,
+        )
+
+    # 2. Non-mapping payload check
+    if not isinstance(raw_payload, Mapping):
+        disc = MigrationAuditDiscrepancy(
+            discrepancy_type="NON_MAPPING_PAYLOAD",
+            field_name=None,
+            description=f"Expected mapping payload for migration audit, got {type(raw_payload).__name__}.",
+            expected="Mapping",
+            actual=type(raw_payload).__name__,
+        )
+        return MigrationAuditIntegrityReport(
+            status=MigrationAuditIntegrityStatus.CORRUPT_OR_INCONSISTENT,
+            is_verified=False,
+            schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+            stored_fingerprint=None,
+            calculated_fingerprint=None,
+            discrepancies=(disc,),
+            details={"discrepancies_count": 1, "discrepancy_types": ["NON_MAPPING_PAYLOAD"]},
+            timestamp=now,
+            timestamp_iso=iso,
+        )
+
+    discrepancies: List[MigrationAuditDiscrepancy] = []
+
+    # 3. Schema version verification
+    raw_ver = raw_payload.get("schema_version")
+    ver_status, ver_str = detect_and_validate_schema_version(raw_ver)
+    if ver_status == SchemaVersionCompatibilityStatus.MALFORMED:
+        discrepancies.append(
+            MigrationAuditDiscrepancy(
+                discrepancy_type="MALFORMED_SCHEMA_VERSION",
+                field_name="schema_version",
+                description=f"Malformed schema_version '{raw_ver}' in migration audit payload.",
+                expected=f"Valid SemVer in {sorted(SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS)}",
+                actual=str(raw_ver),
+            )
+        )
+    elif ver_status == SchemaVersionCompatibilityStatus.UNSUPPORTED_FUTURE:
+        discrepancies.append(
+            MigrationAuditDiscrepancy(
+                discrepancy_type="UNSUPPORTED_FUTURE_SCHEMA",
+                field_name="schema_version",
+                description=f"Unsupported future schema_version '{ver_str}' in migration audit payload.",
+                expected=f"Supported version in {sorted(SUPPORTED_DIAGNOSTICS_SCHEMA_VERSIONS)}",
+                actual=str(ver_str),
+            )
+        )
+
+    # 4. Check counter fields and mathematical consistency
+    counter_fields = [
+        "cumulative_successful_migrations",
+        "cumulative_direct_compatible_loads",
+        "cumulative_unsupported_future_skipped",
+        "cumulative_malformed_records_skipped",
+        "cumulative_migration_failures",
+    ]
+    has_any_counter = any(k in raw_payload or k.replace("cumulative_", "") in raw_payload for k in counter_fields)
+    has_total = ("cumulative_total_inspected" in raw_payload) or ("total_inspected" in raw_payload)
+    if not has_any_counter and not has_total:
+        discrepancies.append(
+            MigrationAuditDiscrepancy(
+                discrepancy_type="MISSING_REQUIRED_FIELD",
+                field_name="cumulative_counters",
+                description="Persisted migration audit payload is missing cumulative counter fields.",
+                expected="Cumulative counters dictionary",
+                actual=None,
+            )
+        )
+
+    def _parse_counter(name: str) -> Optional[int]:
+        val = raw_payload.get(name)
+        if val is None:
+            val = raw_payload.get(name.replace("cumulative_", ""))
+        if val is None:
+            return 0
+        if not isinstance(val, (int, float)) or isinstance(val, bool) or math.isnan(val) or math.isinf(val):
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="INVALID_COUNTER_TYPE",
+                    field_name=name,
+                    description=f"Counter '{name}' has non-numeric value '{val}'.",
+                    expected="int >= 0",
+                    actual=type(val).__name__,
+                )
+            )
+            return None
+        int_val = int(val)
+        if int_val < 0:
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="NEGATIVE_COUNTER",
+                    field_name=name,
+                    description=f"Counter '{name}' has negative value {int_val}.",
+                    expected=">= 0",
+                    actual=int_val,
+                )
+            )
+        return int_val
+
+    succ = _parse_counter("cumulative_successful_migrations")
+    direct = _parse_counter("cumulative_direct_compatible_loads")
+    unsupp = _parse_counter("cumulative_unsupported_future_skipped")
+    malf = _parse_counter("cumulative_malformed_records_skipped")
+    fail = _parse_counter("cumulative_migration_failures")
+    tot = _parse_counter("cumulative_total_inspected")
+    _ = _parse_counter("cumulative_unsupported_records_skipped")
+
+    if all(x is not None for x in (succ, direct, unsupp, malf, fail, tot)):
+        expected_total = (succ or 0) + (direct or 0) + (unsupp or 0) + (malf or 0) + (fail or 0)
+        if tot != expected_total:
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="COUNTER_SUM_MISMATCH",
+                    field_name="cumulative_total_inspected",
+                    description=(
+                        f"Cumulative total inspected ({tot}) does not equal sum of components "
+                        f"({expected_total} = succ:{succ} + direct:{direct} + unsupp:{unsupp} + malf:{malf} + fail:{fail})."
+                    ),
+                    expected=expected_total,
+                    actual=tot,
+                )
+            )
+
+    # 5. Validate audited_record_keys
+    keys = raw_payload.get("audited_record_keys")
+    if keys is not None:
+        if not isinstance(keys, (list, tuple, set)):
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="INVALID_AUDITED_RECORD_KEYS",
+                    field_name="audited_record_keys",
+                    description=f"audited_record_keys must be a sequence, got {type(keys).__name__}.",
+                    expected="list or sequence of strings",
+                    actual=type(keys).__name__,
+                )
+            )
+        else:
+            for idx, k in enumerate(keys):
+                if not isinstance(k, str) or not k.strip():
+                    discrepancies.append(
+                        MigrationAuditDiscrepancy(
+                            discrepancy_type="INVALID_AUDIT_KEY",
+                            field_name=f"audited_record_keys[{idx}]",
+                            description=f"Invalid audit key at index {idx}: '{k}'.",
+                            expected="Non-empty string",
+                            actual=str(k),
+                        )
+                    )
+                    break
+
+    # 6. Validate recent_audit_records
+    recs = raw_payload.get("recent_audit_records")
+    if recs is not None:
+        if not isinstance(recs, (list, tuple)):
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="INVALID_RECENT_AUDIT_RECORDS",
+                    field_name="recent_audit_records",
+                    description=f"recent_audit_records must be a sequence, got {type(recs).__name__}.",
+                    expected="list of audit records",
+                    actual=type(recs).__name__,
+                )
+            )
+        else:
+            if tot is not None and len(recs) > tot:
+                discrepancies.append(
+                    MigrationAuditDiscrepancy(
+                        discrepancy_type="AUDIT_RECORD_COUNT_EXCEEDS_TOTAL",
+                        field_name="recent_audit_records",
+                        description=f"Recent audit records count ({len(recs)}) exceeds cumulative total inspected ({tot}).",
+                        expected=f"<= {tot}",
+                        actual=len(recs),
+                    )
+                )
+
+            seen_audit_sigs = set()
+            for idx, r in enumerate(recs):
+                if not isinstance(r, Mapping):
+                    discrepancies.append(
+                        MigrationAuditDiscrepancy(
+                            discrepancy_type="MALFORMED_AUDIT_RECORD",
+                            field_name=f"recent_audit_records[{idx}]",
+                            description=f"Audit record at index {idx} is not a mapping.",
+                            expected="Mapping",
+                            actual=type(r).__name__,
+                        )
+                    )
+                    break
+                else:
+                    try:
+                        rec_obj = MigrationAuditRecord.from_dict(r)
+                        sig = (rec_obj.record_type, rec_obj.record_id, rec_obj.timestamp)
+                        if rec_obj.record_id is not None and sig in seen_audit_sigs:
+                            discrepancies.append(
+                                MigrationAuditDiscrepancy(
+                                    discrepancy_type="DUPLICATE_AUDIT_RECORD",
+                                    field_name=f"recent_audit_records[{idx}]",
+                                    description=f"Duplicate audit record in history: id='{rec_obj.record_id}', type='{rec_obj.record_type}', ts={rec_obj.timestamp}.",
+                                    expected="Unique audit record entry",
+                                    actual=str(rec_obj.record_id),
+                                )
+                            )
+                        seen_audit_sigs.add(sig)
+                    except Exception as exc:
+                        discrepancies.append(
+                            MigrationAuditDiscrepancy(
+                                discrepancy_type="MALFORMED_AUDIT_RECORD",
+                                field_name=f"recent_audit_records[{idx}]",
+                                description=f"Audit record deserialization error at index {idx}: {exc}",
+                                expected="Valid MigrationAuditRecord",
+                                actual=str(exc),
+                            )
+                        )
+
+    # 7. Fingerprint verification
+    canonical_dict = compute_migration_audit_canonical_dict(raw_payload)
+    calculated_fp = compute_migration_audit_fingerprint(canonical_dict)
+    stored_fp = raw_payload.get("content_fingerprint")
+
+    if stored_fp is None:
+        discrepancies.append(
+            MigrationAuditDiscrepancy(
+                discrepancy_type="MISSING_FINGERPRINT",
+                field_name="content_fingerprint",
+                description="Persisted migration audit payload does not contain a content_fingerprint.",
+                expected="SHA-256 hex string",
+                actual=None,
+            )
+        )
+    else:
+        if not isinstance(stored_fp, str) or len(stored_fp) != 64:
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="INVALID_FINGERPRINT_FORMAT",
+                    field_name="content_fingerprint",
+                    description=f"Stored content_fingerprint is not a valid 64-char hex SHA-256 string: '{stored_fp}'.",
+                    expected="64-char hex string",
+                    actual=str(stored_fp),
+                )
+            )
+        elif stored_fp != calculated_fp:
+            discrepancies.append(
+                MigrationAuditDiscrepancy(
+                    discrepancy_type="FINGERPRINT_MISMATCH",
+                    field_name="content_fingerprint",
+                    description="Persisted content_fingerprint does not match recalculated canonical SHA-256.",
+                    expected=str(stored_fp),
+                    actual=calculated_fp,
+                )
+            )
+
+    # 8. Determine final status
+    has_unsupported_schema = any(
+        d.discrepancy_type in ("MALFORMED_SCHEMA_VERSION", "UNSUPPORTED_FUTURE_SCHEMA")
+        for d in discrepancies
+    )
+    has_corruption = any(
+        d.discrepancy_type in (
+            "FINGERPRINT_MISMATCH",
+            "COUNTER_SUM_MISMATCH",
+            "NEGATIVE_COUNTER",
+            "INVALID_COUNTER_TYPE",
+            "INVALID_AUDITED_RECORD_KEYS",
+            "INVALID_AUDIT_KEY",
+            "INVALID_RECENT_AUDIT_RECORDS",
+            "AUDIT_RECORD_COUNT_EXCEEDS_TOTAL",
+            "MALFORMED_AUDIT_RECORD",
+            "DUPLICATE_AUDIT_RECORD",
+            "INVALID_FINGERPRINT_FORMAT",
+        )
+        for d in discrepancies
+    )
+    has_incomplete = any(
+        d.discrepancy_type in ("MISSING_FINGERPRINT", "MISSING_REQUIRED_FIELD")
+        for d in discrepancies
+    )
+
+    if has_unsupported_schema:
+        status = MigrationAuditIntegrityStatus.UNSUPPORTED_SCHEMA
+    elif has_corruption:
+        status = MigrationAuditIntegrityStatus.CORRUPT_OR_INCONSISTENT
+    elif has_incomplete:
+        status = MigrationAuditIntegrityStatus.INCOMPLETE
+    else:
+        status = MigrationAuditIntegrityStatus.VERIFIED
+
+    is_verified = (status == MigrationAuditIntegrityStatus.VERIFIED)
+
+    return MigrationAuditIntegrityReport(
+        status=status,
+        is_verified=is_verified,
+        schema_version=ver_str or CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+        stored_fingerprint=str(stored_fp) if stored_fp is not None else None,
+        calculated_fingerprint=calculated_fp,
+        discrepancies=tuple(discrepancies),
+        details={
+            "discrepancies_count": len(discrepancies),
+            "discrepancy_types": [d.discrepancy_type for d in discrepancies],
+        },
+        timestamp=now,
+        timestamp_iso=iso,
+    )
+

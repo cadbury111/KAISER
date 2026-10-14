@@ -47,9 +47,15 @@ from app.analysis.opportunities.evolution.audit.diagnostics.models import (
     compute_deterministic_reconciliation_id,
     compute_export_canonical_dict,
     compute_export_content_fingerprint,
+    compute_migration_audit_canonical_dict,
+    compute_migration_audit_fingerprint,
     format_utc_iso,
+    MigrationAuditDiscrepancy,
+    MigrationAuditIntegrityReport,
+    MigrationAuditIntegrityStatus,
     sanitize_text,
     validate_safe_id,
+    verify_migration_audit_payload,
 )
 from app.core.events.bus import EventBus
 from app.core.events.event import Event, EventType
@@ -188,6 +194,10 @@ class HistoricalReviewAuditDiagnosticsService:
         self._current_hydration_failures: int = 0
         self._current_hydration_re_read: int = 0
 
+        # Migration audit integrity and tamper tracking (Phase 2, Step 46)
+        self._last_audit_integrity_report: Optional[MigrationAuditIntegrityReport] = None
+        self._stored_migration_audit_corrupted: bool = False
+
         # Hydrate from StateStore if explicitly requested
         if self._state_store is not None and auto_hydrate:
             self.hydrate_from_state_store()
@@ -261,10 +271,17 @@ class HistoricalReviewAuditDiagnosticsService:
             self._current_hydration_failures += 1
 
     def _persist_migration_audit(self) -> None:
-        """Persist cumulative migration audit summary to StateStore."""
+        """Persist cumulative migration audit summary to StateStore with canonical SHA-256 fingerprint."""
         if self._state_store is None:
             return
         with self._lock:
+            # Preserve corrupt or unsupported stored audit payload
+            if self._stored_migration_audit_corrupted:
+                logger.warning(
+                    "Preserving corrupted or unsupported migration audit state in StateStore; skipping overwrite."
+                )
+                return
+
             total = (
                 self._successful_migrations_count
                 + self._direct_compatible_count
@@ -277,7 +294,7 @@ class HistoricalReviewAuditDiagnosticsService:
                 if self._last_migration_timestamp
                 else None
             )
-            audit_payload = {
+            audit_data = {
                 "schema_version": CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
                 "cumulative_total_inspected": total,
                 "cumulative_successful_migrations": self._successful_migrations_count,
@@ -293,11 +310,31 @@ class HistoricalReviewAuditDiagnosticsService:
                     r.to_dict() for r in list(self._migration_audit_records)[-50:]
                 ],
             }
+            # Compute canonical dictionary and deterministic SHA-256 content fingerprint
+            can_dict = compute_migration_audit_canonical_dict(audit_data)
+            fp = compute_migration_audit_fingerprint(can_dict)
+            audit_payload = {
+                **audit_data,
+                "content_fingerprint": fp,
+            }
             try:
                 self._state_store.set(
                     "historical_review_diagnostics:migration_audit",
                     audit_payload,
                 )
+                now = self._time_provider()
+                self._last_audit_integrity_report = MigrationAuditIntegrityReport(
+                    status=MigrationAuditIntegrityStatus.VERIFIED,
+                    is_verified=True,
+                    schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                    stored_fingerprint=fp,
+                    calculated_fingerprint=fp,
+                    discrepancies=(),
+                    details={"source": "persisted_write", "discrepancies_count": 0},
+                    timestamp=now,
+                    timestamp_iso=format_utc_iso(now),
+                )
+                self._stored_migration_audit_corrupted = False
             except Exception as exc:
                 logger.warning("Could not persist migration audit state to StateStore: %s", exc)
 
@@ -546,87 +583,105 @@ class HistoricalReviewAuditDiagnosticsService:
             self._current_hydration_failures = 0
             self._current_hydration_re_read = 0
 
-            # 0. Hydrate persisted migration audit state if available
+            # 0. Hydrate persisted migration audit state if available with integrity validation
             stored_audit = self._state_store.get(
                 "historical_review_diagnostics:migration_audit", None
             )
-            if isinstance(stored_audit, Mapping):
-                total_in_mem = (
-                    self._successful_migrations_count
-                    + self._direct_compatible_count
-                    + self._unsupported_future_count
-                    + self._malformed_count
-                    + self._migration_failures_count
+            report = verify_migration_audit_payload(stored_audit, time_provider=self._time_provider)
+            self._last_audit_integrity_report = report
+
+            if report.status in (
+                MigrationAuditIntegrityStatus.CORRUPT_OR_INCONSISTENT,
+                MigrationAuditIntegrityStatus.UNSUPPORTED_SCHEMA,
+            ):
+                self._stored_migration_audit_corrupted = True
+                logger.warning(
+                    "Persisted migration audit state has integrity status '%s' (discrepancies: %d). Skipping counter restoration.",
+                    report.status.value,
+                    len(report.discrepancies),
                 )
-                if total_in_mem == 0:
-                    self._successful_migrations_count = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_successful_migrations",
-                                stored_audit.get("successful_migrations", 0),
-                            )
-                        ),
+            elif report.status in (
+                MigrationAuditIntegrityStatus.VERIFIED,
+                MigrationAuditIntegrityStatus.INCOMPLETE,
+            ):
+                self._stored_migration_audit_corrupted = False
+                if isinstance(stored_audit, Mapping):
+                    total_in_mem = (
+                        self._successful_migrations_count
+                        + self._direct_compatible_count
+                        + self._unsupported_future_count
+                        + self._malformed_count
+                        + self._migration_failures_count
                     )
-                    self._direct_compatible_count = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_direct_compatible_loads",
-                                stored_audit.get("direct_compatible_loads", 0),
-                            )
-                        ),
-                    )
-                    self._unsupported_future_count = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_unsupported_future_skipped",
-                                stored_audit.get("unsupported_future_skipped", 0),
-                            )
-                        ),
-                    )
-                    self._malformed_count = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_malformed_records_skipped",
-                                stored_audit.get("malformed_records_skipped", 0),
-                            )
-                        ),
-                    )
-                    self._migration_failures_count = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_migration_failures",
-                                stored_audit.get("migration_failures", 0),
-                            )
-                        ),
-                    )
-                    self._unsupported_records_skipped = max(
-                        0,
-                        int(
-                            stored_audit.get(
-                                "cumulative_unsupported_records_skipped",
-                                stored_audit.get("unsupported_records_skipped", 0),
-                            )
-                        ),
-                    )
-                    self._last_migration_timestamp = stored_audit.get("last_migration_timestamp")
-                    stored_keys = stored_audit.get("audited_record_keys", [])
-                    if isinstance(stored_keys, Sequence):
-                        self._audited_record_keys.update(str(k) for k in stored_keys)
-                    stored_recs = stored_audit.get("recent_audit_records", [])
-                    if isinstance(stored_recs, Sequence) and not self._migration_audit_records:
-                        for r_dict in stored_recs:
-                            if isinstance(r_dict, Mapping):
-                                try:
-                                    self._migration_audit_records.append(
-                                        MigrationAuditRecord.from_dict(r_dict)
-                                    )
-                                except Exception:
-                                    pass
+                    if total_in_mem == 0:
+                        self._successful_migrations_count = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_successful_migrations",
+                                    stored_audit.get("successful_migrations", 0),
+                                )
+                            ),
+                        )
+                        self._direct_compatible_count = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_direct_compatible_loads",
+                                    stored_audit.get("direct_compatible_loads", 0),
+                                )
+                            ),
+                        )
+                        self._unsupported_future_count = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_unsupported_future_skipped",
+                                    stored_audit.get("unsupported_future_skipped", 0),
+                                )
+                            ),
+                        )
+                        self._malformed_count = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_malformed_records_skipped",
+                                    stored_audit.get("malformed_records_skipped", 0),
+                                )
+                            ),
+                        )
+                        self._migration_failures_count = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_migration_failures",
+                                    stored_audit.get("migration_failures", 0),
+                                )
+                            ),
+                        )
+                        self._unsupported_records_skipped = max(
+                            0,
+                            int(
+                                stored_audit.get(
+                                    "cumulative_unsupported_records_skipped",
+                                    stored_audit.get("unsupported_records_skipped", 0),
+                                )
+                            ),
+                        )
+                        self._last_migration_timestamp = stored_audit.get("last_migration_timestamp")
+                        stored_keys = stored_audit.get("audited_record_keys", [])
+                        if isinstance(stored_keys, Sequence):
+                            self._audited_record_keys.update(str(k) for k in stored_keys if isinstance(k, str) and k.strip())
+                        stored_recs = stored_audit.get("recent_audit_records", [])
+                        if isinstance(stored_recs, Sequence) and not self._migration_audit_records:
+                            for r_dict in stored_recs:
+                                if isinstance(r_dict, Mapping):
+                                    try:
+                                        self._migration_audit_records.append(
+                                            MigrationAuditRecord.from_dict(r_dict)
+                                        )
+                                    except Exception:
+                                        pass
 
             # 1. Hydrate diagnostics history
             stored_diags = self._state_store.get("historical_review_diagnostics:history", [])
@@ -2800,6 +2855,8 @@ class HistoricalReviewAuditDiagnosticsService:
             self._evicted_alerts_by_inv.clear()
             self._evicted_diagnostic_ids.clear()
             self._evicted_alert_ids.clear()
+            self._last_audit_integrity_report = None
+            self._stored_migration_audit_corrupted = False
             if self._state_store is not None:
                 self._state_store.delete("historical_review_diagnostics:history")
                 self._state_store.delete("historical_review_alerts:history")
@@ -2810,6 +2867,22 @@ class HistoricalReviewAuditDiagnosticsService:
                 self._state_store.delete("historical_review_exports:history")
                 self._state_store.delete("historical_review_reconciliations:history")
                 self._state_store.delete("historical_review_diagnostics:migration_audit")
+
+    def verify_migration_audit_integrity(
+        self, payload: Optional[Mapping[str, Any]] = None
+    ) -> MigrationAuditIntegrityReport:
+        """Verify the integrity, counters, and content fingerprint of migration audit persistence."""
+        with self._lock:
+            if payload is not None:
+                return verify_migration_audit_payload(payload, time_provider=self._time_provider)
+            if self._state_store is not None:
+                stored = self._state_store.get("historical_review_diagnostics:migration_audit", None)
+                report = verify_migration_audit_payload(stored, time_provider=self._time_provider)
+                self._last_audit_integrity_report = report
+                return report
+            # In-memory only without StateStore
+            current_summary = self.get_migration_audit_summary()
+            return verify_migration_audit_payload(current_summary, time_provider=self._time_provider)
 
     def get_migration_audit_summary(self) -> Dict[str, Any]:
         """Return read-only audit summary of schema migration and hydration activity."""
@@ -2826,6 +2899,26 @@ class HistoricalReviewAuditDiagnosticsService:
                 if self._last_migration_timestamp
                 else None
             )
+
+            # Determine integrity status
+            if self._last_audit_integrity_report is not None:
+                int_rep = self._last_audit_integrity_report
+            elif self._state_store is not None:
+                stored = self._state_store.get("historical_review_diagnostics:migration_audit", None)
+                int_rep = verify_migration_audit_payload(stored, time_provider=self._time_provider)
+            else:
+                int_rep = MigrationAuditIntegrityReport(
+                    status=MigrationAuditIntegrityStatus.MISSING_EVIDENCE if total == 0 else MigrationAuditIntegrityStatus.VERIFIED,
+                    is_verified=(total > 0),
+                    schema_version=CURRENT_DIAGNOSTICS_SCHEMA_VERSION,
+                    stored_fingerprint=None,
+                    calculated_fingerprint=None,
+                    discrepancies=(),
+                    details={"note": "In-memory diagnostics service without StateStore."},
+                    timestamp=self._time_provider(),
+                    timestamp_iso=format_utc_iso(self._time_provider()),
+                )
+
             return {
                 "total_inspected": total,
                 "successful_migrations": self._successful_migrations_count,
@@ -2865,5 +2958,15 @@ class HistoricalReviewAuditDiagnosticsService:
                     "Multi-key transactional rollback is not architecturally supported; "
                     "persistence safety is guaranteed via in-memory non-destructive pre-validation "
                     "prior to single-key write."
+                ),
+                # Integrity & Tamper Detection (Step 46)
+                "integrity_status": int_rep.status.value,
+                "integrity_verified": int_rep.is_verified,
+                "content_fingerprint": int_rep.stored_fingerprint or int_rep.calculated_fingerprint,
+                "integrity_discrepancies_count": len(int_rep.discrepancies),
+                "integrity_report": int_rep.to_dict(),
+                "tamper_detection_limitations": (
+                    "Unkeyed SHA-256 fingerprint detects corruptions, unintentional mutations, and inconsistent tampering; "
+                    "cryptographic non-repudiation against an attacker with full StateStore write privileges requires an external key/signature trust boundary."
                 ),
             }
