@@ -102,6 +102,11 @@ from app.voice.stt_models import (
     STTModelNotFoundError,
     STTTimeoutError,
 )
+from app.voice.intent import (
+    VoiceCommandIntent,
+    VoiceCommandIntentResolver,
+    VoiceIntentType,
+)
 from app.voice.tts_models import (
     Pyttsx3Config,
     TTSDependencyError,
@@ -115,6 +120,11 @@ from app.voice.tts_models import (
 )
 
 __all__ = [
+    # Voice Intent & Safety Boundary
+    "VoiceIntentType",
+    "VoiceCommandIntent",
+    "VoiceCommandIntentResolver",
+
     # Voice Models
     "VoiceInput",
     "VoiceOutput",

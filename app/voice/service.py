@@ -44,6 +44,11 @@ from app.voice.models import (
     VoiceTurnResult,
     VoiceTurnStatus,
 )
+from app.voice.intent import (
+    VoiceCommandIntent,
+    VoiceCommandIntentResolver,
+    VoiceIntentType,
+)
 from app.voice.stt_models import (
     STTAudioConversionError,
     STTAudioValidationError,
@@ -82,6 +87,7 @@ class VoiceService:
         event_bus: Optional[EventBus] = None,
         state_store: Optional[StateStore] = None,
         session_manager: Optional[VoiceSessionManager] = None,
+        intent_resolver: Optional[VoiceCommandIntentResolver] = None,
         name: str = "voice_service",
     ) -> None:
         if orchestrator is None:
@@ -95,6 +101,7 @@ class VoiceService:
         self.event_bus = event_bus
         self.state_store = state_store
         self.session_manager = session_manager or VoiceSessionManager(max_sessions=100)
+        self.intent_resolver = intent_resolver or VoiceCommandIntentResolver(orchestrator=orchestrator)
 
         # Initialize audio capture layer (modular and isolated)
         self.audio_capture = audio_capture or AudioCaptureService(
@@ -888,7 +895,7 @@ class VoiceService:
                 err_str = voice_output.error or "Voice command execution failed."
                 turn_status = (
                     VoiceTurnStatus.COMMAND_REJECTED
-                    if "Unknown command" in err_str
+                    if "Unknown command" in err_str or bool(voice_output.metadata.get("prohibited_trading"))
                     else VoiceTurnStatus.FAILED
                 )
                 cmd_status = "rejected" if turn_status == VoiceTurnStatus.COMMAND_REJECTED else "failed"
@@ -1175,19 +1182,65 @@ class VoiceService:
             },
         )
 
-        # 4. Extract command keyword deterministically from text
-        # (Converts 'system status' -> 'system_status', leaves 'status' as 'status')
-        raw_text = inp.text.strip().lower()
-        command = raw_text.replace(" ", "_")
+        # 4. Resolve command intent deterministically
+        intent = self.intent_resolver.resolve(text=inp.text, language=inp.language)
 
-        # 5. Build OrchestratorRequest
+        # 4a. Prohibited Trading Directives Check (Strict Safety Invariant)
+        if intent.is_prohibited_trading:
+            logger.warning("Rejecting prohibited voice trading directive: '%s'", inp.text)
+            self._publish_event(
+                EventType.VOICE_INTENT_REJECTED,
+                correlation_id=resolved_corr_id,
+                payload={
+                    "session_id": session.session_id,
+                    "input_id": inp.input_id,
+                    "reason": intent.rejection_reason,
+                    "raw_text": inp.text,
+                    "matched_pattern": intent.matched_pattern,
+                },
+            )
+            with self._lock:
+                self._counters["failed"] += 1
+            self._sync_state_store(active_session=session)
+            return VoiceOutput.failure(
+                error=intent.rejection_reason or "Unknown command: Voice trade execution and trading recommendations are strictly prohibited by KAISER safety invariants.",
+                session_id=session.session_id,
+                language=inp.language,
+                metadata={"prohibited_trading": True, "intent": intent.to_dict()},
+            )
+
+        # 4b. Command Resolution & Event Notification
+        if intent.intent_type != VoiceIntentType.UNKNOWN:
+            command = intent.command
+            self._publish_event(
+                EventType.VOICE_INTENT_RESOLVED,
+                correlation_id=resolved_corr_id,
+                payload={
+                    "session_id": session.session_id,
+                    "input_id": inp.input_id,
+                    "intent_type": intent.intent_type.value,
+                    "command": command,
+                    "confidence": intent.confidence,
+                    "parameters": intent.parameters,
+                    "language": intent.language,
+                },
+            )
+        else:
+            # Fallback: legacy conversion for unmapped input
+            raw_text = inp.text.strip().lower()
+            command = raw_text.replace(" ", "_")
+
+        # 5. Build OrchestratorRequest with extracted parameters and safe context
         safe_context = sanitize_container(dict(inp.metadata))
         safe_context["session_id"] = inp.session_id
         safe_context["voice_input_id"] = inp.input_id
         safe_context["raw_voice_text"] = inp.text
+        if intent.parameters:
+            safe_context.update(intent.parameters)
 
         orch_request = OrchestratorRequest.create(
             command=command,
+            parameters=dict(intent.parameters) if intent.parameters else None,
             correlation_id=resolved_corr_id,
             input_language=inp.language,
             source="voice",
