@@ -1,0 +1,18 @@
+# ==============================================================================
+# KAISER — Optional Offline Speech-to-Text (STT) Dependencies
+# ==============================================================================
+# Install with: pip install -r requirements-stt.txt
+#
+# PREREQUISITES & OFFLINE MODEL WEIGHT REQUIREMENTS:
+# 1. Installing this package provides the CTranslate2-backed faster-whisper engine.
+# 2. In strict compliance with KAISER safety invariants, automatic runtime
+#    downloads of model weights over the internet are disabled.
+# 3. Model weights must be downloaded manually and placed in the local directory:
+#      data/models/whisper/
+# 4. In .env, configure:
+#      STT_PROVIDER=local_whisper
+#      STT_MODEL_PATH=data/models/whisper/whisper-base
+#      STT_MODEL_ID=whisper-base
+# ==============================================================================
+
+faster-whisper>=1.0.0,<2.0.0

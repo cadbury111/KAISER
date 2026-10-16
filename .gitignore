@@ -68,6 +68,9 @@ data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+data/models/**
+!data/models/**/
+!data/models/**/.gitkeep
 *.db
 *.db-shm
 *.db-wal
@@ -76,6 +79,7 @@ data/processed/*
 data/*.db
 data/*.db-shm
 data/*.db-wal
+
 
 # IDEs & OS specific
 .idea/

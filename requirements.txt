@@ -1,3 +1,30 @@
-# KAISER Foundation Dependencies
-# Minimal foundation dependencies — leverages Python standard library
-pytest>=8.0.0
+# ==============================================================================
+# KAISER — Production Runtime Dependencies
+# ==============================================================================
+# Target Platform: Windows / Linux / macOS (x86_64 / arm64)
+# Supported Python: >=3.11, <3.13
+#
+# These are the direct runtime dependencies required by KAISER for core
+# market analysis, local audio capture/playback, and offline speech synthesis.
+#
+# For running automated tests, install testing dependencies:
+#   pip install -r requirements-dev.txt
+#
+# For optional offline Speech-to-Text (faster-whisper), install:
+#   pip install -r requirements-stt.txt
+# ==============================================================================
+
+# Core numerical & audio array processing (used in audio_converter, audio_playback)
+numpy>=1.24.0,<2.0.0
+
+# Signal processing & audio resampling (used in audio_converter)
+scipy>=1.11.0,<1.15.0
+
+# Hardware audio capture & playback via PortAudio (used in audio_devices, audio_capture)
+sounddevice>=0.4.6,<1.0.0
+
+# Offline Text-to-Speech synthesis (used in local_pyttsx3)
+pyttsx3>=2.90,<3.0.0
+
+# Windows COM subsystem interface for SAPI5 TTS engine
+pywin32>=306; sys_platform == "win32"

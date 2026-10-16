@@ -100,7 +100,10 @@ kaiser/
 ├── .env.example                  # Environment configuration template
 ├── .gitignore                    # Git ignore specifications
 ├── README.md                     # Architecture documentation
-├── requirements.txt              # Minimal foundation dependencies
+├── pyproject.toml                # Project packaging specification (PEP 517/518/621)
+├── requirements.txt              # Core production runtime dependencies
+├── requirements-dev.txt          # Development & test dependencies
+├── requirements-stt.txt          # Optional offline Speech-to-Text dependencies
 └── run.py                        # Application entry point
 ```
 
@@ -120,9 +123,36 @@ cp .env.example .env
 Default configuration values use safe local/mock providers and keep all execution engines locked.
 
 ### 2. Install Dependencies
+
+#### Core Production Runtime
+Install direct runtime dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+
+#### Development & Testing
+To run the automated test suite, install development dependencies:
+```bash
+pip install -r requirements-dev.txt
+```
+
+#### Optional Offline Speech-to-Text (STT)
+To enable offline local speech transcription using `faster-whisper`:
+1. Install the STT requirements:
+   ```bash
+   pip install -r requirements-stt.txt
+   ```
+2. Download CTranslate2-compatible Whisper weights (e.g. `whisper-base`) manually and place them in:
+   ```text
+   data/models/whisper/whisper-base/
+   ```
+3. Enable in `.env`:
+   ```bash
+   STT_PROVIDER=local_whisper
+   STT_MODEL_PATH=data/models/whisper/whisper-base
+   STT_MODEL_ID=whisper-base
+   ```
+*(Note: Per KAISER safety invariants, automatic internet model weight downloads are strictly disabled).*
 
 ### 3. Bootstrap the System
 Run the KAISER entry point:
@@ -151,12 +181,6 @@ Execution engine: locked
 
 Execute the deterministic test suite:
 ```bash
-python -m pytest -v
+python -m pytest -q
 ```
 
-All 39 foundation tests verify:
-- Configuration parsing and validation
-- Exception hierarchy integrity
-- Centralized logger configuration and file output
-- Bootstrap lifecycle and invariant enforcement
-- CLI entrypoint execution
