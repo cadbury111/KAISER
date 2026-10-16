@@ -791,6 +791,7 @@ class TestVoiceTurnSafetyAndTradingGuarantees:
         assert "Unknown command" in (result.error or "")
 
         # Check safety invariants on settings
+        assert voice_service.orchestrator.settings is not None
         assert voice_service.orchestrator.settings.execution_locked is True
 
     @pytest.mark.parametrize("word", ["buy", "sell", "execute", "ok", "confirm"])

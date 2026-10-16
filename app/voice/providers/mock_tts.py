@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import threading
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.core.logging_config import get_logger
 from app.orchestrator.models import normalize_language

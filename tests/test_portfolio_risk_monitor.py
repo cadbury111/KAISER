@@ -23,6 +23,7 @@ Comprehensive, deterministic test suite verifying:
 from __future__ import annotations
 
 import time
+from typing import Any, Dict, Optional
 import pytest
 
 from app.backtesting.portfolio_simulation.models import (
@@ -493,6 +494,7 @@ def test_evaluate_simulation_result():
 
     assert report.overall_state == AlertState.WARNING
     assert len(report.active_alerts) == 1
+    assert report.active_alerts[0].source_ref is not None
     assert "simulation:sim_test_123" in report.active_alerts[0].source_ref
 
 

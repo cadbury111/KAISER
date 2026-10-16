@@ -667,6 +667,7 @@ class TestBootstrapSTTIntegration:
         """Verify default bootstrap uses safe mock STT provider."""
         status = bootstrap_system(log_to_file=False)
         assert status.voice_service is not None
+        assert status.voice_service.stt_provider is not None
         assert status.voice_service.stt_provider.name == "mock_stt"
 
         # Invariant checks
@@ -683,6 +684,7 @@ class TestBootstrapSTTIntegration:
         status = bootstrap_system(settings=custom_settings, log_to_file=False)
 
         assert status.voice_service is not None
+        assert status.voice_service.stt_provider is not None
         assert status.voice_service.stt_provider.name == "local_whisper"
         # Since no model path is installed, is_available is False, but system boots safely
         assert status.voice_service.stt_provider.is_available is False

@@ -24,7 +24,7 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -105,7 +105,7 @@ def reporting_service(
 def dashboard_server(
     reporting_service: PortfolioReportingService,
     diagnostics_service: PortfolioDiagnosticsService,
-) -> PortfolioDashboardServer:
+) -> Generator[PortfolioDashboardServer, None, None]:
     server = PortfolioDashboardServer(
         reporting_service=reporting_service,
         host="127.0.0.1",

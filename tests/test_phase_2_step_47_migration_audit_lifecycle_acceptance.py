@@ -1036,8 +1036,9 @@ def test_scenario_g3_secret_and_path_scrubbing_in_discrepancies_and_values(
     assert "C:\\Users\\admin" not in disc.description
     assert "[REDACTED_PATH]" in disc.description
     assert "supersecret123" not in disc.description
-    assert "/var/log/private" not in disc.expected
-    assert "[REDACTED_PATH]" in disc.expected
+    assert disc.expected is not None
+    assert "/var/log/private" not in str(disc.expected)
+    assert "[REDACTED_PATH]" in str(disc.expected)
     assert "C:\\Users\\admin" not in str(disc.actual)
     assert "[REDACTED_PATH]" in str(disc.actual)
 

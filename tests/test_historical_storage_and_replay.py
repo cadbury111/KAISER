@@ -594,7 +594,8 @@ class TestHistoricalReplayEngine:
             open=3000.0, high=3010.0, low=2990.0, close=3005.0, volume=100.0
         )
         analysis_engine.add_bar(prior_bar, safe_to_consume=True)
-        assert analysis_engine.get_series("TCS", "1m").count == 1
+        series0 = analysis_engine.get_series("TCS", "1m")
+        assert series0 is not None and series0.count == 1
 
         replay_engine = HistoricalReplayEngine(
             repository=repo,
@@ -612,6 +613,7 @@ class TestHistoricalReplayEngine:
 
         # Series count must be 15, NOT 16 (the ts=500 bar was cleared)
         series = analysis_engine.get_series("TCS", "1m")
+        assert series is not None
         assert series.count == 15
         assert series.get_bars()[0].timestamp == 1000.0
 

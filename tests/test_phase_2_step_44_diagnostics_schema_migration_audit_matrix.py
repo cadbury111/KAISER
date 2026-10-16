@@ -26,7 +26,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import pytest
-from typing import Any, Dict
+from typing import Any, Dict, cast
 
 from app.analysis.opportunities.evolution.audit.diagnostics.models import (
     AuditAlert,
@@ -130,7 +130,7 @@ def test_scenario_01_matrix_diagnostic_records_coverage():
     legacy_payload = {"diagnostic_id": "diag_001", "message": "Legacy log"}
     outcome, entry = classify_payload_compatibility(DiagnosticsRecordType.DIAGNOSTIC, legacy_payload)
     assert outcome == SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE
-    assert entry.expected_outcome == SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE
+    assert entry is not None and entry.expected_outcome == SchemaCompatibilityOutcome.MIGRATED_COMPATIBLE
 
     future_payload = {"diagnostic_id": "diag_002", "schema_version": "2.0.0", "message": "Future log"}
     outcome, entry = classify_payload_compatibility(DiagnosticsRecordType.DIAGNOSTIC, future_payload)
@@ -211,7 +211,7 @@ def test_scenario_04_matrix_reconciliation_reports_coverage():
         assert entry.record_type == DiagnosticsRecordType.RECONCILIATION
 
     entry_unverifiable = query_compatibility_matrix(DiagnosticsRecordType.RECONCILIATION, "unverifiable_source")
-    assert entry_unverifiable.expected_outcome == SchemaCompatibilityOutcome.UNVERIFIABLE_SOURCE
+    assert entry_unverifiable is not None and entry_unverifiable.expected_outcome == SchemaCompatibilityOutcome.UNVERIFIABLE_SOURCE
 
 
 def test_scenario_05_matrix_retention_stats_coverage():
@@ -422,6 +422,7 @@ def test_scenario_09_repeated_hydration_idempotency_no_metadata_leak(
     svc.hydrate_from_state_store(force=True)
     assert len(svc.list_diagnostics()) == 1
     d1 = svc.get_diagnostic("diag_rep_001")
+    assert d1 is not None
     assert d1.schema_version == CURRENT_DIAGNOSTICS_SCHEMA_VERSION
     assert d1.source_references == ("ref_a", "ref_b")
 
@@ -431,6 +432,7 @@ def test_scenario_09_repeated_hydration_idempotency_no_metadata_leak(
 
     assert len(svc.list_diagnostics()) == 1
     d_final = svc.get_diagnostic("diag_rep_001")
+    assert d_final is not None
     assert d_final.source_references == ("ref_a", "ref_b")
     assert len(d_final.source_references) == 2
 
@@ -454,7 +456,7 @@ def test_scenario_10_migration_failure_classification():
 
     # Non-mapping
     with pytest.raises(ValidationError) as exc:
-        migrate_diagnostic_payload(["not", "a", "dict"])
+        migrate_diagnostic_payload(cast(Any, ["not", "a", "dict"]))
     assert "Expected mapping payload" in str(exc.value)
 
     # Missing mandatory ID in AuditDiagnosticRecord.from_dict

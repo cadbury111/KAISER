@@ -277,6 +277,7 @@ def test_evidence_review():
     assert rec2.disposition == EvidenceReviewDisposition.CONFLICTING
 
     updated = mgr.get_session(sess.session_id)
+    assert updated is not None
     assert len(updated.evidence_reviews) == 2
 
 
@@ -317,6 +318,7 @@ def test_observation_creation():
     assert obs.reviewer_id == "analyst_dan"
 
     updated = mgr.get_session(sess.session_id)
+    assert updated is not None
     assert len(updated.observations) == 1
 
 
@@ -377,6 +379,7 @@ def test_uncertainty_recording():
     assert unc.reviewer_id == "analyst_elena"
 
     updated = mgr.get_session(sess.session_id)
+    assert updated is not None
     assert len(updated.uncertainties) == 1
 
 
@@ -397,6 +400,7 @@ def test_limitation_recording():
     assert lim.category == "SAMPLE_COVERAGE"
 
     updated = mgr.get_session(sess.session_id)
+    assert updated is not None
     assert len(updated.limitations) == 1
 
 
@@ -571,6 +575,7 @@ def test_followup_session_lineage():
 
     # Original completed session remains untouched in REVIEW_COMPLETE
     orig = mgr.get_session(completed.session_id)
+    assert orig is not None
     assert orig.status == SessionState.REVIEW_COMPLETE
 
 
@@ -819,6 +824,7 @@ def test_concurrent_session_mutation():
 
     assert len(errors) == 0
     updated = mgr.get_session(sess.session_id)
+    assert updated is not None
     assert len(updated.observations) == 10
     assert len(updated.review_notes) == 10
 
@@ -846,7 +852,9 @@ def test_deterministic_behavior():
     c2 = run_flow()
 
     assert c1.status == c2.status
+    assert c1.analytical_conclusion is not None and c2.analytical_conclusion is not None
     assert c1.analytical_conclusion.conclusion_state == c2.analytical_conclusion.conclusion_state
+    assert c1.voice_summary is not None and c2.voice_summary is not None
     assert c1.voice_summary.conclusion_speech == c2.voice_summary.conclusion_speech
     assert c1.voice_summary.caveats_speech == c2.voice_summary.caveats_speech
 
@@ -904,6 +912,7 @@ def test_dashboard_get():
         investigation_manager=mgr,
     )
     server.start(blocking=False)
+    assert server._server is not None
     actual_port = server._server.server_port
     try:
         # Listing endpoint
@@ -945,6 +954,7 @@ def test_dashboard_head():
         investigation_manager=mgr,
     )
     server.start(blocking=False)
+    assert server._server is not None
     actual_port = server._server.server_port
     try:
         conn = http.client.HTTPConnection("127.0.0.1", actual_port, timeout=5)
@@ -964,6 +974,7 @@ def test_dashboard_head():
 def test_dashboard_405_mutating():
     server = PortfolioDashboardServer(host="127.0.0.1", port=0)
     server.start(blocking=False)
+    assert server._server is not None
     actual_port = server._server.server_port
     try:
         conn = http.client.HTTPConnection("127.0.0.1", actual_port, timeout=5)
@@ -987,6 +998,7 @@ def test_traversal_protection():
         investigation_manager=mgr,
     )
     server.start(blocking=False)
+    assert server._server is not None
     actual_port = server._server.server_port
     try:
         # Request with path traversal in ID

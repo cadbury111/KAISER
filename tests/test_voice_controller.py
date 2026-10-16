@@ -117,7 +117,7 @@ def master_orchestrator(event_bus: EventBus, state_store: StateStore) -> MasterO
     def slow_handler(req: OrchestratorRequest) -> OrchestratorResponse:
         time.sleep(0.05)
         return OrchestratorResponse.success(
-            request_id=req.request_id,
+            request=req,
             response_text="Slow command finished.",
         )
 
@@ -476,6 +476,7 @@ class TestTurnSubmissionAndOutputControls:
         controller.create_session(session_id="sess_tts_fail")
 
         # Simulate TTS failure
+        assert voice_service.tts_provider is not None
         voice_service.tts_provider.synthesize = MagicMock(side_effect=TTSError("TTS engine failed"))
 
         turn = controller.submit_turn(
@@ -828,6 +829,7 @@ class TestTradingSafetyGuarantees:
     ):
         """Verify execution engine remains locked before, during, and after controller operations."""
         settings = controller.voice_service.orchestrator.settings
+        assert settings is not None
         assert settings.execution_locked is True
 
         controller.create_session(session_id="sess_safe")
@@ -851,6 +853,7 @@ class TestTradingSafetyGuarantees:
         controller.create_session(session_id=f"sess_trade_{trading_word}")
 
         # Register fixture simulating spoken trading word
+        assert isinstance(controller.voice_service.stt_provider, MockSTTProvider)
         controller.voice_service.stt_provider.register_fixture(
             f"fixture:{trading_word}",
             TranscriptionResult(text=trading_word, language="en"),

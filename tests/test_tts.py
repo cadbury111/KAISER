@@ -671,6 +671,7 @@ class TestVoiceServiceSynthesisAndPlayback:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify execute_voice_turn with play_output=True executes synthesis and playback."""
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
@@ -683,6 +684,7 @@ class TestVoiceServiceSynthesisAndPlayback:
         )
         assert turn.status == VoiceTurnStatus.COMPLETED
         assert turn.is_success is True
+        assert turn.command_response is not None
         assert turn.command_response.has_audio is True
         assert turn.metadata.get("playback_status") == "COMPLETED"
         assert mock_playback_backend.play_count == 1
@@ -693,6 +695,7 @@ class TestVoiceServiceSynthesisAndPlayback:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify synthesize_output=True synthesizes audio without calling playback."""
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
@@ -704,6 +707,7 @@ class TestVoiceServiceSynthesisAndPlayback:
             play_output=False,
         )
         assert turn.status == VoiceTurnStatus.COMPLETED
+        assert turn.command_response is not None
         assert turn.command_response.has_audio is True
         assert mock_playback_backend.play_count == 0
 
@@ -713,6 +717,7 @@ class TestVoiceServiceSynthesisAndPlayback:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify failure in playback does not break subsequent turns or leave locks held."""
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
@@ -747,6 +752,7 @@ class TestTTSEventsAndTelemetry:
         events: List[Event] = []
         event_bus.subscribe_all(lambda ev: events.append(ev))
 
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
@@ -772,6 +778,7 @@ class TestTTSEventsAndTelemetry:
         voice_service: VoiceService,
         state_store: StateStore,
     ) -> None:
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
@@ -813,6 +820,7 @@ class TestTTSSafetyAndTradingInvariants:
         state_store: StateStore,
     ) -> None:
         """Verify that synthesis and playback never unlock the execution engine."""
+        assert isinstance(voice_service.stt_provider, MockSTTProvider)
         voice_service.stt_provider.register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),

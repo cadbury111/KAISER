@@ -295,7 +295,7 @@ def test_acceptance_scenario_5_resolved_alerts_excluded_from_active_only():
 
     # Resolving again is idempotent
     re_resolved = svc.resolve_alert(alert.alert_id, reason="Second resolve")
-    assert re_resolved.status == AuditAlertStatus.RESOLVED
+    assert re_resolved is not None and re_resolved.status == AuditAlertStatus.RESOLVED
 
 
 # ==============================================================================
@@ -342,8 +342,9 @@ def test_acceptance_scenario_6_suppressed_alerts_inspectable_when_requested():
 
     # Direct ID lookup retrieves suppressed alert
     supp_id = suppressed[0].alert_id
-    assert svc.get_alert(supp_id) is not None
-    assert svc.get_alert(supp_id).status == AuditAlertStatus.SUPPRESSED_COOLDOWN
+    supp_alt = svc.get_alert(supp_id)
+    assert supp_alt is not None
+    assert supp_alt.status == AuditAlertStatus.SUPPRESSED_COOLDOWN
 
 
 # ==============================================================================
@@ -548,6 +549,7 @@ def test_acceptance_scenario_10_diagnostic_eviction_does_not_resolve_active_aler
 
     # Critical invariant: Alert MUST NOT be cleared or resolved due to diagnostic eviction
     alert_check = svc.get_alert(alert.alert_id)
+    assert alert_check is not None
     assert alert_check.status == AuditAlertStatus.TRIGGERED
     summary = svc.get_diagnostic_summary(inv_id)
     assert summary.has_active_failures is True

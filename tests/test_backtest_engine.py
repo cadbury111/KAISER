@@ -19,7 +19,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from typing import List, Tuple
+from typing import Any, List, Optional, Tuple, cast
 import pytest
 
 from app.analysis.engine import TechnicalAnalysisEngine
@@ -331,6 +331,7 @@ class TestSimulatedPortfolioAccounting:
         fill = pf.execute_order(order, base_price=100_000.0, timestamp=100.0, config=config)
         assert fill is None
         assert len(pf.rejected_orders) == 1
+        assert pf.rejected_orders[0].rejection_reason is not None
         assert "INSUFFICIENT_CASH" in pf.rejected_orders[0].rejection_reason
         assert pf.cash == 1000.0  # Cash completely untouched
 
@@ -354,6 +355,7 @@ class TestSimulatedPortfolioAccounting:
         )
         fill = pf.execute_order(order, base_price=1000.0, timestamp=100.0, config=config)
         assert fill is None
+        assert pf.rejected_orders[0].rejection_reason is not None
         assert "EXPOSURE_LIMIT_EXCEEDED" in pf.rejected_orders[0].rejection_reason
 
     def test_drawdown_circuit_breaker(self) -> None:
@@ -382,6 +384,7 @@ class TestSimulatedPortfolioAccounting:
         new_order = SimulatedOrder(order_id="b2", symbol="XYZ", side=OrderSide.BUY, order_type=OrderType.MARKET, quantity=1.0)
         fill = pf.execute_order(new_order, base_price=700.0, timestamp=200.0, config=config)
         assert fill is None
+        assert pf.rejected_orders[-1].rejection_reason is not None
         assert "CIRCUIT_BREAKER_ACTIVE" in pf.rejected_orders[-1].rejection_reason
 
 
@@ -708,7 +711,7 @@ class TestBacktestEngineIntegration:
                 return [valid_bars[0], valid_bars[1], out_of_order_bar, valid_bars[2]]
 
         engine = BacktestEngine(
-            repository=CorruptStreamRepository(),
+            repository=cast(Any, CorruptStreamRepository()),
             quality_engine=quality_engine,
             analysis_engine=analysis_engine,
         )

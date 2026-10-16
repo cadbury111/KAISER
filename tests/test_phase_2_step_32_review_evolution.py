@@ -986,6 +986,7 @@ def test_dashboard_mutation_rejection():
             resp = conn.getresponse()
             assert resp.status == 405
             allow_header = resp.getheader("Allow")
+            assert allow_header is not None
             assert "GET" in allow_header
             assert "HEAD" in allow_header
             resp.read()
@@ -1225,4 +1226,5 @@ def test_safety_invariants_and_execution_engine_locked():
     evol = service.compare_snapshots(snap.snapshot_id, snap.snapshot_id)
     assert "REVIEW EVOLUTION RECORD ONLY" in evol.disclaimer
     assert "Does not determine superiority" in evol.disclaimer
+    assert evol.voice_summary is not None
     assert evol.voice_summary.voice_safe is True

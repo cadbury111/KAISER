@@ -721,7 +721,9 @@ class TestPortfolioAccountingAndRiskInvariants:
         ]
         dd_pct, dd_amt, dd_dur = calculate_max_drawdown(equities)
         assert dd_pct.is_available is True
+        assert dd_pct.value is not None
         assert round(dd_pct.value, 2) == 10.0
+        assert dd_amt.value is not None
         assert round(dd_amt.value, 2) == 11000.0
         assert dd_dur.value == 2.0  # Duration was 2 bars before recovery
 

@@ -292,6 +292,8 @@ def test_scenario_4_tamper_detection_modified_record_values(clock: Deterministic
 
     altered_disc = next(disc for disc in recon.discrepancies if disc.discrepancy_type == "ALTERED_RECORD")
     assert altered_disc.record_id == d.diagnostic_id
+    assert altered_disc.expected is not None
+    assert altered_disc.actual is not None
     assert altered_disc.expected["message"] == "TAMPERED: Altered message by unauthorized party."
     assert altered_disc.actual["message"] == "Original legitimate diagnostic message."
     assert not altered_disc.is_retention_limitation
@@ -367,6 +369,8 @@ def test_scenario_5_forged_fingerprint_bypass_attempt_defeated(clock: Determinis
     assert "ALTERED_RECORD" in types
     altered_disc = next(disc for disc in recon.discrepancies if disc.discrepancy_type == "ALTERED_RECORD")
     assert altered_disc.record_id == d.diagnostic_id
+    assert altered_disc.expected is not None
+    assert altered_disc.actual is not None
     assert altered_disc.expected["severity"] == AuditDiagnosticSeverity.INFO.value
     assert altered_disc.actual["severity"] == AuditDiagnosticSeverity.ERROR.value
 

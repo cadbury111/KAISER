@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import pytest
 
@@ -257,9 +257,11 @@ def test_acceptance_scenario_1_valid_historical_chain_complete_status():
     assert audit_report.overall_status == RecordValidationStatus.VALID
     assert audit_report.snapshots_audited_count == 3
     assert audit_report.evolutions_audited_count == 2
+    assert audit_report.chain_result is not None
     assert audit_report.chain_result.version_sequence_intact is True
     assert audit_report.chain_result.chronology_intact is True
     assert audit_report.chain_result.recurring_conflicts_preserved is True
+    assert audit_report.reproducibility_result is not None
     assert audit_report.reproducibility_result.is_verifiable is True
 
     # 2. Reliability Evaluation
@@ -268,14 +270,17 @@ def test_acceptance_scenario_1_valid_historical_chain_complete_status():
     assert rel_result.coverage_summary.coverage_state == AuditCoverageState.COMPLETE
     assert rel_result.coverage_summary.overall_coverage_ratio == 1.0
     assert rel_result.coverage_summary.missing_history_detected is False
+    assert rel_result.repeatability_result is not None
     assert rel_result.repeatability_result.repeatability_state == AuditRepeatabilityState.STABLE
     assert rel_result.repeatability_result.repeatability_score == 1.0
     assert rel_result.repeatability_result.report_ids_match is True
+    assert rel_result.regression_result is not None
     assert rel_result.regression_result.regression_state in (
         AuditRegressionState.BASELINE_ESTABLISHED,
         AuditRegressionState.NO_REGRESSION,
     )
     assert rel_result.facts_count > 0
+    assert rel_result.voice_summary is not None
     assert rel_result.voice_summary.voice_safe is True
     assert "reliable" in rel_result.voice_summary.summary_text.lower()
 
@@ -302,6 +307,7 @@ def test_acceptance_scenario_2_empty_partial_unavailable_history():
 
     empty_audit = audit_svc.generate_audit_report("inv_empty_history")
     assert empty_audit.overall_status == RecordValidationStatus.INCOMPLETE
+    assert empty_audit.chain_result is not None
     assert "No snapshots recorded" in empty_audit.chain_result.detected_gaps
 
     # 2. Partial History (snapshots exist, but only partial audited)
@@ -353,7 +359,7 @@ def test_acceptance_scenario_2_empty_partial_unavailable_history():
 
     failing_rel_svc = HistoricalReviewAuditReliabilityService(
         audit_service=audit_svc,
-        evolution_service=FailingEvolutionService(),
+        evolution_service=cast(Any, FailingEvolutionService()),
     )
     unavail_cov = failing_rel_svc.evaluate_coverage("inv_unavail")
     assert unavail_cov.coverage_state == AuditCoverageState.UNAVAILABLE
@@ -546,6 +552,7 @@ def test_acceptance_scenario_6_unresolved_conflicts_preservation():
     # Baseline: snapshot 1 alone (conflict is active and valid, no drop)
     ev_svc.store_snapshot(s1)
     rep_baseline = audit_svc.generate_audit_report("inv_conf_pres")
+    assert rep_baseline.chain_result is not None
     assert rep_baseline.chain_result.recurring_conflicts_preserved is True
 
     # Snapshot 2 drops conflict_recurrent without resolving it in evolution
@@ -619,7 +626,12 @@ def test_acceptance_scenario_8_controlled_failures_and_isolated_states():
     ev_svc.store_snapshot(s)
 
     class CrashingAuditService(HistoricalReviewAuditService):
-        def generate_audit_report(self, investigation_id: str, **kwargs):
+        def generate_audit_report(
+            self,
+            investigation_id: str,
+            include_reproducibility: bool = True,
+            correlation_id: Optional[str] = None,
+        ) -> HistoricalReviewAuditReport:
             raise RuntimeError("Injected audit calculation hardware fault")
 
     crashing_audit = CrashingAuditService(evolution_service=ev_svc)
@@ -634,6 +646,7 @@ def test_acceptance_scenario_8_controlled_failures_and_isolated_states():
         ReliabilityEvaluationStatus.FAILED,
         ReliabilityEvaluationStatus.DEGRADED,
     )
+    assert rel_res.repeatability_result is not None
     assert rel_res.repeatability_result.repeatability_state == AuditRepeatabilityState.FAILED
     assert rel_res.repeatability_result.is_repeatable is False
 

@@ -198,8 +198,8 @@ class TestStreamIsolation:
 
         tcs_vec = engine.get_feature_vector("TCS", "1m")
         infy_vec = engine.get_feature_vector("INFY", "1m")
-        assert tcs_vec.last_close > 3500.0
-        assert infy_vec.last_close < 2000.0
+        assert tcs_vec is not None and tcs_vec.last_close > 3500.0
+        assert infy_vec is not None and infy_vec.last_close < 2000.0
 
     def test_timeframe_isolation_for_same_symbol(self):
         engine = TechnicalAnalysisEngine()
@@ -638,10 +638,12 @@ class TestTradingSafetyInvariants:
         assert agent is not None
 
         # Even with extreme inputs or conflicting data, agent never calls broker or initiates trades
+        assert status.analysis_engine is not None
         _feed_bars(status.analysis_engine, symbol="RISK_CHECK", timeframe="1m", count=25, start_ts=1000.0)
         report = agent.generate_report("RISK_CHECK", timeframes=["1m"], reference_time=2600.0)
 
         assert report.overall_condition is not None
         # Verify no order proposals or execution records exist in state store
+        assert status.state_store is not None
         assert status.state_store.get("active_orders") is None
         assert status.state_store.get("executed_trades") is None

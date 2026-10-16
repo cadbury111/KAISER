@@ -301,7 +301,8 @@ def test_active_suppressed_acknowledged_and_resolved_alert_transitions():
     assert ack_alert is not None
     assert ack_alert.status == AuditAlertStatus.ACKNOWLEDGED
     # Reflected in service lookup
-    assert svc.get_alert(a1.alert_id).status == AuditAlertStatus.ACKNOWLEDGED
+    alt = svc.get_alert(a1.alert_id)
+    assert alt is not None and alt.status == AuditAlertStatus.ACKNOWLEDGED
 
     # Active alerts filter includes ACKNOWLEDGED (as unresolved)
     active_alerts = svc.list_alerts(investigation_id="inv_life_01", active_only=True)
@@ -318,8 +319,10 @@ def test_active_suppressed_acknowledged_and_resolved_alert_transitions():
     assert not any(a.alert_id == a1.alert_id for a in active_now)
 
     # Double-resolve or double-acknowledge is safe
-    assert svc.resolve_alert(a1.alert_id).status == AuditAlertStatus.RESOLVED
-    assert svc.acknowledge_alert(a1.alert_id).status == AuditAlertStatus.RESOLVED
+    res_resolved = svc.resolve_alert(a1.alert_id)
+    assert res_resolved is not None and res_resolved.status == AuditAlertStatus.RESOLVED
+    res_ack = svc.acknowledge_alert(a1.alert_id)
+    assert res_ack is not None and res_ack.status == AuditAlertStatus.RESOLVED
 
 
 # ==============================================================================
@@ -361,7 +364,7 @@ def test_recovery_before_and_after_diagnostic_eviction():
     assert svc.is_diagnostic_evicted(rec_err.diagnostic_id) is True
     # Invariant: Alert is NOT resolved merely because diagnostic expired!
     alert_check = svc.get_alert(alert.alert_id)
-    assert alert_check.status == AuditAlertStatus.TRIGGERED
+    assert alert_check is not None and alert_check.status == AuditAlertStatus.TRIGGERED
     assert svc.get_diagnostic_summary("inv_recov_evict").has_active_failures is True
 
     # 3. Operational recovery observed
@@ -375,7 +378,7 @@ def test_recovery_before_and_after_diagnostic_eviction():
 
     # Alert transitioned to RESOLVED
     alert_resolved = svc.get_alert(alert.alert_id)
-    assert alert_resolved.status == AuditAlertStatus.RESOLVED
+    assert alert_resolved is not None and alert_resolved.status == AuditAlertStatus.RESOLVED
 
     # Summary updated
     summary_final = svc.get_diagnostic_summary("inv_recov_evict")

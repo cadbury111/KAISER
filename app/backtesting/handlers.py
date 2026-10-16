@@ -8,7 +8,7 @@ and voice/CLI compatible response formats.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from app.analysis.models import TIMEFRAME_SECONDS, normalize_timeframe
 from app.backtesting.engine import BacktestEngine

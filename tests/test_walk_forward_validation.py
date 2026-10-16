@@ -254,6 +254,7 @@ class TestWalkForwardDomainModels:
         assert cfg.timeframe == "15m"
         assert cfg.step_duration_seconds == 20000.0  # Defaulted to test_duration_seconds
         assert cfg.window_mode == "rolling"
+        assert cfg.validation_id is not None
         assert cfg.validation_id.startswith("wf_")
 
     def test_walk_forward_config_insufficient_span_rejected(self) -> None:
@@ -422,6 +423,7 @@ class TestChronologicalWindowGeneration:
         windows = generate_walk_forward_windows(cfg)
         w0 = windows[0]
         # test_start = 1600.0, warmup_start = 1600 - 300 = 1300.0
+        assert w0.warmup_start is not None
         assert w0.warmup_start == 1300.0
         assert w0.warmup_start < w0.test_start
         assert w0.warmup_start >= w0.train_start

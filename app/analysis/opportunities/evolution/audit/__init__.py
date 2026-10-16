@@ -36,6 +36,7 @@ from app.analysis.opportunities.evolution.audit.reliability import (
     AuditReliabilityVoiceSummary,
     HistoricalReviewReliabilityResult,
     HistoricalReviewAuditReliabilityService,
+    ReliabilityEvaluationStatus,
     compute_deterministic_reliability_id,
     register_reliability_handlers,
     MAX_RELIABILITY_EVALUATIONS_PER_INVESTIGATION,

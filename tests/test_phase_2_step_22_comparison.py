@@ -552,6 +552,7 @@ def test_compute_metric_difference_zero_baseline():
     assert diff.absolute_difference == 100.0
     assert diff.relative_difference is None
     assert diff.direction == MetricDirection.INCREASED
+    assert diff.reason is not None
     assert "undefined" in diff.reason.lower()
 
 
@@ -562,6 +563,7 @@ def test_compute_metric_difference_unavailable():
     assert diff.direction == MetricDirection.UNAVAILABLE
     assert diff.absolute_difference is None
     assert diff.relative_difference is None
+    assert diff.reason is not None
     assert "unavailable" in diff.reason.lower()
 
 

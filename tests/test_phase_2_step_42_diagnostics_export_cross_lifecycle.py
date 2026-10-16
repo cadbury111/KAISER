@@ -442,7 +442,7 @@ def test_scenario_7_export_queue_fifo_eviction_across_reconstruction(
 
     svc1.record_diagnostic(
         investigation_id="inv_queue_evict",
-        category=AuditDiagnosticCategory.DATA_GAP_OBSERVED if hasattr(AuditDiagnosticCategory, "DATA_GAP_OBSERVED") else AuditDiagnosticCategory.AUDIT_EVALUATION_FAILURE,
+        category=getattr(AuditDiagnosticCategory, "DATA_GAP_OBSERVED", AuditDiagnosticCategory.AUDIT_EVALUATION_FAILURE),
         severity=AuditDiagnosticSeverity.INFO,
         message="Baseline record.",
     )
@@ -839,6 +839,7 @@ def test_scenario_16_credential_and_secret_sanitization_across_lifecycle(
     )
 
     exp2 = svc2.get_export(exp1.export_id)
+    assert exp2 is not None
     rec2 = svc2.reconcile_export(exp1.export_id)
 
     # Inspect all serializations across reconstructed service
@@ -884,6 +885,7 @@ def test_scenario_17_deterministic_fingerprint_preservation_across_reconstructio
         time_provider=clock,
     )
     exp2 = svc2.get_export(exp1.export_id)
+    assert exp2 is not None
     fp2 = exp2.content_fingerprint
     can_json2 = exp2.to_canonical_json()
 

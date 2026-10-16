@@ -19,7 +19,7 @@ import re
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from app.core.exceptions import ValidationError

@@ -41,6 +41,7 @@ import math
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -1001,6 +1002,7 @@ def test_dashboard_mutation_rejection():
             resp = conn.getresponse()
             assert resp.status == 405
             allow_header = resp.getheader("Allow")
+            assert allow_header is not None
             assert "GET" in allow_header
             assert "HEAD" in allow_header
             resp.read()

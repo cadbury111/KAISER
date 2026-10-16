@@ -11,7 +11,7 @@ import collections
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from app.core.events import Event, EventBus, EventType
 from app.core.logging_config import get_logger

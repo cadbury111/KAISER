@@ -467,6 +467,7 @@ def test_risk_alerts_included_accurately_in_report(reporting_service: PortfolioR
     assert rep.risk_status["overall_state"] == "WARNING"
     assert len(rep.risk_status["active_alerts"]) == 1
     assert rep.risk_status["active_alerts"][0]["alert_id"] == "alt_gross_exp"
+    assert rep.voice_summary is not None
     assert "WARNING state with 1 active alerts" in rep.voice_summary.risk_status_speech
 
 

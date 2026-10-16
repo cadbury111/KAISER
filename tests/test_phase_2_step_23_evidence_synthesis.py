@@ -214,7 +214,7 @@ def test_evidence_item_immutability():
         timestamp=time.time(),
     )
     with pytest.raises(FrozenInstanceError):
-        item.observation = "Mutated observation"
+        setattr(item, "observation", "Mutated observation")
 
 
 def test_evidence_item_validation_invariants():

@@ -47,7 +47,7 @@ import math
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
 import urllib.request
 
 import pytest
@@ -308,7 +308,7 @@ def test_missing_session():
     rep_svc = InvestigationReportingService()
     cand = make_test_candidate("cand_missing_sess")
     with pytest.raises(ValidationError, match="Source investigation session must be provided"):
-        rep_svc.generate_report(session=None, candidate=cand)
+        rep_svc.generate_report(session=cast(Any, None), candidate=cand)
 
 
 # ==============================================================================
@@ -506,6 +506,7 @@ def test_human_vs_machine_attribution():
     assert report.candidate_summary["attribution"] == AttributionType.MACHINE_GENERATED_EVIDENCE.value
     assert report.evidence_summary["attribution"] == AttributionType.MACHINE_GENERATED_EVIDENCE.value
     assert report.observations[0].source_type == AttributionType.HUMAN_REVIEW.value
+    assert report.analytical_conclusion is not None
     assert report.analytical_conclusion["attribution"] == AttributionType.HUMAN_REVIEW.value
     assert report.report_provenance["attribution"] == AttributionType.DERIVED_ANALYSIS.value
 
@@ -541,6 +542,7 @@ def test_audit_sequence_validation():
     audits = mgr.get_audit_trail(sess.session_id)
 
     report = rep_svc.generate_report(session=sess, candidate=cand, audit_trail=audits)
+    assert report.audit_summary is not None
     assert report.audit_summary.sequence_integrity is True
     assert len(report.audit_summary.integrity_issues) == 0
 
@@ -569,6 +571,7 @@ def test_malformed_audit_detection():
     audits.append(bad_rec)
 
     report = rep_svc.generate_report(session=sess, candidate=cand, audit_trail=audits)
+    assert report.audit_summary is not None
     assert report.audit_summary.sequence_integrity is False
     assert len(report.audit_summary.integrity_issues) >= 2
     assert report.report_status == ReportStatus.INVALID
@@ -617,6 +620,7 @@ def test_unavailable_reproducibility_handling():
     sess = mgr.complete_session(sess.session_id, conclusion_state=ConclusionState.INSUFFICIENT_EVIDENCE, rationale="No runs")
 
     report = rep_svc.generate_report(session=sess, candidate=cand)
+    assert report.reproducibility_record is not None
     assert report.reproducibility_record.is_reproducible is False
     assert len(report.reproducibility_record.reproducibility_notes) > 0
 
@@ -690,6 +694,7 @@ def test_superseded_report_handling():
 
     # Check that rep1 is now SUPERSEDED
     old_rep = rep_svc.get_report(rep1.report_id)
+    assert old_rep is not None
     assert old_rep.report_status == ReportStatus.SUPERSEDED
 
 

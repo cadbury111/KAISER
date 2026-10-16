@@ -17,7 +17,7 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from app.core.config import Settings
@@ -91,10 +91,10 @@ def mock_orchestrator() -> MasterOrchestrator:
         handler=lambda req: HandlerResult(
             status=RequestStatus.COMPLETED,
             result={
-                "symbol": req.context.get("symbol") or (req.parameters or {}).get("symbol", "UNKNOWN"),
+                "symbol": req.context.get("symbol") or getattr(req, "parameters", {}).get("symbol", "UNKNOWN"),
                 "trend": "BULLISH",
             },
-            response_text=f"Technical analysis completed for {req.context.get('symbol') or (req.parameters or {}).get('symbol', 'UNKNOWN')}.",
+            response_text=f"Technical analysis completed for {req.context.get('symbol') or getattr(req, 'parameters', {}).get('symbol', 'UNKNOWN')}.",
         ),
         description="Technical analysis",
     )
@@ -451,6 +451,7 @@ class TestProhibitedTradingInterception:
         output: VoiceOutput = voice_service.process_voice_input(voice_input)
 
         assert output.is_success is False
+        assert output.error is not None
         assert "prohibited" in output.error.lower()
         assert output.metadata.get("prohibited_trading") is True
 
@@ -519,6 +520,7 @@ class TestEventBusIntentNotifications:
         voice_service: VoiceService,
     ) -> None:
         events: List[Event] = []
+        assert voice_service.event_bus is not None
         voice_service.event_bus.subscribe(
             EventType.VOICE_INTENT_RESOLVED,
             lambda evt: events.append(evt),
@@ -545,6 +547,7 @@ class TestEventBusIntentNotifications:
         voice_service: VoiceService,
     ) -> None:
         events: List[Event] = []
+        assert voice_service.event_bus is not None
         voice_service.event_bus.subscribe(
             EventType.VOICE_INTENT_REJECTED,
             lambda evt: events.append(evt),
@@ -700,4 +703,5 @@ class TestMandatorySafetyInvariants:
 
         output = voice_service.process_voice_input(voice_input)
         assert output.is_success is False
+        assert output.error is not None
         assert "prohibited" in output.error.lower()

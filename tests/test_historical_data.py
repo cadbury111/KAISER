@@ -481,8 +481,8 @@ class TestOrchestratorHistoricalIntegration:
 
     def test_load_historical_data_command_success(self):
         status = bootstrap_system()
-        orchestrator: MasterOrchestrator = status.orchestrator
-        assert orchestrator is not None
+        assert status.orchestrator is not None
+        orchestrator = status.orchestrator
 
         req = OrchestratorRequest.create(
             command="load_historical_data",
@@ -506,7 +506,8 @@ class TestOrchestratorHistoricalIntegration:
 
     def test_load_historical_data_command_missing_symbol_fails(self):
         status = bootstrap_system()
-        orchestrator: MasterOrchestrator = status.orchestrator
+        assert status.orchestrator is not None
+        orchestrator = status.orchestrator
 
         req = OrchestratorRequest.create(
             command="load_historical_data",
@@ -519,7 +520,8 @@ class TestOrchestratorHistoricalIntegration:
 
     def test_load_historical_data_iso_timestamp_parsing(self):
         status = bootstrap_system()
-        orchestrator: MasterOrchestrator = status.orchestrator
+        assert status.orchestrator is not None
+        orchestrator = status.orchestrator
 
         req = OrchestratorRequest.create(
             command="load_historical_data",
@@ -578,9 +580,11 @@ class TestSafetyAndOfflineInvariants:
         assert result.accepted_bars_count > 0
 
         # Safety checks
+        assert status.settings is not None
         assert status.settings.execution_locked is True
         assert status.trading_engine == "not initialized"
         assert status.execution_engine == "locked"
+        assert status.state_store is not None
         assert status.state_store.get("execution_engine") == "locked"
         assert status.state_store.get("trading_engine") == "not initialized"
 
@@ -588,6 +592,8 @@ class TestSafetyAndOfflineInvariants:
         status = bootstrap_system()
         loader = status.historical_loader
         event_bus = status.event_bus
+        assert loader is not None
+        assert event_bus is not None
 
         ingested_events = []
         event_bus.subscribe(EventType.HISTORICAL_DATA_INGESTED, lambda e: ingested_events.append(e))

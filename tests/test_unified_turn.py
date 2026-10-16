@@ -58,6 +58,11 @@ from app.voice import (
 # ==============================================================================
 
 
+def _mock_stt(vs: VoiceService) -> MockSTTProvider:
+    assert isinstance(vs.stt_provider, MockSTTProvider)
+    return vs.stt_provider
+
+
 class MockSapiVoice:
     """Mock pyttsx3 voice descriptor."""
 
@@ -289,7 +294,7 @@ class TestUnifiedVoiceTurnPipeline:
 
         TTS and Playback must NOT be invoked in text-only mode.
         """
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en", confidence=0.95),
         )
@@ -324,7 +329,7 @@ class TestUnifiedVoiceTurnPipeline:
         mock_engine: MockPyttsx3Engine,
     ) -> None:
         """Verify turn with synthesize_output=True synthesizes audio without physical playback."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en", confidence=0.95),
         )
@@ -344,6 +349,7 @@ class TestUnifiedVoiceTurnPipeline:
         assert turn.command_response is not None
         assert turn.command_response.status == VoiceOutputStatus.SYNTHESIZED
         assert turn.command_response.has_audio is True
+        assert turn.command_response.audio_payload is not None
         assert len(turn.command_response.audio_payload) > 0
 
         # Verify TTS engine was called, but playback backend was NOT invoked
@@ -357,7 +363,7 @@ class TestUnifiedVoiceTurnPipeline:
         mock_engine: MockPyttsx3Engine,
     ) -> None:
         """Verify turn with play_output=True completes capture, STT, command, synthesis, and playback."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en", confidence=0.95),
         )
@@ -387,7 +393,7 @@ class TestUnifiedVoiceTurnPipeline:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify setting play_output=True automatically synthesizes audio without needing synthesize_output=True."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -426,7 +432,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
         event_bus.subscribe_all(lambda ev: events.append(ev))
 
         # Register Tamil speech transcription
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="ta"),
         )
@@ -463,7 +469,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
         mock_engine: MockPyttsx3Engine,
     ) -> None:
         """Verify that a fatal crash in the TTS engine preserves the successful command response."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -492,7 +498,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify that playback failure preserves the synthesized audio and response text."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -545,7 +551,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
     ) -> None:
         """Verify silent audio or empty transcription skips orchestrator routing and synthesis."""
         # STT returns empty text
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="   ", language="en"),
         )
@@ -570,7 +576,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
         mock_playback_backend: MockAudioPlaybackBackend,
     ) -> None:
         """Verify unrecognized command is rejected and does NOT invoke TTS or playback."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="launch_nuclear_missiles", language="en"),
         )
@@ -596,7 +602,7 @@ class TestUnifiedVoiceTurnFaultIsolation:
         mock_engine: MockPyttsx3Engine,
     ) -> None:
         """Verify handler failure results in FAILED status and skips synthesis."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="fail_command", language="en"),
         )
@@ -637,7 +643,7 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         results: List[VoiceTurnResult] = []
 
         def worker_turn_1() -> None:
-            voice_service.stt_provider.register_fixture(
+            _mock_stt(voice_service).register_fixture(
                 "audio:32000",
                 TranscriptionResult(text="system_status", language="en"),
             )
@@ -671,7 +677,7 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         t1.join(timeout=2.0)
 
         # Subsequent turn must succeed
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -702,7 +708,7 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         voice_service: VoiceService,
     ) -> None:
         """Verify cancellation during playback returns playback_status='cancelled' while preserving response."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -710,6 +716,7 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         stop_evt = threading.Event()
 
         # Trigger cancellation when playback begins
+        assert voice_service.audio_playback is not None
         orig_play = voice_service.audio_playback.backend.play
 
         def cancel_on_play(*args, **kwargs):
@@ -750,7 +757,7 @@ class TestUnifiedVoiceTurnLifecycleAndConcurrency:
         """Verify 5 consecutive turns execute without state cross-contamination or correlation leakage."""
         for i in range(5):
             corr = f"corr_seq_{i}"
-            voice_service.stt_provider.register_fixture(
+            _mock_stt(voice_service).register_fixture(
                 "audio:32000",
                 TranscriptionResult(text="system_status", language="en"),
             )
@@ -781,7 +788,7 @@ class TestUnifiedVoiceTurnEventsAndCorrelation:
         event_bus.subscribe_all(lambda ev: events.append(ev))
 
         test_corr_id = "corr_e2e_unified_test_99"
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -808,7 +815,7 @@ class TestUnifiedVoiceTurnEventsAndCorrelation:
         event_sequence: List[str] = []
         event_bus.subscribe_all(lambda ev: event_sequence.append(ev.event_type))
 
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -852,7 +859,7 @@ class TestUnifiedVoiceTurnLanguageHandling:
 
     def test_english_turn_preservation(self, voice_service: VoiceService) -> None:
         """Verify English language metadata is preserved."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -862,7 +869,7 @@ class TestUnifiedVoiceTurnLanguageHandling:
 
     def test_tanglish_turn_preservation(self, voice_service: VoiceService) -> None:
         """Verify Tanglish language metadata is preserved without automated translation."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="tanglish"),
         )
@@ -872,7 +879,7 @@ class TestUnifiedVoiceTurnLanguageHandling:
 
     def test_mixed_language_turn_preservation(self, voice_service: VoiceService) -> None:
         """Verify Mixed language metadata is preserved."""
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="mixed"),
         )
@@ -909,7 +916,7 @@ class TestUnifiedVoiceTurnTradingSafety:
         """Verify execution engine remains locked through all stages of voice execution."""
         assert state_store.get("execution_engine") == "locked"
 
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text="system_status", language="en"),
         )
@@ -934,7 +941,7 @@ class TestUnifiedVoiceTurnTradingSafety:
 
         Execution engine must remain strictly locked.
         """
-        voice_service.stt_provider.register_fixture(
+        _mock_stt(voice_service).register_fixture(
             "audio:32000",
             TranscriptionResult(text=f"{trading_word} 100 shares of reliance", language="en"),
         )

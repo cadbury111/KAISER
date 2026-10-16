@@ -50,7 +50,7 @@ import math
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Sequence
 import urllib.error
 import urllib.request
 
@@ -260,7 +260,7 @@ def test_uncertainty_handling_review_required() -> None:
     assert record.priority_state == PriorityState.REVIEW_REQUIRED
     assert record.requires_review is True
     assert record.uncertainty_state == "UNCERTAINTIES_PRESENT"
-    assert record.uncertainty_count == 2 if hasattr(record, "uncertainty_count") else True
+    assert getattr(record, "uncertainty_count", None) in (2, None)
 
 
 def test_limitation_preservation() -> None:
@@ -685,7 +685,7 @@ def test_handler_registration_and_execution() -> None:
 # -------------------------------------------------------------------------
 
 @pytest.fixture
-def dashboard_server_step25() -> PortfolioDashboardServer:
+def dashboard_server_step25() -> Generator[PortfolioDashboardServer, None, None]:
     """Fixture providing running PortfolioDashboardServer on dynamic port."""
     engine = OpportunityPrioritizationEngine()
     queue = OpportunityInvestigationQueue(engine=engine)

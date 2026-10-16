@@ -573,6 +573,7 @@ def test_metric_comparison_numerical_invariants():
     assert d_zero_base.absolute_difference == 10.0
     assert d_zero_base.relative_difference is None
     assert d_zero_base.is_available is True
+    assert d_zero_base.reason is not None
     assert "undefined" in d_zero_base.reason.lower()
 
     # 5. Negative values

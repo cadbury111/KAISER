@@ -34,6 +34,7 @@ import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid

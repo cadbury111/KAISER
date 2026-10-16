@@ -226,6 +226,7 @@ class TestRobustnessDomainModels:
         assert cfg.timeframe == "15m"
         assert cfg.include_cost_stress is True
         assert cfg.include_parameter_sensitivity is True
+        assert cfg.test_id is not None
         assert cfg.test_id.startswith("rob_")
 
     def test_robustness_test_config_inverted_dates_rejected(self) -> None:
@@ -312,6 +313,7 @@ class TestTransactionCostStressTesting:
         # Find commission scenario
         comm_res = next(r for r in result.scenario_results if r.scenario.name == "commission_2.0x")
         assert comm_res.is_completed is True
+        assert comm_res.metrics is not None
         # Total transaction costs must be strictly greater than baseline costs if trades occurred
         if comm_res.metrics.total_trades > 0:
             assert comm_res.metrics.total_transaction_costs > b_costs
@@ -321,7 +323,9 @@ class TestTransactionCostStressTesting:
 
         # Find combined adverse scenario: must have highest cost delta
         comb_res = next(r for r in result.scenario_results if r.scenario.name == "combined_adverse_costs")
+        assert comb_res.metrics is not None
         if comb_res.metrics.total_trades > 0:
+            assert comm_res.metrics is not None
             assert comb_res.metrics.total_transaction_costs > comm_res.metrics.total_transaction_costs
             assert comb_res.delta_net_pnl <= comm_res.delta_net_pnl
 
@@ -547,7 +551,9 @@ class TestDeterminismAndStateIsolation:
         # Verify every scenario backtest started with exactly initial_cash (100,000)
         for sc_res in result.scenario_results:
             if sc_res.is_completed:
+                assert sc_res.backtest_result is not None
                 assert sc_res.backtest_result.config.initial_cash == 100_000.0
+                assert sc_res.metrics is not None
                 assert sc_res.metrics.initial_equity == 100_000.0
 
 
@@ -784,6 +790,8 @@ class TestRobustnessOrchestratorIntegration:
 
         result = robustness_engine.run(config=cfg, strategy="sma_crossover")
         assert result.status == RobustnessStatus.COMPLETED
+        assert result.baseline_result is not None
+        assert result.baseline_result.metrics is not None
         assert result.baseline_result.metrics.total_trades == 0
         assert not math.isnan(result.summary.baseline_return_pct)
         assert not math.isnan(result.summary.worst_case_return_pct)

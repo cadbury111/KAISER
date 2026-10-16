@@ -34,6 +34,7 @@ import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -424,6 +425,7 @@ def test_registry_fail_and_cancel_lifecycles():
     failed = registry.fail_run(r1.run_id, error_category="DATA_ERROR", error_message="Corrupted bars")
     assert failed.status == RunStatus.FAILED
     assert failed.error_category == "DATA_ERROR"
+    assert failed.error_message is not None
     assert "Corrupted bars" in failed.error_message
 
     # Cancel run
@@ -758,7 +760,7 @@ def test_portfolio_simulation_and_attribution_run_tracking():
     )
 
     sim_cfg = PortfolioSimulationConfig(
-        allocations=[alloc],
+        allocations=(alloc,),
         timeframe="1m",
         start_time=1000.0,
         end_time=2500.0,
@@ -1078,6 +1080,7 @@ def test_property_invariants():
     registry.start_run(run1.run_id)
     c1 = registry.complete_run(run1.run_id, result_id="res_1")
     assert c1.completed_at is not None
+    assert c1.started_at is not None
     assert c1.completed_at >= c1.started_at
 
     # Invariant 4: terminal runs cannot change state

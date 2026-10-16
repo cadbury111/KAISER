@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import List
+from typing import List, Optional
 
 import pytest
 
@@ -482,9 +482,12 @@ class TestTechnicalAnalysisEngine:
 
         assert not errors
         assert engine.get_counters()["bars_processed"] == 150
-        assert engine.get_feature_vector("SYM_A").bar_count == 50
-        assert engine.get_feature_vector("SYM_B").bar_count == 50
-        assert engine.get_feature_vector("SYM_C").bar_count == 50
+        fv_a = engine.get_feature_vector("SYM_A")
+        assert fv_a is not None and fv_a.bar_count == 50
+        fv_b = engine.get_feature_vector("SYM_B")
+        assert fv_b is not None and fv_b.bar_count == 50
+        fv_c = engine.get_feature_vector("SYM_C")
+        assert fv_c is not None and fv_c.bar_count == 50
 
 
 # =============================================================================

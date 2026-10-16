@@ -554,7 +554,7 @@ class TestOrchestratorHandlers:
         )
         resp = orchestrator.handle_request(req)
         assert resp.is_success
-        data = resp.result or resp.data
+        data = resp.result or getattr(resp, "data", {})
         assert data["status"] == "success"
         assert data["assessment"]["total_records"] == 10
         assert data["assessment"]["quality_status"] == "VALID"
@@ -566,7 +566,7 @@ class TestOrchestratorHandlers:
         )
         resp2 = orchestrator.handle_request(req2)
         assert resp2.is_success
-        data2 = resp2.result or resp2.data
+        data2 = resp2.result or getattr(resp2, "data", {})
         assert data2["found"] is True
         assert data2["assessment"]["symbol"] == "NIFTY"
 
@@ -589,7 +589,7 @@ class TestOrchestratorHandlers:
         )
         resp = orchestrator.handle_request(req)
         assert resp.is_success
-        data = resp.result or resp.data
+        data = resp.result or getattr(resp, "data", {})
         assert data["count"] >= 1
         assert data["filter_symbol"] == "BANKNIFTY"
 
