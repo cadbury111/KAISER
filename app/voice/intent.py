@@ -38,6 +38,7 @@ class VoiceIntentType(str, Enum):
     INVESTIGATION_QUEUE = "INVESTIGATION_QUEUE"
     LATEST_PORTFOLIO_REPORT = "LATEST_PORTFOLIO_REPORT"
     HISTORICAL_REVIEW_SUMMARY = "HISTORICAL_REVIEW_SUMMARY"
+    MULTI_AGENT_CONSENSUS = "MULTI_AGENT_CONSENSUS"
     PROHIBITED_TRADING_COMMAND = "PROHIBITED_TRADING_COMMAND"
     DIRECT_COMMAND = "DIRECT_COMMAND"
     UNKNOWN = "UNKNOWN"
@@ -301,9 +302,41 @@ class VoiceCommandIntentResolver:
                 re.IGNORECASE,
             ),
         ]
+        # Parameterized multi-agent consensus patterns (English & Tanglish)
+        self._param_consensus_patterns: List[Pattern[str]] = [
+            re.compile(
+                r"\b(?:coordinate|check|get|show)\s+(?:multi\s*agent|agent)\s+consensus(?:\s+for)?\s+(?P<symbol>[a-zA-Z0-9_\.\-]+)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:multi\s*agent|agent)\s+consensus(?:\s+for)?\s+(?P<symbol>[a-zA-Z0-9_\.\-]+)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\bconsensus(?:\s+for)?\s+(?P<symbol>[a-zA-Z0-9_\.\-]+)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?P<symbol>[a-zA-Z0-9_\.\-]+)\s+(?:multi\s*agent|agent)\s+consensus\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?P<symbol>[a-zA-Z0-9_\.\-]+)\s+agents?\s+consensus\s+enna\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\bagents?\s+consensus\s+enna\s+(?P<symbol>[a-zA-Z0-9_\.\-]+)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?P<symbol>[a-zA-Z0-9_\.\-]+)\s+agents?\s+consensus\s+eppadi\s+irukku\b",
+                re.IGNORECASE,
+            ),
+        ]
         self._reserved_words = frozenset({
             "PANNU", "SOLLU", "EPPADI", "IRUKKU", "ENNA", "STATUS", "FOR", "NOW", "PLEASE",
             "THE", "AND", "REPORT", "SUMMARY", "QUEUE", "CHECK", "ANALYSIS",
+            "CONSENSUS", "AGENT", "AGENTS", "COORDINATE",
         })
 
     def normalize_utterance(self, text: str) -> str:
@@ -375,6 +408,26 @@ class VoiceCommandIntentResolver:
                             raw_text=raw_text,
                             normalized_text=normalized,
                             matched_pattern="technical_analysis_param",
+                        )
+
+            # 2b. Parameterized Multi-Agent Consensus Intent (English & Tanglish)
+            for pattern in self._param_consensus_patterns:
+                match = pattern.search(normalized)
+                if match:
+                    symbol_raw = match.group("symbol").strip().upper()
+                    if (
+                        re.match(r"^[A-Z0-9_\.\-]{1,12}$", symbol_raw)
+                        and symbol_raw not in self._reserved_words
+                    ):
+                        return VoiceCommandIntent(
+                            intent_type=VoiceIntentType.MULTI_AGENT_CONSENSUS,
+                            command="coordinate_agent_consensus",
+                            confidence=0.96,
+                            parameters={"symbol": symbol_raw},
+                            language=language,
+                            raw_text=raw_text,
+                            normalized_text=normalized,
+                            matched_pattern="multi_agent_consensus_param",
                         )
 
             # 3. English Conversational Patterns

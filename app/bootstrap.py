@@ -26,7 +26,14 @@ from app.voice import (
     VoiceInteractionController,
     VoiceService,
 )
-from app.agents import TechnicalAnalysisAgent, register_technical_agent_handlers
+from app.agents import (
+    MarketRegimeAgent,
+    MultiAgentCoordinationService,
+    TechnicalAnalysisAgent,
+    register_consensus_handlers,
+    register_regime_agent_handlers,
+    register_technical_agent_handlers,
+)
 from app.analysis import TechnicalAnalysisEngine, register_analysis_handlers
 from app.market.historical import (
     HistoricalBarRepository,
@@ -123,6 +130,8 @@ class SystemStatus:
     voice_controller: Optional[VoiceInteractionController] = None
     analysis_engine: Optional[TechnicalAnalysisEngine] = None
     technical_agent: Optional[TechnicalAnalysisAgent] = None
+    regime_agent: Optional[MarketRegimeAgent] = None
+    coordination_service: Optional[MultiAgentCoordinationService] = None
     historical_loader: Optional[HistoricalDataLoader] = None
     historical_provider: Optional[HistoricalDataProvider] = None
     historical_repository: Optional[HistoricalBarRepository] = None
@@ -313,6 +322,26 @@ def bootstrap_system(
         name="kaiser_main_technical_agent",
     )
     register_technical_agent_handlers(orchestrator=orchestrator, agent=technical_agent)
+
+    # Initialize Market Regime Specialist Agent (Phase 2, Step 49)
+    regime_agent = MarketRegimeAgent(
+        analysis_engine=analysis_engine,
+        quality_engine=market_service.quality_engine if market_service else None,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_regime_agent",
+    )
+    register_regime_agent_handlers(orchestrator=orchestrator, agent=regime_agent)
+
+    # Initialize Multi-Agent Specialist Coordination Service (Phase 2, Step 49)
+    coordination_service = MultiAgentCoordinationService(
+        technical_agent=technical_agent,
+        regime_agent=regime_agent,
+        event_bus=event_bus,
+        state_store=state_store,
+        name="kaiser_main_coordination_service",
+    )
+    register_consensus_handlers(orchestrator=orchestrator, service=coordination_service)
 
     # Initialize Market Data Provenance & Lineage Tracker (Phase 2, Step 20)
     provenance_tracker = MarketDataProvenanceTracker(
@@ -718,6 +747,8 @@ def bootstrap_system(
         voice_controller=voice_controller,
         analysis_engine=analysis_engine,
         technical_agent=technical_agent,
+        regime_agent=regime_agent,
+        coordination_service=coordination_service,
         historical_loader=historical_loader,
         historical_provider=historical_provider,
         historical_repository=historical_repository,
@@ -782,6 +813,8 @@ def bootstrap_system(
 
     logger.info("Technical analysis engine: ready")
     logger.info("Technical analysis agent: ready")
+    logger.info("Market regime specialist agent: ready")
+    logger.info("Multi-agent specialist coordination & consensus service: ready")
     logger.info("Historical data loader: ready (provider=%s)", historical_provider.name)
     logger.info("Historical repository: ready (db=%s)", db_path)
     logger.info("Historical cache: ready (max_size=200)")
