@@ -148,6 +148,15 @@ class Settings:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
 
+    # Paper Execution & Simulated Broker (Phase 2, Step 53)
+    paper_execution_enabled: bool = False
+    paper_initial_cash: float = 100000.0
+    paper_max_order_notional: float = 50000.0
+    paper_max_position_exposure_pct: float = 50.0
+    paper_fee_rate: float = 0.0005
+    paper_slippage_rate: float = 0.0002
+    paper_freshness_threshold_seconds: float = 60.0
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -192,6 +201,32 @@ class Settings:
                 f"Invalid DASHBOARD_PORT: {self.dashboard_port}. Port must be an integer between 0 and 65535."
             )
 
+        if self.paper_initial_cash <= 0:
+            raise ConfigurationError(
+                f"Invalid PAPER_INITIAL_CASH: {self.paper_initial_cash}. Initial cash must be positive."
+            )
+        if self.paper_max_order_notional <= 0:
+            raise ConfigurationError(
+                f"Invalid PAPER_MAX_ORDER_NOTIONAL: {self.paper_max_order_notional}. Max notional must be positive."
+            )
+        if self.paper_max_position_exposure_pct <= 0 or self.paper_max_position_exposure_pct > 100:
+            raise ConfigurationError(
+                f"Invalid PAPER_MAX_POSITION_EXPOSURE_PCT: {self.paper_max_position_exposure_pct}. "
+                "Must be greater than 0 and at most 100."
+            )
+        if self.paper_fee_rate < 0:
+            raise ConfigurationError(
+                f"Invalid PAPER_FEE_RATE: {self.paper_fee_rate}. Fee rate cannot be negative."
+            )
+        if self.paper_slippage_rate < 0:
+            raise ConfigurationError(
+                f"Invalid PAPER_SLIPPAGE_RATE: {self.paper_slippage_rate}. Slippage rate cannot be negative."
+            )
+        if self.paper_freshness_threshold_seconds <= 0:
+            raise ConfigurationError(
+                f"Invalid PAPER_FRESHNESS_THRESHOLD_SECONDS: {self.paper_freshness_threshold_seconds}. Must be positive."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {
@@ -227,6 +262,13 @@ class Settings:
             "dashboard_enabled": self.dashboard_enabled,
             "dashboard_host": self.dashboard_host,
             "dashboard_port": self.dashboard_port,
+            "paper_execution_enabled": self.paper_execution_enabled,
+            "paper_initial_cash": self.paper_initial_cash,
+            "paper_max_order_notional": self.paper_max_order_notional,
+            "paper_max_position_exposure_pct": self.paper_max_position_exposure_pct,
+            "paper_fee_rate": self.paper_fee_rate,
+            "paper_slippage_rate": self.paper_slippage_rate,
+            "paper_freshness_threshold_seconds": self.paper_freshness_threshold_seconds,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -285,6 +327,13 @@ def get_settings(
         dashboard_enabled=parse_bool(source.get("DASHBOARD_ENABLED", "false"), "DASHBOARD_ENABLED"),
         dashboard_host=source.get("DASHBOARD_HOST", "127.0.0.1"),
         dashboard_port=int(source.get("DASHBOARD_PORT", "8080")),
+        paper_execution_enabled=parse_bool(source.get("PAPER_EXECUTION_ENABLED", "false"), "PAPER_EXECUTION_ENABLED"),
+        paper_initial_cash=float(source.get("PAPER_INITIAL_CASH", "100000.0")),
+        paper_max_order_notional=float(source.get("PAPER_MAX_ORDER_NOTIONAL", "50000.0")),
+        paper_max_position_exposure_pct=float(source.get("PAPER_MAX_POSITION_EXPOSURE_PCT", "50.0")),
+        paper_fee_rate=float(source.get("PAPER_FEE_RATE", "0.0005")),
+        paper_slippage_rate=float(source.get("PAPER_SLIPPAGE_RATE", "0.0002")),
+        paper_freshness_threshold_seconds=float(source.get("PAPER_FRESHNESS_THRESHOLD_SECONDS", "60.0")),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )
