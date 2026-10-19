@@ -10,9 +10,16 @@ from typing import Optional
 
 from app.core.config import Settings, get_settings
 from app.core.events import Event, EventBus, EventType
+from app.core.exceptions import ConfigurationError
 from app.core.logging_config import get_logger, setup_logging
 from app.core.state import StateStore
-from app.market import MarketDataService, MockMarketFeed
+from app.market import (
+    MarketDataService,
+    MockMarketFeed,
+    TwelveDataConfig,
+    TwelveDataHistoricalProvider,
+    TwelveDataMarketFeed,
+)
 from app.orchestrator import MasterOrchestrator, create_system_status_handler
 from app.voice import (
     AudioCaptureService,
@@ -213,15 +220,49 @@ def bootstrap_system(
     state_store.set("trading_engine", trading_status)
     state_store.set("execution_engine", execution_status)
 
-    # Initialize market data service (mock provider by default)
+    # Initialize market data service (mock provider by default, or live/delayed provider if explicitly selected)
+    freshness_threshold = (
+        60.0 if active_settings.market_data_provider == "mock" else 900.0
+    )
     market_service = MarketDataService(
         event_bus=event_bus,
         state_store=state_store,
-        freshness_threshold_seconds=60.0,
+        freshness_threshold_seconds=freshness_threshold,
     )
+    twelve_data_config: Optional[TwelveDataConfig] = None
     if active_settings.market_data_provider == "mock":
         mock_feed = MockMarketFeed(name="default_mock_feed")
         market_service.register_feed(mock_feed)
+    elif active_settings.market_data_provider == "twelvedata":
+        if not active_settings.twelve_data_api_key or not active_settings.twelve_data_api_key.strip():
+            raise ConfigurationError(
+                "TWELVE_DATA_API_KEY must be configured when MARKET_DATA_PROVIDER is 'twelvedata'. "
+                "Safe offline default is MARKET_DATA_PROVIDER='mock'."
+            )
+        symbols_tuple = tuple(s.strip().upper() for s in active_settings.twelve_data_symbols.split(",") if s.strip())
+        twelve_data_config = TwelveDataConfig(
+            api_key=active_settings.twelve_data_api_key,
+            symbols=symbols_tuple,
+            exchange=active_settings.twelve_data_exchange,
+            base_url=active_settings.twelve_data_base_url,
+            poll_interval_seconds=active_settings.twelve_data_poll_interval_seconds,
+            timeout_seconds=active_settings.twelve_data_timeout_seconds,
+            rate_limit_per_minute=active_settings.twelve_data_rate_limit_per_minute,
+            is_delayed=active_settings.twelve_data_is_delayed,
+        )
+        td_feed = TwelveDataMarketFeed(config=twelve_data_config, name="twelve_data_feed")
+        market_service.register_feed(td_feed)
+        logger.info(
+            "Registered Twelve Data market feed [exchange=%s, symbols=%s, delayed=%s]",
+            twelve_data_config.exchange,
+            twelve_data_config.symbols,
+            twelve_data_config.is_delayed,
+        )
+    else:
+        raise ConfigurationError(
+            f"Unsupported MARKET_DATA_PROVIDER: '{active_settings.market_data_provider}'. "
+            f"Supported providers are: 'mock', 'twelvedata'"
+        )
 
     # Initialize Master Orchestrator and register safe foundational handlers
     orchestrator = MasterOrchestrator(
@@ -356,7 +397,18 @@ def bootstrap_system(
     )
 
     # Initialize Historical Market Data Provider and Loader
-    historical_provider = MockHistoricalDataProvider(name="mock_historical_provider")
+    if active_settings.market_data_provider == "twelvedata" and twelve_data_config is not None:
+        historical_provider = TwelveDataHistoricalProvider(
+            config=twelve_data_config,
+            name="twelve_data_historical_provider",
+        )
+        logger.info(
+            "Initialized Twelve Data historical provider [exchange=%s, symbols=%s]",
+            twelve_data_config.exchange,
+            twelve_data_config.symbols,
+        )
+    else:
+        historical_provider = MockHistoricalDataProvider(name="mock_historical_provider")
     historical_loader = HistoricalDataLoader(
         provider=historical_provider,
         quality_engine=market_service.quality_engine,

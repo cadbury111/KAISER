@@ -118,6 +118,14 @@ class Settings:
     log_level: str = "INFO"
     kaiser_language_mode: str = "tanglish"
     market_data_provider: str = "mock"
+    twelve_data_api_key: str | None = None
+    twelve_data_symbols: str = "RELIANCE,TCS,INFY"
+    twelve_data_exchange: str = "NSE"
+    twelve_data_base_url: str = "https://api.twelvedata.com"
+    twelve_data_rate_limit_per_minute: int = 8
+    twelve_data_poll_interval_seconds: float = 15.0
+    twelve_data_timeout_seconds: float = 10.0
+    twelve_data_is_delayed: bool = True
     broker_provider: str = "none"
     database_url: str = "sqlite:///data/kaiser.db"
     llm_provider: str = "mock"
@@ -162,6 +170,15 @@ class Settings:
             )
         object.__setattr__(self, "log_level", norm_log)
 
+        norm_mdp = self.market_data_provider.strip().lower()
+        object.__setattr__(self, "market_data_provider", norm_mdp)
+        if norm_mdp == "twelvedata":
+            if not self.twelve_data_api_key or not self.twelve_data_api_key.strip():
+                raise ConfigurationError(
+                    "TWELVE_DATA_API_KEY must be configured when MARKET_DATA_PROVIDER is 'twelvedata'. "
+                    "Safe offline default is MARKET_DATA_PROVIDER='mock'."
+                )
+
         norm_host = self.dashboard_host.strip().lower()
         if norm_host not in {"127.0.0.1", "localhost", "::1"}:
             raise ConfigurationError(
@@ -183,6 +200,14 @@ class Settings:
             "log_level": self.log_level,
             "kaiser_language_mode": self.kaiser_language_mode,
             "market_data_provider": self.market_data_provider,
+            "twelve_data_api_key": "***" if self.twelve_data_api_key else None,
+            "twelve_data_symbols": self.twelve_data_symbols,
+            "twelve_data_exchange": self.twelve_data_exchange,
+            "twelve_data_base_url": self.twelve_data_base_url,
+            "twelve_data_rate_limit_per_minute": self.twelve_data_rate_limit_per_minute,
+            "twelve_data_poll_interval_seconds": self.twelve_data_poll_interval_seconds,
+            "twelve_data_timeout_seconds": self.twelve_data_timeout_seconds,
+            "twelve_data_is_delayed": self.twelve_data_is_delayed,
             "broker_provider": self.broker_provider,
             "database_url": self.database_url,
             "llm_provider": self.llm_provider,
@@ -233,6 +258,14 @@ def get_settings(
         log_level=source.get("LOG_LEVEL", "INFO"),
         kaiser_language_mode=source.get("KAISER_LANGUAGE_MODE", "tanglish"),
         market_data_provider=source.get("MARKET_DATA_PROVIDER", "mock"),
+        twelve_data_api_key=source.get("TWELVE_DATA_API_KEY", None),
+        twelve_data_symbols=source.get("TWELVE_DATA_SYMBOLS", "RELIANCE,TCS,INFY"),
+        twelve_data_exchange=source.get("TWELVE_DATA_EXCHANGE", "NSE"),
+        twelve_data_base_url=source.get("TWELVE_DATA_BASE_URL", "https://api.twelvedata.com"),
+        twelve_data_rate_limit_per_minute=int(source.get("TWELVE_DATA_RATE_LIMIT_PER_MINUTE", "8")),
+        twelve_data_poll_interval_seconds=float(source.get("TWELVE_DATA_POLL_INTERVAL_SECONDS", "15.0")),
+        twelve_data_timeout_seconds=float(source.get("TWELVE_DATA_TIMEOUT_SECONDS", "10.0")),
+        twelve_data_is_delayed=parse_bool(source.get("TWELVE_DATA_IS_DELAYED", "true"), "TWELVE_DATA_IS_DELAYED"),
         broker_provider=source.get("BROKER_PROVIDER", "none"),
         database_url=source.get("DATABASE_URL", "sqlite:///data/kaiser.db"),
         llm_provider=source.get("LLM_PROVIDER", "mock"),

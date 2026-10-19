@@ -27,6 +27,7 @@ from app.market.historical.storage import (
     HistoricalBarRepository,
     SQLiteHistoricalBarRepository,
 )
+from app.market.historical.twelve_data import TwelveDataHistoricalProvider
 
 __all__ = [
     "HistoricalBarRequest",
@@ -35,6 +36,7 @@ __all__ = [
     "HistoricalProviderStatus",
     "HistoricalDataProvider",
     "MockHistoricalDataProvider",
+    "TwelveDataHistoricalProvider",
     "HistoricalDataLoader",
     "register_historical_handlers",
     "get_base_price_for_symbol",
