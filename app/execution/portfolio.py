@@ -35,10 +35,12 @@ class PaperPosition:
     def __post_init__(self) -> None:
         if not self.symbol:
             raise ValidationError("PaperPosition symbol is required.")
-        if self.quantity < 0:
-            raise ValidationError(f"PaperPosition quantity cannot be negative, got {self.quantity}")
-        if self.avg_entry_price < 0:
-            raise ValidationError(f"PaperPosition avg_entry_price cannot be negative, got {self.avg_entry_price}")
+        if not math.isfinite(self.quantity) or self.quantity < 0:
+            raise ValidationError(f"PaperPosition quantity must be non-negative finite float, got {self.quantity}")
+        if not math.isfinite(self.avg_entry_price) or self.avg_entry_price < 0:
+            raise ValidationError(f"PaperPosition avg_entry_price must be non-negative finite float, got {self.avg_entry_price}")
+        if not math.isfinite(self.current_price) or self.current_price < 0:
+            raise ValidationError(f"PaperPosition current_price must be non-negative finite float, got {self.current_price}")
 
     @property
     def cost_basis(self) -> float:
@@ -190,6 +192,18 @@ class PaperPortfolio:
 
         return 0.0
 
+    def reset(self, initial_cash: Optional[float] = None) -> None:
+        """Reset portfolio accounting state cleanly for recovery or reinitialization."""
+        if initial_cash is not None:
+            if initial_cash <= 0 or not math.isfinite(initial_cash):
+                raise ValidationError(f"initial_cash must be positive finite, got {initial_cash}")
+            self.initial_cash = round(float(initial_cash), 4)
+
+        self.available_cash = self.initial_cash
+        self.realized_pnl = 0.0
+        self.total_fees_paid = 0.0
+        self.positions.clear()
+
     def mark_to_market(self, quote_or_symbol: Quote | str, price: Optional[float] = None) -> None:
         """Update mark-to-market valuations for open positions with latest quote or symbol/price."""
         if isinstance(quote_or_symbol, Quote):
@@ -200,7 +214,7 @@ class PaperPortfolio:
             target_price = price if price is not None else 0.0
 
         pos = self.positions.get(symbol)
-        if pos is not None and target_price > 0:
+        if pos is not None and math.isfinite(target_price) and target_price > 0:
             pos.current_price = target_price
 
     def to_dict(self) -> Dict[str, Any]:

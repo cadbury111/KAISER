@@ -58,6 +58,20 @@ class PaperLedgerEntry:
             raise ValidationError(f"cash_change must be a finite float, got {self.cash_change}")
         if not math.isfinite(self.cash_balance_after):
             raise ValidationError(f"cash_balance_after must be a finite float, got {self.cash_balance_after}")
+        if not math.isfinite(self.fee) or self.fee < 0:
+            raise ValidationError(f"fee must be a non-negative finite float, got {self.fee}")
+        if not math.isfinite(self.realized_pnl):
+            raise ValidationError(f"realized_pnl must be a finite float, got {self.realized_pnl}")
+
+        # Safety Invariant: Ledger must never persist credentials or authentication secrets
+        forbidden_keys = {
+            "api_key", "secret", "password", "token", "access_token",
+            "private_key", "secret_key", "credential", "credentials", "auth_token",
+        }
+        for k in self.metadata:
+            norm_k = str(k).lower().strip()
+            if any(bad in norm_k for bad in forbidden_keys):
+                raise ValidationError(f"PaperLedgerEntry metadata must not contain credential or secret keys: '{k}'")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert ledger entry to dictionary."""

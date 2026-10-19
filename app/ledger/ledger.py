@@ -107,7 +107,7 @@ class PaperLedger:
                            cash_balance_after, realized_pnl, idempotency_key,
                            provenance_id, correlation_id, metadata_json
                     FROM paper_ledger_entries
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC, rowid ASC
                     """
                 )
                 for row in cursor.fetchall():
@@ -116,6 +116,12 @@ class PaperLedger:
                         symbol, side, qty, price, fee, cash_chg,
                         cash_after, pnl, idemp_key, prov_id, corr_id, meta_json
                     ) = row
+                    
+                    try:
+                        parsed_meta = json.loads(meta_json) if meta_json else {}
+                    except Exception as json_err:
+                        raise ValidationError(f"Corrupted metadata JSON in ledger entry {entry_id}: {json_err}") from json_err
+
                     entry = PaperLedgerEntry(
                         entry_id=entry_id,
                         timestamp=ts,
@@ -133,7 +139,7 @@ class PaperLedger:
                         idempotency_key=idemp_key,
                         provenance_id=prov_id,
                         correlation_id=corr_id,
-                        metadata=json.loads(meta_json) if meta_json else {},
+                        metadata=parsed_meta,
                     )
                     self._entries.append(entry)
                     self._by_idempotency_key[entry.idempotency_key] = entry
@@ -142,8 +148,11 @@ class PaperLedger:
                         if entry.order_id not in self._by_order_id:
                             self._by_order_id[entry.order_id] = []
                         self._by_order_id[entry.order_id].append(entry)
+        except ValidationError:
+            raise
         except Exception as err:
             logger.error("Failed to load ledger entries from SQLite: %s", err)
+            raise ValidationError(f"Failed to load ledger entries from SQLite ({self.db_path}): {err}") from err
 
     def _record_initial_capital(self, balance: float) -> None:
         """Record initial capital allocation entry in ledger."""
@@ -179,12 +188,54 @@ class PaperLedger:
             # 1. In-Memory Idempotency Check
             if entry.idempotency_key in self._by_idempotency_key:
                 logger.debug(
-                    "Deduplicating ledger entry [idempotency_key=%s, entry_id=%s]",
+                    "Deduplicating ledger entry in-memory [idempotency_key=%s, entry_id=%s]",
                     entry.idempotency_key,
                     entry.entry_id,
                 )
                 return False
 
+            # 2. SQLite Persistence (Atomic Transaction)
+            if self.db_path:
+                try:
+                    with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+                        with conn:  # Transaction context manager commits or rolls back
+                            cursor = conn.execute(
+                                """
+                                INSERT OR IGNORE INTO paper_ledger_entries (
+                                    entry_id, timestamp, entry_type, order_id, client_order_id,
+                                    symbol, side, quantity, price, fee, cash_change,
+                                    cash_balance_after, realized_pnl, idempotency_key,
+                                    provenance_id, correlation_id, metadata_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    entry.entry_id,
+                                    entry.timestamp,
+                                    entry.entry_type.value,
+                                    entry.order_id,
+                                    entry.client_order_id,
+                                    entry.symbol,
+                                    entry.side,
+                                    entry.quantity,
+                                    entry.price,
+                                    entry.fee,
+                                    entry.cash_change,
+                                    entry.cash_balance_after,
+                                    entry.realized_pnl,
+                                    entry.idempotency_key,
+                                    entry.provenance_id,
+                                    entry.correlation_id,
+                                    json.dumps(entry.metadata),
+                                ),
+                            )
+                            if cursor.rowcount == 0:
+                                # SQLite already had this entry (deduplicated)
+                                return False
+                except Exception as db_err:
+                    logger.error("Failed to persist ledger entry %s to SQLite: %s", entry.entry_id, db_err)
+                    raise
+
+            # 3. Append to In-Memory Indexes (only after successful persistence)
             self._entries.append(entry)
             self._by_idempotency_key[entry.idempotency_key] = entry
             self._by_entry_id[entry.entry_id] = entry
@@ -194,43 +245,7 @@ class PaperLedger:
                     self._by_order_id[entry.order_id] = []
                 self._by_order_id[entry.order_id].append(entry)
 
-            # 2. SQLite Persistence
-            if self.db_path:
-                try:
-                    with sqlite3.connect(self.db_path, timeout=5.0) as conn:
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO paper_ledger_entries (
-                                entry_id, timestamp, entry_type, order_id, client_order_id,
-                                symbol, side, quantity, price, fee, cash_change,
-                                cash_balance_after, realized_pnl, idempotency_key,
-                                provenance_id, correlation_id, metadata_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                entry.entry_id,
-                                entry.timestamp,
-                                entry.entry_type.value,
-                                entry.order_id,
-                                entry.client_order_id,
-                                entry.symbol,
-                                entry.side,
-                                entry.quantity,
-                                entry.price,
-                                entry.fee,
-                                entry.cash_change,
-                                entry.cash_balance_after,
-                                entry.realized_pnl,
-                                entry.idempotency_key,
-                                entry.provenance_id,
-                                entry.correlation_id,
-                                json.dumps(entry.metadata),
-                            ),
-                        )
-                except Exception as db_err:
-                    logger.error("Failed to persist ledger entry %s to SQLite: %s", entry.entry_id, db_err)
-
-            # 3. Publish Event if EventBus attached
+            # 4. Publish Event if EventBus attached
             if self.event_bus:
                 try:
                     from app.core.events import Event, EventType
@@ -246,6 +261,69 @@ class PaperLedger:
                     logger.error("Failed to publish ledger event: %s", err)
 
             return True
+
+    def record_entries(self, entries: List[PaperLedgerEntry]) -> int:
+        """Atomically record multiple ledger entries in a single SQLite transaction.
+
+        Returns:
+            int: Number of new entries recorded.
+        """
+        with self._lock:
+            new_entries = [e for e in entries if e.idempotency_key not in self._by_idempotency_key]
+            if not new_entries:
+                return 0
+
+            if self.db_path:
+                try:
+                    with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+                        with conn:
+                            for entry in new_entries:
+                                conn.execute(
+                                    """
+                                    INSERT OR IGNORE INTO paper_ledger_entries (
+                                        entry_id, timestamp, entry_type, order_id, client_order_id,
+                                        symbol, side, quantity, price, fee, cash_change,
+                                        cash_balance_after, realized_pnl, idempotency_key,
+                                        provenance_id, correlation_id, metadata_json
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        entry.entry_id,
+                                        entry.timestamp,
+                                        entry.entry_type.value,
+                                        entry.order_id,
+                                        entry.client_order_id,
+                                        entry.symbol,
+                                        entry.side,
+                                        entry.quantity,
+                                        entry.price,
+                                        entry.fee,
+                                        entry.cash_change,
+                                        entry.cash_balance_after,
+                                        entry.realized_pnl,
+                                        entry.idempotency_key,
+                                        entry.provenance_id,
+                                        entry.correlation_id,
+                                        json.dumps(entry.metadata),
+                                    ),
+                                )
+                except Exception as db_err:
+                    logger.error("Failed atomic batch persistence to SQLite: %s", db_err)
+                    raise
+
+            # Update in-memory
+            recorded_count = 0
+            for entry in new_entries:
+                self._entries.append(entry)
+                self._by_idempotency_key[entry.idempotency_key] = entry
+                self._by_entry_id[entry.entry_id] = entry
+                if entry.order_id:
+                    if entry.order_id not in self._by_order_id:
+                        self._by_order_id[entry.order_id] = []
+                    self._by_order_id[entry.order_id].append(entry)
+                recorded_count += 1
+
+            return recorded_count
 
     def get_entries(
         self,
@@ -288,12 +366,38 @@ class PaperLedger:
             ReconciliationResult: Dict-like result supporting keys and unpacking.
         """
         with self._lock:
-            init_c = initial_cash if initial_cash is not None else (self.initial_balance or 0.0)
-            total_cash_change = sum(e.cash_change for e in self._entries)
-            computed_balance = round(init_c + total_cash_change, 4)
+            # Check for INITIAL_CAPITAL entry in the ledger
+            init_entries = [e for e in self._entries if e.entry_type == LedgerEntryType.INITIAL_CAPITAL]
+            has_init_entry = len(init_entries) > 0
+
+            init_mismatch = False
+            if has_init_entry:
+                base_cash = sum(e.cash_change for e in init_entries)
+                non_init_flow = sum(e.cash_change for e in self._entries if e.entry_type != LedgerEntryType.INITIAL_CAPITAL)
+                computed_balance = round(base_cash + non_init_flow, 4)
+                if initial_cash is not None and abs(initial_cash - base_cash) >= 0.0001:
+                    init_mismatch = True
+            else:
+                base_cash = initial_cash if initial_cash is not None else (self.initial_balance or 0.0)
+                total_flow = sum(e.cash_change for e in self._entries)
+                computed_balance = round(base_cash + total_flow, 4)
+
             exp_c = expected_current_cash if expected_current_cash is not None else computed_balance
             diff = round(abs(computed_balance - exp_c), 4)
-            is_matched = diff < 0.0001
+
+            # Check cash chain consistency: running cash_change should match cash_balance_after
+            chain_broken = False
+            running_cash = 0.0 if has_init_entry else base_cash
+            for e in self._entries:
+                running_cash = round(running_cash + e.cash_change, 4)
+                if abs(running_cash - e.cash_balance_after) >= 0.0001:
+                    chain_broken = True
+                    break
+
+            is_matched = (diff < 0.0001) and (not init_mismatch) and (not chain_broken)
+            if init_mismatch and initial_cash is not None:
+                diff = max(diff, round(abs(initial_cash - base_cash), 4))
+
             return ReconciliationResult(
                 is_balanced=is_matched,
                 discrepancy=diff,

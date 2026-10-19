@@ -14,6 +14,7 @@ CRITICAL SAFETY INVARIANTS:
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,7 @@ import uuid
 
 from app.core.config import Settings
 from app.core.events import Event, EventBus, EventType
+from app.core.exceptions import ValidationError
 from app.core.logging_config import get_logger
 from app.core.state import StateStore
 from app.execution.models import (
@@ -108,16 +110,19 @@ class PaperExecutionEngine:
         if self.event_bus:
             self._subscribe_to_market_events()
 
-        # Record initial capital in ledger if ledger is empty
-        if self.ledger.count() == 0:
+        # If ledger already contains records (e.g. SQLite recovery), restore state
+        if self.ledger.count() > 0:
+            self.recover_from_ledger()
+        else:
+            # Record initial capital in ledger if ledger is empty
             init_entry = PaperLedgerEntry(
                 entry_id=f"ledg_init_{uuid.uuid4().hex[:8]}",
                 timestamp=time.time(),
                 entry_type=LedgerEntryType.INITIAL_CAPITAL,
                 cash_change=self.portfolio.initial_cash,
                 cash_balance_after=self.portfolio.available_cash,
-                idempotency_key=f"init_deposit_{uuid.uuid4().hex[:8]}",
-                metadata={"initial_cash": self.portfolio.initial_cash},
+                idempotency_key=f"init_deposit_{self.name}_{self.portfolio.initial_cash}",
+                metadata={"initial_cash": self.portfolio.initial_cash, "description": "Initial paper capital allocation"},
             )
             self.ledger.record_entry(init_entry)
 
@@ -184,6 +189,236 @@ class PaperExecutionEngine:
             self.state_store.set("paper_orders_count", len(self._orders))
             self.state_store.set("paper_fills_count", len(self._fills))
             self.state_store.set("paper_status", "active" if self.is_enabled else "disabled")
+
+    def recover_from_ledger(self) -> Dict[str, Any]:
+        """Recover portfolio, orders, fills, and cash balances from the ledger audit trail.
+
+        Guarantees:
+        1. Idempotency: replaying multiple times yields identical financial state.
+        2. Zero cash duplication: initial cash is reset and not double-credited.
+        3. Reconstructs all open, filled, rejected, and cancelled orders.
+        4. Fails safely with explicit ValidationError on corrupted or inconsistent records.
+        """
+        with self._lock:
+            entries = self.ledger.get_entries(limit=1_000_000)
+            if not entries:
+                return {
+                    "recovered_orders": 0,
+                    "recovered_fills": 0,
+                    "available_cash": self.portfolio.available_cash,
+                    "positions": 0,
+                }
+
+            # 1. Inspect initial capital
+            init_entries = [e for e in entries if e.entry_type == LedgerEntryType.INITIAL_CAPITAL]
+            if init_entries:
+                first_init_cash = init_entries[0].cash_change
+                for ie in init_entries[1:]:
+                    if abs(ie.cash_change - first_init_cash) > 0.0001:
+                        raise ValidationError(
+                            f"Conflicting initial capital records in ledger: {ie.cash_change} vs {first_init_cash}"
+                        )
+                init_cash = first_init_cash
+            else:
+                init_cash = self.portfolio.initial_cash
+
+            # Reset portfolio cleanly
+            self.portfolio.reset(initial_cash=init_cash)
+
+            # Clear engine in-memory indices
+            self._orders.clear()
+            self._client_order_map.clear()
+            self._fills.clear()
+
+            # 2. Replay entries in chronological order
+            for entry in entries:
+                if not math.isfinite(entry.cash_change) or not math.isfinite(entry.cash_balance_after):
+                    raise ValidationError(f"Corrupted ledger entry {entry.entry_id}: non-finite cash values")
+
+                if entry.entry_type == LedgerEntryType.INITIAL_CAPITAL:
+                    continue
+
+                elif entry.entry_type == LedgerEntryType.ORDER_ACCEPTANCE:
+                    if not entry.order_id or not entry.symbol or not entry.side or entry.quantity is None or entry.quantity <= 0:
+                        raise ValidationError(f"Corrupted ORDER_ACCEPTANCE entry: {entry.entry_id}")
+
+                    order_type_str = entry.metadata.get("order_type")
+                    if not order_type_str:
+                        order_type_str = "LIMIT" if entry.price and entry.price > 0 else "MARKET"
+                    try:
+                        otype = PaperOrderType(order_type_str)
+                        oside = PaperOrderSide(entry.side)
+                    except Exception as err:
+                        raise ValidationError(f"Invalid order enum in ledger entry {entry.entry_id}: {err}") from err
+
+                    acc_order = PaperOrder(
+                        order_id=entry.order_id,
+                        client_order_id=entry.client_order_id or entry.order_id,
+                        symbol=entry.symbol,
+                        side=oside,
+                        order_type=otype,
+                        quantity=entry.quantity,
+                        limit_price=entry.price if entry.price and entry.price > 0 else None,
+                        status=PaperOrderStatus.ACCEPTED,
+                        created_at=entry.timestamp,
+                        updated_at=entry.timestamp,
+                        correlation_id=entry.correlation_id,
+                    )
+                    self._orders[entry.order_id] = acc_order
+                    if entry.client_order_id:
+                        self._client_order_map[entry.client_order_id] = entry.order_id
+
+                elif entry.entry_type == LedgerEntryType.ORDER_FILL:
+                    if (
+                        not entry.order_id
+                        or not entry.symbol
+                        or not entry.side
+                        or entry.quantity is None
+                        or entry.quantity <= 0
+                        or entry.price is None
+                        or entry.price <= 0
+                    ):
+                        raise ValidationError(f"Corrupted ORDER_FILL entry: {entry.entry_id}")
+
+                    fill_id = entry.metadata.get("fill_id") or (
+                        entry.idempotency_key.replace("order_fill_", "")
+                        if entry.idempotency_key.startswith("order_fill_")
+                        else f"fill_{entry.order_id}"
+                    )
+                    try:
+                        oside = PaperOrderSide(entry.side)
+                    except Exception as err:
+                        raise ValidationError(f"Invalid side enum in ORDER_FILL {entry.entry_id}: {err}") from err
+
+                    fill = PaperFill(
+                        fill_id=fill_id,
+                        order_id=entry.order_id,
+                        client_order_id=entry.client_order_id or entry.order_id,
+                        symbol=entry.symbol,
+                        side=oside,
+                        quantity=entry.quantity,
+                        price=entry.price,
+                        fee=entry.fee,
+                        slippage=float(entry.metadata.get("slippage", 0.0)),
+                        timestamp=entry.timestamp,
+                        market_data_timestamp=float(entry.metadata.get("market_data_timestamp", entry.timestamp)),
+                        market_data_source=str(entry.metadata.get("market_data_source", "replayed")),
+                        correlation_id=entry.correlation_id,
+                    )
+                    self.portfolio.apply_fill(fill)
+                    self._fills[fill_id] = fill
+
+                    existing = self._orders.get(entry.order_id)
+                    order_type_str = entry.metadata.get("order_type")
+                    if existing:
+                        otype = existing.order_type
+                        created_at = existing.created_at
+                        limit_price = existing.limit_price
+                    else:
+                        otype = PaperOrderType(order_type_str) if order_type_str else (
+                            PaperOrderType.LIMIT if entry.price and entry.price > 0 else PaperOrderType.MARKET
+                        )
+                        created_at = entry.timestamp
+                        limit_price = entry.price if otype == PaperOrderType.LIMIT else None
+
+                    filled_order = PaperOrder(
+                        order_id=entry.order_id,
+                        client_order_id=entry.client_order_id or entry.order_id,
+                        symbol=entry.symbol,
+                        side=oside,
+                        order_type=otype,
+                        quantity=entry.quantity,
+                        limit_price=limit_price,
+                        status=PaperOrderStatus.FILLED,
+                        created_at=created_at,
+                        updated_at=entry.timestamp,
+                        filled_at=entry.timestamp,
+                        fill_price=entry.price,
+                        filled_quantity=entry.quantity,
+                        fee=entry.fee,
+                        slippage=fill.slippage,
+                        correlation_id=entry.correlation_id,
+                    )
+                    self._orders[entry.order_id] = filled_order
+                    if entry.client_order_id:
+                        self._client_order_map[entry.client_order_id] = entry.order_id
+
+                elif entry.entry_type == LedgerEntryType.ORDER_REJECTION:
+                    if not entry.order_id:
+                        continue
+                    rej_code_str = entry.metadata.get("rejection_code")
+                    rej_code = PaperRejectionCode(rej_code_str) if rej_code_str else None
+                    rej_reason = entry.metadata.get("rejection_reason")
+                    order_type_str = entry.metadata.get("order_type", "MARKET")
+                    try:
+                        otype = PaperOrderType(order_type_str)
+                        oside = PaperOrderSide(entry.side) if entry.side else PaperOrderSide.BUY
+                    except Exception:
+                        otype = PaperOrderType.MARKET
+                        oside = PaperOrderSide.BUY
+
+                    rej_order = PaperOrder(
+                        order_id=entry.order_id,
+                        client_order_id=entry.client_order_id or entry.order_id,
+                        symbol=entry.symbol or "UNKNOWN",
+                        side=oside,
+                        order_type=otype,
+                        quantity=entry.quantity or 0.0,
+                        limit_price=entry.price,
+                        status=PaperOrderStatus.REJECTED,
+                        created_at=entry.timestamp,
+                        updated_at=entry.timestamp,
+                        rejection_code=rej_code,
+                        rejection_reason=rej_reason,
+                        correlation_id=entry.correlation_id,
+                    )
+                    self._orders[entry.order_id] = rej_order
+                    if entry.client_order_id:
+                        self._client_order_map[entry.client_order_id] = entry.order_id
+
+                elif entry.entry_type == LedgerEntryType.ORDER_CANCELLATION:
+                    if not entry.order_id:
+                        continue
+                    existing = self._orders.get(entry.order_id)
+                    can_reason = entry.metadata.get("cancellation_reason", "Cancelled")
+                    if existing:
+                        can_order = PaperOrder(
+                            order_id=existing.order_id,
+                            client_order_id=existing.client_order_id,
+                            symbol=existing.symbol,
+                            side=existing.side,
+                            order_type=existing.order_type,
+                            quantity=existing.quantity,
+                            limit_price=existing.limit_price,
+                            status=PaperOrderStatus.CANCELLED,
+                            created_at=existing.created_at,
+                            updated_at=entry.timestamp,
+                            rejection_reason=can_reason,
+                            correlation_id=existing.correlation_id,
+                        )
+                        self._orders[entry.order_id] = can_order
+
+            # 3. Post-recovery reconciliation
+            recon = self.ledger.reconcile(expected_current_cash=self.portfolio.available_cash)
+            if not recon["is_balanced"]:
+                raise ValidationError(
+                    f"Ledger reconciliation failed during recovery: computed={recon['computed_balance']} vs portfolio={self.portfolio.available_cash}, discrepancy={recon['discrepancy']}"
+                )
+
+            self._update_state_store()
+            logger.info(
+                "Paper execution engine recovered from ledger [orders=%d, fills=%d, cash=%.2f, positions=%d]",
+                len(self._orders),
+                len(self._fills),
+                self.portfolio.available_cash,
+                len(self.portfolio.positions),
+            )
+            return {
+                "recovered_orders": len(self._orders),
+                "recovered_fills": len(self._fills),
+                "available_cash": self.portfolio.available_cash,
+                "positions": len(self.portfolio.positions),
+            }
 
     def submit_order(
         self,
@@ -334,6 +569,7 @@ class PaperExecutionEngine:
                 cash_balance_after=self.portfolio.available_cash,
                 idempotency_key=f"order_accept_{order_id}",
                 correlation_id=cid,
+                metadata={"order_type": request.order_type.value},
             )
             self.ledger.record_entry(accept_entry)
             self._publish_event(EventType.PAPER_ORDER_ACCEPTED, accepted_order.to_dict(), correlation_id=cid)
@@ -423,7 +659,13 @@ class PaperExecutionEngine:
                 realized_pnl=self.portfolio.realized_pnl,
                 idempotency_key=f"order_fill_{fill.fill_id}",
                 correlation_id=cid,
-                metadata={"slippage": fill.slippage},
+                metadata={
+                    "fill_id": fill.fill_id,
+                    "slippage": fill.slippage,
+                    "order_type": request.order_type.value,
+                    "market_data_timestamp": fill.market_data_timestamp,
+                    "market_data_source": fill.market_data_source,
+                },
             )
             self.ledger.record_entry(fill_entry)
 
@@ -464,6 +706,7 @@ class PaperExecutionEngine:
             idempotency_key=f"order_reject_{order.order_id}",
             correlation_id=cid,
             metadata={
+                "order_type": order.order_type.value,
                 "rejection_code": order.rejection_code.value if order.rejection_code else None,
                 "rejection_reason": order.rejection_reason,
             },
@@ -540,7 +783,7 @@ class PaperExecutionEngine:
                 cash_balance_after=self.portfolio.available_cash,
                 idempotency_key=f"order_cancel_{order_id}",
                 correlation_id=order.correlation_id,
-                metadata={"cancellation_reason": reason},
+                metadata={"order_type": order.order_type.value, "cancellation_reason": reason},
             )
             self.ledger.record_entry(cancel_entry)
             self._publish_event(EventType.PAPER_ORDER_CANCELLED, cancelled_order.to_dict(), correlation_id=order.correlation_id)
@@ -549,11 +792,121 @@ class PaperExecutionEngine:
             logger.info("Paper order cancelled [order_id=%s, reason=%s]", order_id, reason)
             return PaperExecutionResult(success=True, order=cancelled_order)
 
+    def _process_pending_limit_orders(self, quote: Quote) -> List[PaperExecutionResult]:
+        """Check all open (ACCEPTED) limit orders for quote.symbol and execute if eligible."""
+        if not self.is_enabled:
+            return []
+
+        norm_sym = quote.symbol.strip().upper()
+        results: List[PaperExecutionResult] = []
+
+        # Find orders that are ACCEPTED, LIMIT, and match the symbol
+        pending_orders = [
+            o
+            for o in list(self._orders.values())
+            if o.symbol == norm_sym
+            and o.status == PaperOrderStatus.ACCEPTED
+            and o.order_type == PaperOrderType.LIMIT
+        ]
+
+        for order in pending_orders:
+            # Check broker execution against the incoming quote
+            is_filled, fill, fill_rej_code, fill_rej_reason = self.broker_adapter.execute_order(
+                order=order,
+                quote=quote,
+                reference_time=quote.timestamp,
+            )
+            if not is_filled:
+                continue
+
+            assert fill is not None
+            # Check cash sufficiency before applying fill for BUY orders
+            if order.side == PaperOrderSide.BUY:
+                cash_needed = round(fill.gross_notional + fill.fee, 4)
+                if self.portfolio.available_cash < cash_needed:
+                    logger.warning(
+                        "Pending limit order %s could not fill due to insufficient cash (%s < %s)",
+                        order.order_id,
+                        self.portfolio.available_cash,
+                        cash_needed,
+                    )
+                    continue
+
+            # Apply fill to portfolio
+            self.portfolio.apply_fill(fill)
+            self._fills[fill.fill_id] = fill
+
+            now = quote.timestamp
+            cid = order.correlation_id or uuid.uuid4().hex
+            filled_order = PaperOrder(
+                order_id=order.order_id,
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                side=order.side,
+                order_type=order.order_type,
+                quantity=order.quantity,
+                limit_price=order.limit_price,
+                status=PaperOrderStatus.FILLED,
+                created_at=order.created_at,
+                updated_at=now,
+                filled_at=fill.timestamp,
+                fill_price=fill.price,
+                filled_quantity=fill.quantity,
+                fee=fill.fee,
+                slippage=fill.slippage,
+                correlation_id=cid,
+            )
+            self._orders[order.order_id] = filled_order
+
+            # Record Fill in Ledger
+            fill_entry = PaperLedgerEntry(
+                entry_id=f"ledg_fill_{uuid.uuid4().hex[:8]}",
+                timestamp=now,
+                entry_type=LedgerEntryType.ORDER_FILL,
+                order_id=order.order_id,
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                side=order.side.value,
+                quantity=fill.quantity,
+                price=fill.price,
+                fee=fill.fee,
+                cash_change=fill.net_cash_impact,
+                cash_balance_after=self.portfolio.available_cash,
+                realized_pnl=self.portfolio.realized_pnl,
+                idempotency_key=f"order_fill_{fill.fill_id}",
+                correlation_id=cid,
+                metadata={
+                    "fill_id": fill.fill_id,
+                    "slippage": fill.slippage,
+                    "order_type": order.order_type.value,
+                    "market_data_timestamp": fill.market_data_timestamp,
+                    "market_data_source": fill.market_data_source,
+                },
+            )
+            self.ledger.record_entry(fill_entry)
+
+            # Publish events
+            self._publish_event(EventType.PAPER_ORDER_FILLED, filled_order.to_dict(), correlation_id=cid)
+            self._publish_event(EventType.PAPER_PORTFOLIO_UPDATED, self.portfolio.to_dict(), correlation_id=cid)
+
+            logger.info(
+                "Pending limit order filled on market update [order_id=%s, symbol=%s, price=%.2f, qty=%.2f]",
+                order.order_id,
+                order.symbol,
+                fill.price,
+                fill.quantity,
+            )
+            results.append(PaperExecutionResult(success=True, order=filled_order, fill=fill))
+
+        return results
+
     def on_market_quote(self, quote: Quote) -> None:
-        """Handle incoming market quote to update mark-to-market position valuations and cache."""
+        """Handle incoming market quote to update mark-to-market position valuations,
+        cache quotes, and check open pending limit orders for execution."""
         with self._lock:
             self._quotes[quote.symbol.strip().upper()] = quote
             self.portfolio.mark_to_market(quote)
+            self._process_pending_limit_orders(quote)
             self._update_state_store()
 
     def get_quote(self, symbol: str) -> Optional[Quote]:
