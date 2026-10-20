@@ -169,6 +169,12 @@ class PaperFill:
             raise ValidationError(f"PaperFill price must be positive finite, got {self.price}")
         if not math.isfinite(self.fee) or self.fee < 0:
             raise ValidationError(f"PaperFill fee cannot be negative, got {self.fee}")
+        if not math.isfinite(self.slippage) or self.slippage < 0:
+            raise ValidationError(f"PaperFill slippage cannot be negative or non-finite, got {self.slippage}")
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"PaperFill timestamp must be positive finite, got {self.timestamp}")
+        if not math.isfinite(self.market_data_timestamp) or self.market_data_timestamp <= 0:
+            raise ValidationError(f"PaperFill market_data_timestamp must be positive finite, got {self.market_data_timestamp}")
 
     @property
     def fill_price(self) -> float:

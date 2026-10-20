@@ -230,3 +230,37 @@ class PaperPortfolio:
             "total_fees_paid": round(self.total_fees_paid, 4),
             "positions": {sym: pos.to_dict() for sym, pos in self.positions.items()},
         }
+
+
+def compute_financial_digest(
+    portfolio: PaperPortfolio,
+    ledger: Optional[Any] = None,
+) -> str:
+    """Compute a deterministic, bit-level SHA-256 fingerprint of the financial simulation outcome.
+
+    Encodes cash balance, total equity, realized and unrealized P&L, fees,
+    sorted position holdings, and ledger reconciliation status into a canonical representation.
+    """
+    import hashlib
+
+    parts: List[str] = [
+        f"initial_cash={portfolio.initial_cash:.4f}",
+        f"available_cash={portfolio.available_cash:.4f}",
+        f"total_equity={portfolio.total_equity:.4f}",
+        f"realized_pnl={portfolio.realized_pnl:.4f}",
+        f"unrealized_pnl={portfolio.unrealized_pnl:.4f}",
+        f"total_fees_paid={portfolio.total_fees_paid:.4f}",
+    ]
+    # Sorted positions for deterministic ordering
+    for sym in sorted(portfolio.positions.keys()):
+        pos = portfolio.positions[sym]
+        parts.append(
+            f"pos:{sym}:qty={pos.quantity:.6f}:avg={pos.avg_entry_price:.4f}:cur={pos.current_price:.4f}:realized={pos.realized_pnl:.4f}:fees={pos.accumulated_fees:.4f}"
+        )
+    if ledger is not None:
+        recon = ledger.reconcile(expected_current_cash=portfolio.available_cash)
+        parts.append(
+            f"ledger:count={ledger.count()}:balance={recon['computed_balance']:.4f}:balanced={recon['is_balanced']}"
+        )
+    canonical_repr = "|".join(parts)
+    return hashlib.sha256(canonical_repr.encode("utf-8")).hexdigest()

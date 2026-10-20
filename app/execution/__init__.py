@@ -23,7 +23,7 @@ from app.execution.models import (
     PaperRejectionCode,
     PaperRiskConfig,
 )
-from app.execution.portfolio import PaperPosition, PaperPortfolio
+from app.execution.portfolio import PaperPosition, PaperPortfolio, compute_financial_digest
 from app.execution.risk import PaperRiskGate
 from app.execution.simulated_broker import SimulatedBrokerAdapter
 from app.execution.workflow import (
@@ -47,6 +47,7 @@ __all__ = [
     "PaperExecutionResult",
     "PaperPosition",
     "PaperPortfolio",
+    "compute_financial_digest",
     "PaperRiskGate",
     "SimulatedBrokerAdapter",
     "PaperExecutionEngine",

@@ -234,6 +234,8 @@ class PaperExecutionEngine:
             for entry in entries:
                 if not math.isfinite(entry.cash_change) or not math.isfinite(entry.cash_balance_after):
                     raise ValidationError(f"Corrupted ledger entry {entry.entry_id}: non-finite cash values")
+                if not math.isfinite(entry.fee) or not math.isfinite(entry.realized_pnl):
+                    raise ValidationError(f"Corrupted ledger entry {entry.entry_id}: non-finite fee or realized_pnl")
 
                 if entry.entry_type == LedgerEntryType.INITIAL_CAPITAL:
                     continue
@@ -436,6 +438,9 @@ class PaperExecutionEngine:
         Returns:
             PaperExecutionResult: Structured outcome with order, fill, or rejection details.
         """
+        if reference_time is not None:
+            if not math.isfinite(reference_time) or reference_time <= 0:
+                raise ValidationError(f"reference_time must be a positive finite number, got {reference_time}")
         now = reference_time if reference_time is not None else time.time()
         order_id = f"pord_{uuid.uuid4().hex[:12]}"
         client_order_id = request.client_order_id or order_id

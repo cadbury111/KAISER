@@ -40,7 +40,7 @@ from app.execution.models import (
     PaperRejectionCode,
     PaperRiskConfig,
 )
-from app.execution.portfolio import PaperPortfolio
+from app.execution.portfolio import PaperPortfolio, compute_financial_digest
 from app.ledger.ledger import PaperLedger
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
 from app.market.models import Quote
@@ -260,6 +260,7 @@ class PaperSimulationSession:
                 "computed_balance": recon["computed_balance"],
                 "expected_balance": recon["expected_balance"],
             },
+            "financial_digest": compute_financial_digest(portfolio, ledger),
         }
 
 
@@ -449,6 +450,9 @@ class PaperTradingWorkflowCoordinator:
         7. State & Ledger Reconciliation Verification
         8. Structured Workflow Outcome Return & Audit Persistence
         """
+        if reference_time is not None:
+            if not math.isfinite(reference_time) or reference_time <= 0:
+                raise ValidationError(f"reference_time must be a positive finite number, got {reference_time}")
         now = reference_time if reference_time is not None else time.time()
         workflow_id = f"pwf_{uuid.uuid4().hex[:12]}"
         cid = request.correlation_id or uuid.uuid4().hex
@@ -785,7 +789,7 @@ class PaperTradingWorkflowCoordinator:
                 assert fill is not None
                 if abs(order.filled_quantity - fill.quantity) > 1e-6:
                     raise ValidationError(f"Order filled quantity {order.filled_quantity} mismatch with fill {fill.quantity}")
-                if abs(order.fill_price - fill.price) > 1e-6:
+                if order.fill_price is None or abs(order.fill_price - fill.price) > 1e-6:
                     raise ValidationError(f"Order fill price {order.fill_price} mismatch with fill {fill.price}")
 
             audit_trail.append("STATE_RECONCILIATION: Portfolio and ledger balance verified")
@@ -839,6 +843,8 @@ class PaperTradingWorkflowCoordinator:
                 )
 
             return outcome
+
+    submit_order = submit_paper_order
 
     def cancel_order(
         self,
@@ -1052,4 +1058,5 @@ class PaperTradingWorkflowCoordinator:
                 "ledger_reconciliation": recon_data,
                 "active_session": active_sess,
                 "recent_outcomes": recent_outcomes,
+                "financial_digest": compute_financial_digest(self.engine.portfolio, self.engine.ledger) if self.engine else None,
             }

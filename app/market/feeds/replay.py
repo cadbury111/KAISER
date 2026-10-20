@@ -8,13 +8,18 @@ All replayed records are explicitly stamped with source="replay".
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
+from app.core.exceptions import ValidationError
 from app.market.feeds.base import MarketFeed, MarketRecord
 from app.market.models import Bar, OrderBookSnapshot, Quote
 from app.market.normalizer import MarketDataNormalizer
+
+logger = logging.getLogger("market.feeds.replay")
 
 
 class ReplayMarketFeed(MarketFeed):
@@ -25,10 +30,14 @@ class ReplayMarketFeed(MarketFeed):
         name: str = "replay_feed",
         records: Optional[Sequence[Union[MarketRecord, Dict[str, Any]]]] = None,
         auto_start: bool = True,
+        strict_chronological: bool = False,
     ) -> None:
         super().__init__(name=name, source="replay")
+        self.strict_chronological = strict_chronological
         self._raw_records: List[Union[MarketRecord, Dict[str, Any]]] = list(records or [])
         self._current_index: int = 0
+        self._records_rejected: int = 0
+        self._last_emitted_timestamp: Optional[float] = None
         if auto_start:
             self.start()
 
@@ -42,6 +51,11 @@ class ReplayMarketFeed(MarketFeed):
         """Total number of records available for replay."""
         return len(self._raw_records)
 
+    @property
+    def records_rejected(self) -> int:
+        """Total number of records rejected due to malformed schema or out-of-order timestamps."""
+        return self._records_rejected
+
     def has_next(self) -> bool:
         """Check whether more records remain in the replay buffer."""
         return self._current_index < len(self._raw_records)
@@ -50,6 +64,8 @@ class ReplayMarketFeed(MarketFeed):
         """Reset playback cursor back to start."""
         self._current_index = 0
         self._records_emitted = 0
+        self._records_rejected = 0
+        self._last_emitted_timestamp = None
 
     def load_records(self, records: Sequence[Union[MarketRecord, Dict[str, Any]]]) -> None:
         """Load a new batch of records and reset cursor."""
@@ -103,7 +119,26 @@ class ReplayMarketFeed(MarketFeed):
             return None
 
         raw = self._raw_records[self._current_index]
-        record = self._normalize_record(raw)
+        try:
+            record = self._normalize_record(raw)
+        except Exception as err:
+            self._records_rejected += 1
+            self._current_index += 1
+            if self.strict_chronological:
+                raise ValidationError(f"Malformed replay record at index {self._current_index - 1}: {err}") from err
+            logger.warning("Rejected malformed replay record at index %d: %s", self._current_index - 1, err)
+            return None
+
+        if self.strict_chronological and self._last_emitted_timestamp is not None:
+            if record.timestamp < self._last_emitted_timestamp:
+                self._records_rejected += 1
+                self._current_index += 1
+                raise ValidationError(
+                    f"Out-of-order replay record detected at index {self._current_index - 1}: "
+                    f"timestamp {record.timestamp} is earlier than previous timestamp {self._last_emitted_timestamp}"
+                )
+
+        self._last_emitted_timestamp = record.timestamp
         self._current_index += 1
         self._records_emitted += 1
         return record
@@ -120,3 +155,37 @@ class ReplayMarketFeed(MarketFeed):
             if rec is not None:
                 emitted.append(rec)
         return emitted
+
+    def compute_input_digest(self) -> str:
+        """Compute a deterministic SHA-256 digest of all records in the replay buffer.
+
+        Provides a reproducible cryptographic fingerprint of the input data stream.
+        """
+        hasher = hashlib.sha256()
+        for idx, raw in enumerate(self._raw_records):
+            try:
+                rec = self._normalize_record(raw)
+                if isinstance(rec, Quote):
+                    line = f"QUOTE:{rec.symbol}:{rec.timestamp:.6f}:{rec.last_price:.4f}:{rec.volume:.2f}\n"
+                elif isinstance(rec, Bar):
+                    line = f"BAR:{rec.symbol}:{rec.timestamp:.6f}:{rec.open:.4f}:{rec.high:.4f}:{rec.low:.4f}:{rec.close:.4f}:{rec.volume:.2f}\n"
+                else:
+                    line = f"BOOK:{rec.symbol}:{rec.timestamp:.6f}\n"
+                hasher.update(line.encode("utf-8"))
+            except Exception:
+                hasher.update(f"CORRUPT:{idx}\n".encode("utf-8"))
+        return hasher.hexdigest()
+
+    def get_replay_stats(self) -> Dict[str, Any]:
+        """Return audit and operational statistics for the replay feed."""
+        return {
+            "name": self.name,
+            "total_records": self.total_records,
+            "records_emitted": self._records_emitted,
+            "records_rejected": self._records_rejected,
+            "records_remaining": max(0, self.total_records - self._current_index),
+            "current_index": self._current_index,
+            "last_emitted_timestamp": self._last_emitted_timestamp,
+            "strict_chronological": self.strict_chronological,
+            "input_digest": self.compute_input_digest(),
+        }

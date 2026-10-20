@@ -245,6 +245,29 @@ The Portfolio Analytics Command Center dashboard enforces strict read-only opera
 
 ---
 
+## Paper Trading Simulation Reliability & Deterministic Replay (Phase 2, Step 59)
+
+### Deterministic Replay Validation
+KAISER enforces reproducible, bit-level deterministic paper trading simulations across market data replays and portfolio accounting:
+- **Strict Chronological Ordering**: `ReplayMarketFeed(strict_chronological=True)` validates that historical or recorded market data timestamps are strictly monotonically non-decreasing. Out-of-order records raise `ValidationError` and increment `_records_rejected`.
+- **Deterministic Fingerprints**:
+  - `compute_input_digest()`: Computes an SHA-256 digest of normalized market data inputs (`symbol`, `timestamp`, `bid`, `ask`, `last`, `volume`).
+  - `compute_financial_digest()`: Computes an SHA-256 digest over portfolio cash, equity, realized/unrealized P&L, cumulative fees, sorted position holdings, and ledger entries.
+  - Repeated simulation sessions running over identical input events and initial state produce bit-level identical financial outcomes and matching SHA-256 fingerprints.
+- **Input Integrity & Non-Finite Value Rejection**:
+  - Non-finite numeric values (`NaN`, `Inf`, `-Inf`) are rejected at the data feed, order submission, fill execution, and ledger entry boundaries.
+  - Inverted quote spreads (`bid > ask`) or negative/zero prices are rejected safely.
+  - Malformed or out-of-order replay events are rejected without halting feed iteration or corrupting state.
+- **Accounting & Persistence Invariants**:
+  - **Rejected Order Invariance**: Rejected orders (e.g. risk breaches, non-finite limit prices) leave portfolio cash, positions, and ledger entries completely unmodified.
+  - **Duplicate Order Idempotency**: Resubmission of an already accepted/filled `order_id` is rejected as duplicate without double-counting financial effects.
+  - **Long-Only Enforcement**: Short-selling is strictly rejected (`INSUFFICIENT_POSITION`).
+  - **Cost Basis & Realized P&L**: Weighted average cost basis is maintained across incremental buys; full and partial sells compute exact realized P&L, clean up closed positions, and update cash atomically.
+  - **Ledger Restart Recovery**: Full crash recovery from SQLite ledger accurately reconstructs cash, positions, fees, and realized P&L; subsequent recovery passes are idempotent.
+  - **Transaction Atomicity**: Database failures during fill persistence roll back cleanly, preserving ledger balance consistency.
+
+---
+
 ## Running Tests
 
 Execute the full deterministic test suite:
@@ -260,5 +283,10 @@ python -m pytest tests/test_phase_2_step_57_security_audit.py -v
 Execute the Step 58 Security Regression & Configuration Matrix test suite:
 ```bash
 python -m pytest tests/test_phase_2_step_58_security_matrix.py -v
+```
+
+Execute the Step 59 Paper Trading Simulation Reliability & Deterministic Replay test suite:
+```bash
+python -m pytest tests/test_phase_2_step_59_simulation_replay.py -v
 ```
 
