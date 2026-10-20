@@ -143,10 +143,12 @@ class Settings:
     playback_enabled: bool = False
     playback_device_id: int | None = None
 
-    # Portfolio Analytics Dashboard UI (Phase 2, Step 12)
+    # Portfolio Analytics Dashboard UI & Access Control (Phase 2, Step 12 & Step 56)
     dashboard_enabled: bool = False
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8080
+    dashboard_auth_token: str | None = None
+    dashboard_require_auth: bool = False
 
     # Paper Execution & Simulated Broker (Phase 2, Step 53)
     paper_execution_enabled: bool = False
@@ -200,6 +202,10 @@ class Settings:
             raise ConfigurationError(
                 f"Invalid DASHBOARD_PORT: {self.dashboard_port}. Port must be an integer between 0 and 65535."
             )
+
+        if self.dashboard_auth_token is not None:
+            clean_tok = self.dashboard_auth_token.strip()
+            object.__setattr__(self, "dashboard_auth_token", clean_tok if clean_tok else None)
 
         if self.paper_initial_cash <= 0:
             raise ConfigurationError(
@@ -262,6 +268,8 @@ class Settings:
             "dashboard_enabled": self.dashboard_enabled,
             "dashboard_host": self.dashboard_host,
             "dashboard_port": self.dashboard_port,
+            "dashboard_auth_token": "***" if self.dashboard_auth_token else None,
+            "dashboard_require_auth": self.dashboard_require_auth,
             "paper_execution_enabled": self.paper_execution_enabled,
             "paper_initial_cash": self.paper_initial_cash,
             "paper_max_order_notional": self.paper_max_order_notional,
@@ -327,6 +335,8 @@ def get_settings(
         dashboard_enabled=parse_bool(source.get("DASHBOARD_ENABLED", "false"), "DASHBOARD_ENABLED"),
         dashboard_host=source.get("DASHBOARD_HOST", "127.0.0.1"),
         dashboard_port=int(source.get("DASHBOARD_PORT", "8080")),
+        dashboard_auth_token=source.get("DASHBOARD_AUTH_TOKEN", None),
+        dashboard_require_auth=parse_bool(source.get("DASHBOARD_REQUIRE_AUTH", "false"), "DASHBOARD_REQUIRE_AUTH"),
         paper_execution_enabled=parse_bool(source.get("PAPER_EXECUTION_ENABLED", "false"), "PAPER_EXECUTION_ENABLED"),
         paper_initial_cash=float(source.get("PAPER_INITIAL_CASH", "100000.0")),
         paper_max_order_notional=float(source.get("PAPER_MAX_ORDER_NOTIONAL", "50000.0")),

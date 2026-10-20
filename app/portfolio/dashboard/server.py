@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,23 +46,72 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
     server: ThreadingHTTPServer  # Attached server instance
 
-    def do_HEAD(self) -> None:
-        """Handle read-only HEAD requests safely without sending body."""
-        parsed_url = urlparse(self.path)
-        path = parsed_url.path
-        if path in ("/", "/index.html"):
-            html = get_dashboard_html()
-            encoded = html.encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(encoded)))
-            self._add_security_headers()
-            self.end_headers()
-        else:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self._add_security_headers()
-            self.end_headers()
+    def _send_unauthorized_response(self, message: str = "Valid authentication credentials required.") -> None:
+        """Send a 401 Unauthorized response with WWW-Authenticate header and sanitized message."""
+        clean_data = sanitize_dict_for_export({
+            "error": "Unauthorized",
+            "message": message,
+        })
+        encoded = json.dumps(clean_data, indent=2).encode("utf-8")
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header("WWW-Authenticate", 'Bearer realm="KAISER Dashboard"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self._add_security_headers()
+        self.end_headers()
+        if not getattr(self, "_is_head", False):
+            self.wfile.write(encoded)
+
+    def _check_authorization(self) -> bool:
+        """Validate authorization credentials for protected endpoints.
+
+        Returns:
+            bool: True if authorized (or authentication not required), False if unauthorized.
+        """
+        server_auth_token: Optional[str] = getattr(self.server, "auth_token", None)
+        require_auth: bool = bool(getattr(self.server, "require_auth", False))
+
+        # If no server auth token is configured and auth is not strictly required, allow local access
+        if not server_auth_token and not require_auth:
+            return True
+
+        # If auth is required but no server token was configured, fail closed with 403 Forbidden
+        if require_auth and not server_auth_token:
+            self._send_json_response(
+                {
+                    "error": "Forbidden",
+                    "message": "Dashboard authentication is required, but no server authentication token is configured.",
+                },
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return False
+
+        # Extract token from headers (Authorization: Bearer <token> or X-API-Key: <token>)
+        supplied_token: Optional[str] = None
+        auth_header = self.headers.get("Authorization")
+        if auth_header:
+            parts = auth_header.strip().split(None, 1)
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                supplied_token = parts[1].strip()
+            else:
+                self._send_unauthorized_response(message="Invalid Authorization header format. Expected 'Bearer <token>'.")
+                return False
+
+        if not supplied_token:
+            api_key_header = self.headers.get("X-API-Key")
+            if api_key_header:
+                supplied_token = api_key_header.strip()
+
+        if not supplied_token:
+            self._send_unauthorized_response(message="Missing authentication credentials.")
+            return False
+
+        # Constant-time comparison to prevent timing side-channels
+        if server_auth_token is None or not secrets.compare_digest(supplied_token, server_auth_token):
+            self._send_unauthorized_response(message="Invalid authentication credentials.")
+            return False
+
+        return True
 
     def do_GET(self) -> None:
         """Handle incoming read-only GET requests."""
@@ -96,6 +146,22 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            # Check authorization for protected endpoints
+            is_paper_route = path.startswith("/api/paper")
+            require_auth_flag = bool(getattr(self.server, "require_auth", False))
+            server_token = getattr(self.server, "auth_token", None)
+
+            # Enforce authorization:
+            # 1. Any paper trading endpoint if server_token is set or require_auth is enabled.
+            # 2. Any /api/* endpoint (except public health /api/status) if require_auth is enabled.
+            if is_paper_route:
+                if server_token or require_auth_flag:
+                    if not self._check_authorization():
+                        return
+            elif require_auth_flag and path.startswith("/api/") and path != "/api/status":
+                if not self._check_authorization():
+                    return
+
             # 1. Main Dashboard Single-Page Application
             if path in ("/", "/index.html"):
                 html = get_dashboard_html()
@@ -3322,6 +3388,11 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
+        except (ValueError, TypeError) as conv_err:
+            self._send_json_response(
+                {"error": "Bad Request", "message": f"Invalid query parameter format: {conv_err}"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
         except ValidationError as val_err:
             self._send_json_response(
                 {"error": "Validation Error", "message": str(val_err)},
@@ -3356,6 +3427,14 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         """Reject PATCH requests with 405 Method Not Allowed."""
+        self._send_method_not_allowed()
+
+    def do_OPTIONS(self) -> None:
+        """Reject OPTIONS requests with 405 Method Not Allowed."""
+        self._send_method_not_allowed()
+
+    def do_TRACE(self) -> None:
+        """Reject TRACE requests with 405 Method Not Allowed."""
         self._send_method_not_allowed()
 
     def _send_method_not_allowed(self) -> None:
@@ -3454,6 +3533,8 @@ class PortfolioDashboardServer:
         audit_diagnostics_service: Optional[Any] = None,
         paper_coordinator: Optional[Any] = None,
         paper_execution_engine: Optional[Any] = None,
+        auth_token: Optional[str] = None,
+        require_auth: bool = False,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -3483,6 +3564,8 @@ class PortfolioDashboardServer:
             audit_diagnostics_service: Optional HistoricalReviewAuditDiagnosticsService instance.
             paper_coordinator: Optional PaperTradingWorkflowCoordinator instance.
             paper_execution_engine: Optional PaperExecutionEngine instance.
+            auth_token: Optional authentication secret token for dashboard access.
+            require_auth: If True, enforce authentication across all data endpoints.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -3524,6 +3607,8 @@ class PortfolioDashboardServer:
         self.audit_diagnostics_service = audit_diagnostics_service
         self.paper_coordinator = paper_coordinator
         self.paper_execution_engine = paper_execution_engine
+        self.auth_token = auth_token.strip() if (auth_token and auth_token.strip()) else None
+        self.require_auth = bool(require_auth)
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -3579,6 +3664,8 @@ class PortfolioDashboardServer:
             setattr(self._server, "audit_diagnostics_service", self.audit_diagnostics_service)
             setattr(self._server, "paper_coordinator", self.paper_coordinator)
             setattr(self._server, "paper_execution_engine", self.paper_execution_engine)
+            setattr(self._server, "auth_token", self.auth_token)
+            setattr(self._server, "require_auth", self.require_auth)
 
 
 

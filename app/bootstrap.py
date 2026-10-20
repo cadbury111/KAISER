@@ -789,6 +789,8 @@ def bootstrap_system(
         audit_diagnostics_service=audit_diagnostics_service,
         paper_coordinator=paper_coordinator,
         paper_execution_engine=paper_execution_engine,
+        auth_token=active_settings.dashboard_auth_token,
+        require_auth=active_settings.dashboard_require_auth,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)

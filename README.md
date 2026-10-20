@@ -177,6 +177,53 @@ Execution engine: locked
 
 ---
 
+## Operational Security & Dashboard Access Control (Phase 2, Step 56)
+
+### Access Control Model
+The Portfolio Analytics Command Center dashboard enforces strict read-only operation and defense-in-depth access controls:
+- **Loopback-Only Interface**: The dashboard server strictly binds to local loopback addresses (`127.0.0.1`, `localhost`, `::1`). Any attempt to configure an external or non-loopback host (such as `0.0.0.0` or public IP interfaces) is rejected at startup with a `ValidationError` / `ConfigurationError`.
+- **Token-Based Authorization**: When `DASHBOARD_AUTH_TOKEN` is configured or `DASHBOARD_REQUIRE_AUTH=true`:
+  - Protected endpoints require an authorization token provided via HTTP header:
+    - Standard header: `Authorization: Bearer <token>`
+    - Alternative header: `X-API-Key: <token>`
+  - Token comparison is strictly performed in constant time using Python standard library `secrets.compare_digest` to prevent timing side-channel attacks.
+  - Missing or invalid credentials result in HTTP `401 Unauthorized` with `WWW-Authenticate: Bearer realm="KAISER Dashboard"`.
+  - When `DASHBOARD_REQUIRE_AUTH=true` is set without configuring `DASHBOARD_AUTH_TOKEN`, the server fails closed, returning HTTP `403 Forbidden`.
+  - Authentication failure never mutates order, ledger, portfolio, or session state.
+- **Zero Credential Reflection**: Authentication tokens, secrets, and environment keys are never echoed in error responses, server access logs, or exception payloads. In settings serialization (`Settings.to_dict()`), tokens are masked (`***`).
+
+### Endpoints and HTTP Method Safety
+- **Read-Only Endpoints**:
+  - `GET /` and `GET /index.html`: Single-page analytics interface shell.
+  - `GET /api/status`: Public local health and invariant check (`execution_locked: true`, `read_only: true`).
+  - `GET /api/paper/summary` & `GET /api/paper/status`: Paper trading session, execution status, order statistics, and position summary (protected by token authorization).
+  - `GET /api/report/latest`, `/api/reports`, `/api/series/<report_id>`, `/api/diagnostics`, etc.: Read-only portfolio and diagnostic query endpoints.
+- **Prohibited HTTP Methods**:
+  - `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `TRACE` are rejected on all dashboard routes with HTTP `405 Method Not Allowed` and `Allow: GET, HEAD`.
+  - There is **no dashboard mutation endpoint** for order submission, cancellation, execution, or ledger modification. All paper trading orders must be submitted programmatically through the Python `PaperTradingWorkflowCoordinator`.
+
+### Paper Trading vs. Live Trading Boundary
+- **Simulated Paper Trading Only**: Paper trading executes exclusively against simulated order models, internal cash ledgers, and in-memory/SQLite accounting.
+- **Global Execution Lock Active**: `Settings.execution_locked` remains permanently `True`.
+- **No Broker Connection**: `Settings.broker_provider` remains `"none"`. Live broker adapters are never initialized, contacted, or loaded.
+- **Voice Safety Boundary**: Spoken trading commands (e.g. "buy", "sell", "order", "execute trade") are intercepted by the `VoiceCommandIntentResolver` as `PROHIBITED_TRADING_COMMAND` directives and rejected; voice intents have zero execution authority.
+
+### Configuration Environment Variables
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `DASHBOARD_ENABLED` | `false` | Enable local dashboard HTTP server |
+| `DASHBOARD_HOST` | `127.0.0.1` | Bind address (must be loopback: `127.0.0.1`, `localhost`, `::1`) |
+| `DASHBOARD_PORT` | `8080` | Bind port (0 for ephemeral dynamic port) |
+| `DASHBOARD_AUTH_TOKEN` | *(empty)* | Optional authorization secret token for protected dashboard endpoints |
+| `DASHBOARD_REQUIRE_AUTH` | `false` | When true, strictly enforces authentication across data endpoints |
+
+### Known Limitations & Security Notice
+- **No TLS Termination**: The built-in dashboard server uses Python's standard library `http.server` without built-in TLS. It is strictly engineered for local loopback development and research. Remote exposure across untrusted networks is prohibited.
+- **Not Enterprise Identity Management**: Token authorization provides a defense-in-depth barrier on the local host. It does not provide role-based access control (RBAC), OAuth2/OIDC federation, or multi-tenant user sessions.
+- **Security Certification Notice**: A passing test suite demonstrates automated compliance with defined unit, integration, and invariant criteria, but does not constitute an external penetration test, formal security audit, or production security certification.
+
+---
+
 ## Running Tests
 
 Execute the deterministic test suite:
