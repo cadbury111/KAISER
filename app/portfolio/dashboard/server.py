@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -357,6 +358,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     "paper_portfolio": paper_portfolio,
                 })
                 return
+
 
             # 8. Operational Diagnostics Snapshot & Bounded History Endpoint (/api/diagnostics)
             if path == "/api/diagnostics":
@@ -3424,7 +3426,84 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     "offset": offset_clamped,
                     "diagnostics": records_data,
                 })
+            # 13. Paper Order Lifecycle Metrics & Latency Profiling Endpoint (/api/paper/metrics)
+            if path == "/api/paper/metrics":
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                if coordinator is not None and hasattr(coordinator, "metrics_tracker"):
+                    tracker = coordinator.metrics_tracker
+                    summary = tracker.get_summary()
+                    profile = tracker.profiler.get_profile_summary()
+                else:
+                    summary = {
+                        "total_events_recorded": 0,
+                        "distinct_client_orders": 0,
+                        "distinct_order_ids": 0,
+                        "distinct_orders_tracked": 0,
+                        "active_orders": 0,
+                        "terminal_orders": {"completed": 0, "rejected": 0, "cancelled": 0, "failed": 0},
+                        "stage_counts": {},
+                        "status_counts": {},
+                        "duplicate_events_ignored": 0,
+                        "recent_events": [],
+                        "deterministic_digest": "",
+                    }
+                    profile = {"unit": "milliseconds", "stages": {}, "fingerprint": ""}
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "lifecycle": summary,
+                    "latency": profile,
+                })
                 return
+
+            # 14. Historical-Spread-Based Slippage Calibration Endpoint (/api/paper/calibration)
+            if path == "/api/paper/calibration":
+                symbol_param = query.get("symbol", [None])[0]
+                as_of_param = query.get("as_of", [None])[0]
+                as_of_time: Optional[float] = None
+                if as_of_param is not None:
+                    try:
+                        as_of_time = float(as_of_param)
+                        if not math.isfinite(as_of_time) or as_of_time < 0:
+                            raise ValueError()
+                    except ValueError:
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": f"Invalid as_of timestamp '{as_of_param}'. Must be a positive finite number."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                calibrator = getattr(coordinator, "calibrator", None) if coordinator is not None else None
+
+                if calibrator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "message": "Paper workflow coordinator or calibrator not available.",
+                    })
+                    return
+
+                if symbol_param:
+                    clean_sym = symbol_param.strip().upper()
+                    rep = calibrator.calibrate(clean_sym, as_of_time=as_of_time)
+                    rep_dict = rep.to_dict()
+                    self._send_json_response(rep_dict)
+                    return
+                else:
+                    all_reports = calibrator.calibrate_all(as_of_time=as_of_time)
+                    data = {sym: r.to_dict() for sym, r in all_reports.items()}
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "reports": data,
+                    })
+                    return
 
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
@@ -3586,6 +3665,7 @@ class PortfolioDashboardServer:
         paper_execution_engine: Optional[Any] = None,
         auth_token: Optional[str] = None,
         require_auth: bool = False,
+        workflow_coordinator: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -3656,7 +3736,7 @@ class PortfolioDashboardServer:
         self.reliability_service = reliability_service
         self.state_store = state_store
         self.audit_diagnostics_service = audit_diagnostics_service
-        self.paper_coordinator = paper_coordinator
+        self.paper_coordinator = workflow_coordinator or paper_coordinator
         self.paper_execution_engine = paper_execution_engine
 
         if auth_token is not None:

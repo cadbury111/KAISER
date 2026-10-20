@@ -25,6 +25,11 @@ from app.core.events import Event, EventBus, EventType
 from app.core.exceptions import ValidationError
 from app.core.logging_config import get_logger
 from app.core.state import StateStore
+from app.execution.metrics import (
+    LatencyStage,
+    OrderLifecycleStage,
+    OrderLifecycleTracker,
+)
 from app.execution.models import (
     PaperExecutionResult,
     PaperFill,
@@ -63,11 +68,13 @@ class PaperExecutionEngine:
         initial_cash: Optional[float] = None,
         fee_rate: Optional[float] = None,
         slippage_rate: Optional[float] = None,
+        metrics_tracker: Optional[OrderLifecycleTracker] = None,
     ) -> None:
         self.name = name
         self.settings = settings or Settings()
         self.event_bus = event_bus
         self.state_store = state_store
+        self.metrics_tracker = metrics_tracker or OrderLifecycleTracker()
 
         # Operational enablement flag
         self._enabled = enabled if enabled is not None else getattr(self.settings, "paper_execution_enabled", False)
@@ -509,14 +516,37 @@ class PaperExecutionEngine:
                     )
 
             # 4. Pre-Trade Risk Evaluation
+            t_risk_start = self.metrics_tracker.profiler.now()
             is_approved, rej_code, rej_reason = self.risk_gate.evaluate_order(
                 request=request,
                 portfolio=self.portfolio,
                 quote=market_quote,
                 reference_time=now,
             )
+            t_risk_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.RISK_VALIDATION, t_risk_end - t_risk_start)
 
             if not is_approved:
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.RISK_CHECKED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    timestamp=now,
+                    rejection_code=rej_code.value if rej_code else None,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    order_id=order_id,
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    timestamp=now,
+                    rejection_code=rej_code.value if rej_code else None,
+                )
                 rejected_order = PaperOrder(
                     order_id=order_id,
                     client_order_id=client_order_id,
@@ -543,6 +573,24 @@ class PaperExecutionEngine:
                 )
 
             # 5. Order Accepted by Risk Gate
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.RISK_CHECKED,
+                symbol=request.symbol,
+                status="APPROVED",
+                order_id=order_id,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                timestamp=now,
+            )
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.ORDER_ACCEPTED,
+                symbol=request.symbol,
+                status="ACCEPTED",
+                order_id=order_id,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                timestamp=now,
+            )
             accepted_order = PaperOrder(
                 order_id=order_id,
                 client_order_id=client_order_id,
@@ -576,20 +624,46 @@ class PaperExecutionEngine:
                 correlation_id=cid,
                 metadata={"order_type": request.order_type.value},
             )
+            t_ledg_acc_start = self.metrics_tracker.profiler.now()
             self.ledger.record_entry(accept_entry)
+            t_ledg_acc_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.LEDGER_PERSISTENCE, t_ledg_acc_end - t_ledg_acc_start)
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.LEDGER_PERSISTED,
+                symbol=request.symbol,
+                status="PERSISTED",
+                order_id=order_id,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                timestamp=now,
+                details={"entry_type": "ORDER_ACCEPTANCE"},
+            )
             self._publish_event(EventType.PAPER_ORDER_ACCEPTED, accepted_order.to_dict(), correlation_id=cid)
 
             # 6. Simulated Broker Execution
             assert market_quote is not None
+            t_broker_start = self.metrics_tracker.profiler.now()
             is_filled, fill, fill_rej_code, fill_rej_reason = self.broker_adapter.execute_order(
                 order=accepted_order,
                 quote=market_quote,
                 reference_time=now,
             )
+            t_broker_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.BROKER_PROCESSING, t_broker_end - t_broker_start)
 
             # If order cannot fill immediately (e.g. limit order price not met)
             if not is_filled:
                 if fill_rej_code == PaperRejectionCode.LIMIT_PRICE_NOT_MET:
+                    self.metrics_tracker.record_stage(
+                        stage=OrderLifecycleStage.ORDER_PENDING,
+                        symbol=request.symbol,
+                        status="PENDING",
+                        order_id=order_id,
+                        client_order_id=client_order_id,
+                        correlation_id=cid,
+                        timestamp=now,
+                        details={"reason": fill_rej_reason},
+                    )
                     return PaperExecutionResult(
                         success=False,
                         order=accepted_order,
@@ -598,6 +672,16 @@ class PaperExecutionEngine:
                         rejection_reason=fill_rej_reason,
                     )
                 else:
+                    self.metrics_tracker.record_stage(
+                        stage=OrderLifecycleStage.ORDER_REJECTED,
+                        symbol=request.symbol,
+                        status="REJECTED",
+                        order_id=order_id,
+                        client_order_id=client_order_id,
+                        correlation_id=cid,
+                        timestamp=now,
+                        rejection_code=fill_rej_code.value if fill_rej_code else None,
+                    )
                     rej_order = PaperOrder(
                         order_id=order_id,
                         client_order_id=client_order_id,
@@ -626,6 +710,17 @@ class PaperExecutionEngine:
             assert fill is not None
             self.portfolio.apply_fill(fill)
             self._fills[fill.fill_id] = fill
+
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.FILL_GENERATED,
+                symbol=request.symbol,
+                status="FILLED",
+                order_id=order_id,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                timestamp=now,
+                details={"fill_id": fill.fill_id, "price": fill.price, "quantity": fill.quantity},
+            )
 
             filled_order = PaperOrder(
                 order_id=order_id,
@@ -672,7 +767,20 @@ class PaperExecutionEngine:
                     "market_data_source": fill.market_data_source,
                 },
             )
+            t_ledg_fill_start = self.metrics_tracker.profiler.now()
             self.ledger.record_entry(fill_entry)
+            t_ledg_fill_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.LEDGER_PERSISTENCE, t_ledg_fill_end - t_ledg_fill_start)
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.LEDGER_PERSISTED,
+                symbol=request.symbol,
+                status="PERSISTED",
+                order_id=order_id,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                timestamp=now,
+                details={"entry_type": "ORDER_FILL", "fill_id": fill.fill_id},
+            )
 
             # Publish Events & Update StateStore
             self._publish_event(EventType.PAPER_ORDER_FILLED, filled_order.to_dict(), correlation_id=cid)
@@ -792,6 +900,16 @@ class PaperExecutionEngine:
             )
             self.ledger.record_entry(cancel_entry)
             self._publish_event(EventType.PAPER_ORDER_CANCELLED, cancelled_order.to_dict(), correlation_id=order.correlation_id)
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.ORDER_CANCELLED,
+                symbol=order.symbol,
+                status="CANCELLED",
+                order_id=order_id,
+                client_order_id=order.client_order_id,
+                correlation_id=order.correlation_id,
+                timestamp=now,
+                details={"cancellation_reason": reason},
+            )
             self._update_state_store()
 
             logger.info("Paper order cancelled [order_id=%s, reason=%s]", order_id, reason)
@@ -966,4 +1084,6 @@ class PaperExecutionEngine:
                 "total_fills": len(self._fills),
                 "portfolio": self.portfolio.to_dict(),
                 "ledger_entries_count": self.ledger.count(),
+                "lifecycle_metrics": self.metrics_tracker.get_summary(),
+                "latency_profile": self.metrics_tracker.profiler.get_profile(),
             }

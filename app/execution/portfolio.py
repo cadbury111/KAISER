@@ -99,6 +99,11 @@ class PaperPortfolio:
         self.positions: Dict[str, PaperPosition] = {}
 
     @property
+    def cash(self) -> float:
+        """Alias for available_cash."""
+        return self.available_cash
+
+    @property
     def total_position_value(self) -> float:
         """Sum of market values of all open positions."""
         return round(sum(pos.market_value for pos in self.positions.values()), 4)

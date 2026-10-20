@@ -28,7 +28,17 @@ from app.core.events import Event, EventBus, EventType
 from app.core.exceptions import ValidationError
 from app.core.logging_config import get_logger
 from app.core.state import StateStore
+from app.execution.calibration import (
+    HistoricalSpreadCalibrator,
+    SpreadCalibrationReport,
+    SpreadObservation,
+)
 from app.execution.engine import PaperExecutionEngine
+from app.execution.metrics import (
+    LatencyStage,
+    OrderLifecycleStage,
+    OrderLifecycleTracker,
+)
 from app.execution.models import (
     PaperExecutionResult,
     PaperFill,
@@ -94,6 +104,7 @@ class PaperWorkflowRequest:
     session_id: Optional[str] = None
     notes: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    quote: Optional[Quote] = None
 
     def __post_init__(self) -> None:
         """Validate input parameters and sanitize against malicious payloads."""
@@ -276,6 +287,8 @@ class PaperTradingWorkflowCoordinator:
         market_service: Optional[Any] = None,
         name: str = "paper_workflow_coordinator",
         enabled: Optional[bool] = None,
+        metrics_tracker: Optional[OrderLifecycleTracker] = None,
+        calibrator: Optional[HistoricalSpreadCalibrator] = None,
     ) -> None:
         self.name = name
         self.settings = settings or Settings()
@@ -283,6 +296,17 @@ class PaperTradingWorkflowCoordinator:
         self.event_bus = event_bus or (engine.event_bus if engine else None)
         self.state_store = state_store or (engine.state_store if engine else None)
         self.market_service = market_service
+
+        # Attach metrics tracker and calibrator
+        self.metrics_tracker = metrics_tracker or (
+            self.engine.metrics_tracker if self.engine and hasattr(self.engine, "metrics_tracker") else OrderLifecycleTracker()
+        )
+        if self.engine and hasattr(self.engine, "metrics_tracker"):
+            self.engine.metrics_tracker = self.metrics_tracker
+
+        self.calibrator = calibrator or HistoricalSpreadCalibrator(
+            risk_config=self.engine.risk_config if self.engine else None
+        )
 
         # Enabled flag respects explicit override or system settings
         self._enabled = (
@@ -461,6 +485,16 @@ class PaperTradingWorkflowCoordinator:
 
         with self._lock:
             # Stage 0: Lifecycle Event: Workflow Requested
+            t_workflow_start = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.REQUEST_RECEIVED,
+                symbol=request.symbol,
+                status="RECEIVED",
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                session_id=request.session_id,
+                timestamp=now,
+            )
             try:
                 self._publish_event(
                     EventType.PAPER_WORKFLOW_REQUESTED,
@@ -477,6 +511,20 @@ class PaperTradingWorkflowCoordinator:
                     correlation_id=cid,
                 )
             except Exception as pub_err:
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    details={"error": str(pub_err)},
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 return PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -489,9 +537,36 @@ class PaperTradingWorkflowCoordinator:
                 )
 
             # Stage 1: Validate Paper Execution is Explicitly Enabled
+            t_val_start = self.metrics_tracker.profiler.now()
             if not self.is_enabled:
+                t_val_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.REQUEST_VALIDATION, t_val_end - t_val_start)
                 rejection_reason = "Paper execution is disabled in system settings (PAPER_EXECUTION_ENABLED=false)"
                 audit_trail.append("REJECTED: Paper execution disabled")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.PAPER_EXECUTION_DISABLED.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.PAPER_EXECUTION_DISABLED.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -509,8 +584,34 @@ class PaperTradingWorkflowCoordinator:
 
             # Stage 2: Idempotency Check & Request Validation
             if client_order_id in self._outcomes_by_client_id:
+                t_val_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.REQUEST_VALIDATION, t_val_end - t_val_start)
                 existing_outcome = self._outcomes_by_client_id[client_order_id]
                 audit_trail.append(f"REJECTED: Duplicate client_order_id '{client_order_id}'")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.DUPLICATE_ORDER.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.DUPLICATE_ORDER.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -532,6 +633,18 @@ class PaperTradingWorkflowCoordinator:
             assert self.engine is not None, "Engine must be attached when coordinator is enabled"
 
             audit_trail.append("VALIDATION: Request syntax and parameters verified")
+            t_val_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.REQUEST_VALIDATION, t_val_end - t_val_start)
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.REQUEST_VALIDATED,
+                symbol=request.symbol,
+                status="VALIDATED",
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                session_id=request.session_id,
+                timestamp=now,
+            )
+
             try:
                 self._publish_event(
                     EventType.PAPER_WORKFLOW_VALIDATED,
@@ -544,6 +657,20 @@ class PaperTradingWorkflowCoordinator:
                     correlation_id=cid,
                 )
             except Exception as pub_err:
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    details={"error": str(pub_err)},
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 return PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -556,7 +683,8 @@ class PaperTradingWorkflowCoordinator:
                 )
 
             # Stage 3: Resolve Requested Symbol Against Eligible Market Data
-            quote = market_quote
+            t_quote_start = self.metrics_tracker.profiler.now()
+            quote = market_quote or getattr(request, "quote", None)
             if quote is None:
                 quote = self.engine.get_quote(request.symbol)
 
@@ -581,7 +709,33 @@ class PaperTradingWorkflowCoordinator:
                         logger.error("Failed to parse quote from market_service: %s", err)
 
             if quote is None:
+                t_quote_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
                 audit_trail.append(f"REJECTED: Missing market data for '{request.symbol}'")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.MISSING_MARKET_DATA.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.MISSING_MARKET_DATA.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -599,7 +753,33 @@ class PaperTradingWorkflowCoordinator:
 
             # Stage 4: Check Market Data Quality, Timestamp Freshness, and Symbol Consistency
             if quote.symbol.upper() != request.symbol.upper():
+                t_quote_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
                 audit_trail.append(f"REJECTED: Quote symbol mismatch '{quote.symbol}' != '{request.symbol}'")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -616,7 +796,33 @@ class PaperTradingWorkflowCoordinator:
                 return outcome
 
             if not math.isfinite(quote.last_price) or quote.last_price <= 0:
+                t_quote_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
                 audit_trail.append(f"REJECTED: Quote price non-positive/finite: {quote.last_price}")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -634,7 +840,33 @@ class PaperTradingWorkflowCoordinator:
 
             if quote.bid is not None and quote.ask is not None and quote.bid > 0 and quote.ask > 0:
                 if quote.ask < quote.bid:
+                    t_quote_end = self.metrics_tracker.profiler.now()
+                    self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
                     audit_trail.append("REJECTED: Inverted bid-ask spread")
+                    self.metrics_tracker.record_stage(
+                        stage=OrderLifecycleStage.ORDER_REJECTED,
+                        symbol=request.symbol,
+                        status="REJECTED",
+                        client_order_id=client_order_id,
+                        correlation_id=cid,
+                        session_id=request.session_id,
+                        timestamp=now,
+                        rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                    )
+                    self.metrics_tracker.record_stage(
+                        stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                        symbol=request.symbol,
+                        status="FAILED",
+                        client_order_id=client_order_id,
+                        correlation_id=cid,
+                        session_id=request.session_id,
+                        timestamp=now,
+                        rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                    )
+                    self.metrics_tracker.profiler.record_duration(
+                        LatencyStage.WORKFLOW_E2E,
+                        self.metrics_tracker.profiler.now() - t_workflow_start,
+                    )
                     outcome = PaperWorkflowOutcome(
                         workflow_id=workflow_id,
                         correlation_id=cid,
@@ -653,7 +885,33 @@ class PaperTradingWorkflowCoordinator:
             freshness_threshold = getattr(self.engine.risk_config, "freshness_threshold_seconds", 60.0)
             data_age = max(0.0, now - quote.timestamp)
             if data_age > freshness_threshold:
+                t_quote_end = self.metrics_tracker.profiler.now()
+                self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
                 audit_trail.append(f"REJECTED: Stale market quote (age={data_age:.1f}s > {freshness_threshold:.1f}s)")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.STALE_MARKET_DATA.value,
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=PaperRejectionCode.STALE_MARKET_DATA.value,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -669,6 +927,19 @@ class PaperTradingWorkflowCoordinator:
                 self._record_rejection_event(outcome)
                 return outcome
 
+            t_quote_end = self.metrics_tracker.profiler.now()
+            self.metrics_tracker.profiler.record_duration(LatencyStage.QUOTE_VALIDATION, t_quote_end - t_quote_start)
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.QUOTE_VALIDATED,
+                symbol=request.symbol,
+                status="VALIDATED",
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                session_id=request.session_id,
+                timestamp=now,
+            )
+            # Add eligible observation to spread calibrator
+            self.calibrator.add_observation(quote, reference_time=now)
             audit_trail.append(f"MARKET_DATA_RESOLUTION: Verified quote for '{quote.symbol}' at {quote.last_price}")
 
             # Stage 5: Submit Request to Existing Paper Execution Engine & Risk Gate
@@ -692,6 +963,20 @@ class PaperTradingWorkflowCoordinator:
             except Exception as engine_exc:
                 logger.error("Engine order submission threw exception: %s", engine_exc)
                 audit_trail.append(f"FAILED: Engine exception: {engine_exc}")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    details={"error": str(engine_exc)},
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -719,6 +1004,21 @@ class PaperTradingWorkflowCoordinator:
                 rej_reason = exec_result.rejection_reason or order.rejection_reason or "Order rejected by risk gate"
                 audit_trail.append(f"REJECTED: {rej_code} - {rej_reason}")
 
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="REJECTED",
+                    order_id=order.order_id,
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    rejection_code=rej_code,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -757,6 +1057,31 @@ class PaperTradingWorkflowCoordinator:
             recon = self.engine.ledger.reconcile(expected_current_cash=self.engine.portfolio.available_cash)
             if not recon["is_balanced"]:
                 audit_trail.append(f"RECONCILIATION_FAILED: Discrepancy of {recon['discrepancy']} between portfolio and ledger")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.RECONCILIATION_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    order_id=order.order_id if order else None,
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                    details={"discrepancy": recon["discrepancy"]},
+                )
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_FAILED,
+                    symbol=request.symbol,
+                    status="FAILED",
+                    order_id=order.order_id if order else None,
+                    client_order_id=client_order_id,
+                    correlation_id=cid,
+                    session_id=request.session_id,
+                    timestamp=now,
+                )
+                self.metrics_tracker.profiler.record_duration(
+                    LatencyStage.WORKFLOW_E2E,
+                    self.metrics_tracker.profiler.now() - t_workflow_start,
+                )
                 reconciliation_failed_outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -793,6 +1118,16 @@ class PaperTradingWorkflowCoordinator:
                     raise ValidationError(f"Order fill price {order.fill_price} mismatch with fill {fill.price}")
 
             audit_trail.append("STATE_RECONCILIATION: Portfolio and ledger balance verified")
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.PORTFOLIO_RECONCILED,
+                symbol=request.symbol,
+                status="RECONCILED",
+                order_id=order.order_id if order else None,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                session_id=request.session_id,
+                timestamp=now,
+            )
 
             # Stage 8: Structured Workflow Outcome Return & Audit Persistence
             outcome = PaperWorkflowOutcome(
@@ -819,6 +1154,20 @@ class PaperTradingWorkflowCoordinator:
 
             self._outcomes[workflow_id] = outcome
             self._outcomes_by_client_id[client_order_id] = outcome
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.WORKFLOW_COMPLETED,
+                symbol=request.symbol,
+                status=workflow_status.value,
+                order_id=order.order_id if order else None,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                session_id=request.session_id,
+                timestamp=now,
+            )
+            self.metrics_tracker.profiler.record_duration(
+                LatencyStage.WORKFLOW_E2E,
+                self.metrics_tracker.profiler.now() - t_workflow_start,
+            )
 
             # Publish Workflow Completed Event
             try:
@@ -846,6 +1195,21 @@ class PaperTradingWorkflowCoordinator:
 
     submit_order = submit_paper_order
 
+    def execute_workflow(
+        self,
+        request: PaperWorkflowRequest,
+        quote: Optional[Quote] = None,
+        market_quote: Optional[Quote] = None,
+        reference_time: Optional[float] = None,
+    ) -> PaperWorkflowOutcome:
+        """Alias for submit_paper_order with flexible quote parameter passing."""
+        eff_quote = quote or market_quote or getattr(request, "quote", None)
+        return self.submit_paper_order(
+            request=request,
+            market_quote=eff_quote,
+            reference_time=reference_time,
+        )
+
     def cancel_order(
         self,
         order_id: str,
@@ -859,6 +1223,13 @@ class PaperTradingWorkflowCoordinator:
 
         with self._lock:
             if not self.is_enabled:
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol="UNKNOWN",
+                    status="REJECTED",
+                    order_id=order_id,
+                    rejection_code=PaperRejectionCode.PAPER_EXECUTION_DISABLED.value,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -879,6 +1250,14 @@ class PaperTradingWorkflowCoordinator:
             if not cancel_result.success:
                 code = cancel_result.rejection_code.value if cancel_result.rejection_code else "CANCEL_REJECTED"
                 audit_trail.append(f"REJECTED: Cannot cancel order {order_id}: {cancel_result.rejection_reason}")
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.ORDER_REJECTED,
+                    symbol=cancel_result.order.symbol if cancel_result.order else "UNKNOWN",
+                    status="REJECTED",
+                    order_id=order_id,
+                    client_order_id=cancel_result.order.client_order_id if cancel_result.order else None,
+                    rejection_code=code,
+                )
                 outcome = PaperWorkflowOutcome(
                     workflow_id=workflow_id,
                     correlation_id=cid,
@@ -897,6 +1276,16 @@ class PaperTradingWorkflowCoordinator:
             # Verify reconciliation post-cancellation
             recon = self.engine.ledger.reconcile(expected_current_cash=self.engine.portfolio.available_cash)
             audit_trail.append(f"CANCELLED: Order {order_id} successfully cancelled. Ledger balanced: {recon['is_balanced']}")
+
+            self.metrics_tracker.record_stage(
+                stage=OrderLifecycleStage.ORDER_CANCELLED,
+                symbol=cancel_result.order.symbol,
+                status="CANCELLED",
+                order_id=order_id,
+                client_order_id=cancel_result.order.client_order_id,
+                correlation_id=cid,
+                details={"reason": reason},
+            )
 
             outcome = PaperWorkflowOutcome(
                 workflow_id=workflow_id,
@@ -922,6 +1311,9 @@ class PaperTradingWorkflowCoordinator:
         with self._lock:
             if not self.is_enabled or self.engine is None:
                 return []
+
+            # Feed quote observation to spread calibrator
+            self.calibrator.add_observation(quote, reference_time=quote.timestamp)
 
             # 1. Forward quote to engine and receive results of filled pending limit orders
             exec_results = self.engine.on_market_quote(quote)
@@ -955,6 +1347,15 @@ class PaperTradingWorkflowCoordinator:
                 self._outcomes[new_outcome.workflow_id] = new_outcome
                 self._outcomes_by_client_id[client_oid] = new_outcome
                 completed_outcomes.append(new_outcome)
+
+                self.metrics_tracker.record_stage(
+                    stage=OrderLifecycleStage.WORKFLOW_COMPLETED,
+                    symbol=order.symbol,
+                    status=WorkflowStatus.FILLED.value,
+                    order_id=order.order_id,
+                    client_order_id=client_oid,
+                    correlation_id=new_outcome.correlation_id,
+                )
 
                 self._publish_event(
                     EventType.PAPER_WORKFLOW_COMPLETED,
@@ -995,6 +1396,35 @@ class PaperTradingWorkflowCoordinator:
         """Lookup workflow outcome by client_order_id."""
         with self._lock:
             return self._outcomes_by_client_id.get(client_order_id)
+
+    def get_lifecycle_summary(self) -> Dict[str, Any]:
+        """Return comprehensive order lifecycle metrics."""
+        return self.metrics_tracker.get_summary()
+
+    def get_latency_profile(self) -> Dict[str, Any]:
+        """Return execution latency profile across all workflow stages."""
+        return self.metrics_tracker.profiler.get_profile()
+
+    def get_calibration_summary(
+        self,
+        symbol: Optional[str] = None,
+        as_of_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Return advisory historical-spread slippage calibration report(s)."""
+        if symbol:
+            report = self.calibrator.calibrate(symbol, as_of_time=as_of_time)
+            return report.to_dict()
+        all_reports = self.calibrator.calibrate_all(as_of_time=as_of_time)
+        return {sym: rep.to_dict() for sym, rep in all_reports.items()}
+
+    def add_market_observation(
+        self,
+        quote_or_record: Quote | Dict[str, Any],
+        reference_time: Optional[float] = None,
+    ) -> Tuple[bool, Optional[str], Optional[SpreadObservation]]:
+        """Feed a market observation directly to the calibration component."""
+        ok, reason, obs = self.calibrator.add_observation(quote_or_record, reference_time=reference_time)
+        return ok, reason.value if reason else None, obs
 
     def get_summary(self) -> Dict[str, Any]:
         """Provide a minimal, strictly read-only paper workflow summary."""
@@ -1059,4 +1489,10 @@ class PaperTradingWorkflowCoordinator:
                 "active_session": active_sess,
                 "recent_outcomes": recent_outcomes,
                 "financial_digest": compute_financial_digest(self.engine.portfolio, self.engine.ledger) if self.engine else None,
+                "lifecycle_metrics": self.get_lifecycle_summary(),
+                "latency_profile": self.get_latency_profile(),
+                "calibration_summary": self.get_calibration_summary(),
+                "spread_calibration": self.get_calibration_summary(),
+                "metrics_digest": self.metrics_tracker.compute_digest(),
+                "latency_digest": self.metrics_tracker.profiler.compute_digest(),
             }
