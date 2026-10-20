@@ -117,6 +117,7 @@ from app.risk import PortfolioRiskMonitor, register_risk_handlers
 from app.execution import (
     PaperExecutionEngine,
     PaperRiskConfig,
+    PaperTradingWorkflowCoordinator,
 )
 from app.ledger import (
     PaperLedger,
@@ -183,6 +184,7 @@ class SystemStatus:
     audit_diagnostics_service: Optional[HistoricalReviewAuditDiagnosticsService] = None
     paper_execution_engine: Optional[PaperExecutionEngine] = None
     paper_ledger: Optional[PaperLedger] = None
+    paper_coordinator: Optional[PaperTradingWorkflowCoordinator] = None
 
 
 
@@ -718,6 +720,48 @@ def bootstrap_system(
         diagnostics_service=audit_diagnostics_service,
     )
 
+    # Initialize Paper Execution Engine, Ledger & Workflow Coordinator (Phase 2, Step 53 & 55)
+    paper_ledger: Optional[PaperLedger] = None
+    paper_execution_engine: Optional[PaperExecutionEngine] = None
+    paper_coordinator: Optional[PaperTradingWorkflowCoordinator] = None
+
+    if active_settings.paper_execution_enabled:
+        paper_ledger = PaperLedger(
+            event_bus=event_bus,
+            db_path=db_path if active_settings.database_url.startswith("sqlite") else None,
+            initial_balance=active_settings.paper_initial_cash,
+        )
+        paper_risk_config = PaperRiskConfig(
+            max_order_notional=active_settings.paper_max_order_notional,
+            max_position_exposure_pct=active_settings.paper_max_position_exposure_pct,
+            freshness_threshold_seconds=active_settings.paper_freshness_threshold_seconds,
+            allow_short_selling=False,
+        )
+        paper_execution_engine = PaperExecutionEngine(
+            event_bus=event_bus,
+            state_store=state_store,
+            ledger=paper_ledger,
+            initial_cash=active_settings.paper_initial_cash,
+            risk_config=paper_risk_config,
+            fee_rate=active_settings.paper_fee_rate,
+            slippage_rate=active_settings.paper_slippage_rate,
+        )
+        paper_coordinator = PaperTradingWorkflowCoordinator(
+            engine=paper_execution_engine,
+            settings=active_settings,
+            event_bus=event_bus,
+            state_store=state_store,
+            market_service=market_service,
+        )
+        logger.info(
+            "Paper execution engine initialized (cash=%.2f, max_notional=%.2f, max_exp=%.1f%%, fees=%.4f)",
+            active_settings.paper_initial_cash,
+            active_settings.paper_max_order_notional,
+            active_settings.paper_max_position_exposure_pct,
+            active_settings.paper_fee_rate,
+        )
+        logger.info("Paper trading workflow coordinator initialized")
+
     # Initialize Portfolio Analytics Dashboard UI Server (Phase 2, Step 12)
     portfolio_dashboard_server = PortfolioDashboardServer(
         reporting_service=portfolio_reporting_service,
@@ -743,6 +787,8 @@ def bootstrap_system(
         reliability_service=reliability_service,
         state_store=state_store,
         audit_diagnostics_service=audit_diagnostics_service,
+        paper_coordinator=paper_coordinator,
+        paper_execution_engine=paper_execution_engine,
     )
     if active_settings.dashboard_enabled:
         portfolio_dashboard_server.start(blocking=False)
@@ -752,39 +798,6 @@ def bootstrap_system(
         service=portfolio_reporting_service,
         server=portfolio_dashboard_server,
     )
-
-    # Initialize Paper Execution Engine & Paper Ledger (Phase 2, Step 53)
-    paper_ledger: Optional[PaperLedger] = None
-    paper_execution_engine: Optional[PaperExecutionEngine] = None
-
-    if active_settings.paper_execution_enabled:
-        paper_ledger = PaperLedger(
-            event_bus=event_bus,
-            db_path=db_path if active_settings.database_url.startswith("sqlite") else None,
-            initial_balance=active_settings.paper_initial_cash,
-        )
-        paper_risk_config = PaperRiskConfig(
-            max_order_notional=active_settings.paper_max_order_notional,
-            max_position_exposure_pct=active_settings.paper_max_position_exposure_pct,
-            freshness_threshold_seconds=active_settings.paper_freshness_threshold_seconds,
-            allow_short_selling=False,
-        )
-        paper_execution_engine = PaperExecutionEngine(
-            event_bus=event_bus,
-            state_store=state_store,
-            ledger=paper_ledger,
-            initial_cash=active_settings.paper_initial_cash,
-            risk_config=paper_risk_config,
-            fee_rate=active_settings.paper_fee_rate,
-            slippage_rate=active_settings.paper_slippage_rate,
-        )
-        logger.info(
-            "Paper execution engine initialized (cash=%.2f, max_notional=%.2f, max_exp=%.1f%%, fees=%.4f)",
-            active_settings.paper_initial_cash,
-            active_settings.paper_max_order_notional,
-            active_settings.paper_max_position_exposure_pct,
-            active_settings.paper_fee_rate,
-        )
 
 
 
@@ -880,6 +893,7 @@ def bootstrap_system(
         audit_diagnostics_service=audit_diagnostics_service,
         paper_execution_engine=paper_execution_engine,
         paper_ledger=paper_ledger,
+        paper_coordinator=paper_coordinator,
     )
 
     logger.info("System initialized successfully in '%s' mode.", status.environment)
@@ -927,6 +941,8 @@ def bootstrap_system(
     logger.info("Portfolio analytics dashboard UI: %s", dash_status)
     paper_status = "ready (isolated)" if paper_execution_engine else "disabled"
     logger.info("Paper execution engine: %s", paper_status)
+    paper_wf_status = "ready (orchestrated)" if paper_coordinator else "disabled"
+    logger.info("Paper trading workflow coordinator: %s", paper_wf_status)
     logger.info("Trading engine: %s", status.trading_engine)
     logger.info("Execution engine: %s", status.execution_engine)
 

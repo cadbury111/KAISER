@@ -26,6 +26,14 @@ from app.execution.models import (
 from app.execution.portfolio import PaperPosition, PaperPortfolio
 from app.execution.risk import PaperRiskGate
 from app.execution.simulated_broker import SimulatedBrokerAdapter
+from app.execution.workflow import (
+    PaperSimulationSession,
+    PaperTradingWorkflowCoordinator,
+    PaperWorkflowOutcome,
+    PaperWorkflowRequest,
+    WorkflowStage,
+    WorkflowStatus,
+)
 
 __all__ = [
     "PaperOrderSide",
@@ -42,4 +50,10 @@ __all__ = [
     "PaperRiskGate",
     "SimulatedBrokerAdapter",
     "PaperExecutionEngine",
+    "WorkflowStage",
+    "WorkflowStatus",
+    "PaperWorkflowRequest",
+    "PaperWorkflowOutcome",
+    "PaperSimulationSession",
+    "PaperTradingWorkflowCoordinator",
 ]

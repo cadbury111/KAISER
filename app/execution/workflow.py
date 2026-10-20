@@ -1,0 +1,1055 @@
+"""KAISER — Controlled Paper Trading Workflow & Simulation Orchestration.
+
+Coordinates explicitly requested paper orders across market data resolution,
+pre-trade risk validation, deterministic execution simulation, portfolio accounting,
+and auditable ledger reconciliation.
+
+SAFETY INVARIANTS:
+1. PURELY SIMULATED: Never connects to live broker, exchange, or order endpoint.
+2. EXECUTION LOCKED: Settings.execution_locked remains True; live trading remains uninitialized.
+3. FAIL CLOSED: Missing, invalid, or stale data leads to rejection, never synthetic fills.
+4. AUDITABLE & RECONCILED: Full correlation ID propagation, ledger verification, and event auditing.
+5. NO AUTONOMOUS ROUTING: No strategy-to-order, agent consensus, or voice execution without explicit user request.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+import math
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+import uuid
+
+from app.core.config import Settings
+from app.core.events import Event, EventBus, EventType
+from app.core.exceptions import ValidationError
+from app.core.logging_config import get_logger
+from app.core.state import StateStore
+from app.execution.engine import PaperExecutionEngine
+from app.execution.models import (
+    PaperExecutionResult,
+    PaperFill,
+    PaperOrder,
+    PaperOrderRequest,
+    PaperOrderSide,
+    PaperOrderStatus,
+    PaperOrderType,
+    PaperRejectionCode,
+    PaperRiskConfig,
+)
+from app.execution.portfolio import PaperPortfolio
+from app.ledger.ledger import PaperLedger
+from app.ledger.models import LedgerEntryType, PaperLedgerEntry
+from app.market.models import Quote
+
+logger = get_logger("execution.workflow")
+
+SAFE_SYMBOL_REGEX = re.compile(r"^[A-Za-z0-9_\-\.\:]+$")
+DANGEROUS_PAYLOAD_PATTERNS = re.compile(
+    r"(<script|eval\(|exec\(|os\.system|subprocess|__import__|import\s+os|system\(|rm\s+-rf)",
+    re.IGNORECASE,
+)
+
+
+class WorkflowStage(str, Enum):
+    """Execution stages traversed by a paper trading workflow."""
+
+    REQUEST_RECEIVED = "REQUEST_RECEIVED"
+    VALIDATION = "VALIDATION"
+    MARKET_DATA_RESOLUTION = "MARKET_DATA_RESOLUTION"
+    RISK_GATE = "RISK_GATE"
+    SIMULATED_EXECUTION = "SIMULATED_EXECUTION"
+    STATE_RECONCILIATION = "STATE_RECONCILIATION"
+    CANCELLATION = "CANCELLATION"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    REJECTED = "REJECTED"
+
+
+class WorkflowStatus(str, Enum):
+    """Terminal and intermediate operational states of a paper trading workflow."""
+
+    ACCEPTED = "ACCEPTED"           # Order accepted and pending (e.g. limit order not filled yet)
+    FILLED = "FILLED"               # Order executed and filled
+    REJECTED = "REJECTED"           # Request or order rejected by validation/risk/market-data
+    CANCELLED = "CANCELLED"         # Order cancelled
+    FAILED = "FAILED"               # Unhandled execution failure or invariant violation
+    RECONCILIATION_FAILED = "RECONCILIATION_FAILED"  # Ledger or state reconciliation discrepancy
+
+
+@dataclass(frozen=True)
+class PaperWorkflowRequest:
+    """Explicit, strongly-typed request for a single paper trading workflow execution."""
+
+    symbol: str
+    side: PaperOrderSide
+    order_type: PaperOrderType
+    quantity: float
+    limit_price: Optional[float] = None
+    client_order_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    session_id: Optional[str] = None
+    notes: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate input parameters and sanitize against malicious payloads."""
+        if not self.symbol or not isinstance(self.symbol, str) or not self.symbol.strip():
+            raise ValidationError("PaperWorkflowRequest symbol must be a non-empty string.")
+        norm_sym = self.symbol.strip().upper()
+        if not SAFE_SYMBOL_REGEX.match(norm_sym):
+            raise ValidationError(f"Symbol '{self.symbol}' contains invalid characters.")
+        object.__setattr__(self, "symbol", norm_sym)
+
+        if not isinstance(self.side, PaperOrderSide):
+            try:
+                object.__setattr__(self, "side", PaperOrderSide(str(self.side).upper()))
+            except Exception:
+                raise ValidationError(f"Invalid PaperOrderSide: {self.side}")
+
+        if not isinstance(self.order_type, PaperOrderType):
+            try:
+                object.__setattr__(self, "order_type", PaperOrderType(str(self.order_type).upper()))
+            except Exception:
+                raise ValidationError(f"Invalid PaperOrderType: {self.order_type}")
+
+        if not math.isfinite(self.quantity) or self.quantity <= 0:
+            raise ValidationError(f"Quantity must be a positive finite number, got {self.quantity}")
+
+        if self.order_type == PaperOrderType.LIMIT:
+            if self.limit_price is None or not math.isfinite(self.limit_price) or self.limit_price <= 0:
+                raise ValidationError("Limit orders require a positive finite limit_price.")
+
+        if self.notes:
+            if DANGEROUS_PAYLOAD_PATTERNS.search(str(self.notes)):
+                raise ValidationError("Notes contain prohibited executable code or shell injection patterns.")
+
+        if self.client_order_id is None:
+            object.__setattr__(self, "client_order_id", f"pwf_ord_{uuid.uuid4().hex[:12]}")
+
+        if self.correlation_id is None:
+            object.__setattr__(self, "correlation_id", uuid.uuid4().hex)
+
+
+@dataclass(frozen=True)
+class PaperWorkflowOutcome:
+    """Immutable outcome of a paper trading workflow with comprehensive audit references."""
+
+    workflow_id: str
+    correlation_id: str
+    client_order_id: str
+    status: WorkflowStatus
+    success: bool
+    stage: WorkflowStage
+    order: Optional[PaperOrder] = None
+    fill: Optional[PaperFill] = None
+    rejection_code: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    reconciliation_result: Optional[Dict[str, Any]] = None
+    audit_trail: Tuple[str, ...] = field(default_factory=tuple)
+    timestamp: float = field(default_factory=time.time)
+    session_id: Optional[str] = None
+    error_message: Optional[str] = None
+
+    @property
+    def is_filled(self) -> bool:
+        """True if and only if the order reached FILLED status with an executed fill."""
+        return (
+            self.status == WorkflowStatus.FILLED
+            and self.fill is not None
+            and self.order is not None
+            and self.order.status == PaperOrderStatus.FILLED
+        )
+
+    @property
+    def is_pending(self) -> bool:
+        """True if the order is accepted and pending (e.g. limit order awaiting market price match)."""
+        return (
+            self.status == WorkflowStatus.ACCEPTED
+            and self.fill is None
+            and self.order is not None
+            and self.order.status == PaperOrderStatus.ACCEPTED
+        )
+
+    @property
+    def is_rejected(self) -> bool:
+        """True if the workflow was rejected."""
+        return self.status == WorkflowStatus.REJECTED
+
+    @property
+    def is_cancelled(self) -> bool:
+        """True if the workflow order was cancelled."""
+        return self.status == WorkflowStatus.CANCELLED
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert outcome to dictionary representation."""
+        return {
+            "workflow_id": self.workflow_id,
+            "correlation_id": self.correlation_id,
+            "client_order_id": self.client_order_id,
+            "status": self.status.value,
+            "success": self.success,
+            "stage": self.stage.value,
+            "is_filled": self.is_filled,
+            "is_pending": self.is_pending,
+            "order": self.order.to_dict() if self.order else None,
+            "fill": self.fill.to_dict() if self.fill else None,
+            "rejection_code": self.rejection_code,
+            "rejection_reason": self.rejection_reason,
+            "reconciliation_result": self.reconciliation_result,
+            "audit_trail": list(self.audit_trail),
+            "timestamp": self.timestamp,
+            "session_id": self.session_id,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass
+class PaperSimulationSession:
+    """Lightweight session container grouping explicitly submitted paper orders."""
+
+    session_id: str
+    name: str
+    created_at: float
+    initial_cash: float
+    status: str = "ACTIVE"
+    stopped_at: Optional[float] = None
+    order_ids: List[str] = field(default_factory=list)
+    workflow_ids: List[str] = field(default_factory=list)
+    notes: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert session to dictionary."""
+        return {
+            "session_id": self.session_id,
+            "name": self.name,
+            "status": self.status,
+            "created_at": self.created_at,
+            "stopped_at": self.stopped_at,
+            "initial_cash": self.initial_cash,
+            "order_ids": list(self.order_ids),
+            "workflow_ids": list(self.workflow_ids),
+            "notes": self.notes,
+            "metadata": dict(self.metadata),
+        }
+
+    def summary(self, portfolio: PaperPortfolio, ledger: PaperLedger) -> Dict[str, Any]:
+        """Generate a complete financial and operational summary using existing portfolio and ledger."""
+        recon = ledger.reconcile(expected_current_cash=portfolio.available_cash)
+        return {
+            "session_id": self.session_id,
+            "name": self.name,
+            "status": self.status,
+            "label": "PAPER ONLY",
+            "created_at": self.created_at,
+            "stopped_at": self.stopped_at,
+            "initial_cash": self.initial_cash,
+            "current_cash": portfolio.available_cash,
+            "portfolio_equity": portfolio.total_equity,
+            "realized_pnl": portfolio.realized_pnl,
+            "unrealized_pnl": portfolio.unrealized_pnl,
+            "positions": [p.to_dict() for p in portfolio.positions.values()],
+            "total_orders": len(self.order_ids),
+            "reconciliation": {
+                "is_balanced": recon["is_balanced"],
+                "discrepancy": recon["discrepancy"],
+                "computed_balance": recon["computed_balance"],
+                "expected_balance": recon["expected_balance"],
+            },
+        }
+
+
+class PaperTradingWorkflowCoordinator:
+    """Small workflow coordinator orchestrating explicit paper trading requests with auditability."""
+
+    def __init__(
+        self,
+        engine: Optional[PaperExecutionEngine] = None,
+        settings: Optional[Settings] = None,
+        event_bus: Optional[EventBus] = None,
+        state_store: Optional[StateStore] = None,
+        market_service: Optional[Any] = None,
+        name: str = "paper_workflow_coordinator",
+        enabled: Optional[bool] = None,
+    ) -> None:
+        self.name = name
+        self.settings = settings or Settings()
+        self.engine = engine
+        self.event_bus = event_bus or (engine.event_bus if engine else None)
+        self.state_store = state_store or (engine.state_store if engine else None)
+        self.market_service = market_service
+
+        # Enabled flag respects explicit override or system settings
+        self._enabled = (
+            enabled
+            if enabled is not None
+            else getattr(self.settings, "paper_execution_enabled", False)
+        )
+
+        self._lock = threading.RLock()
+        self._outcomes: Dict[str, PaperWorkflowOutcome] = {}
+        self._outcomes_by_client_id: Dict[str, PaperWorkflowOutcome] = {}
+        self._sessions: Dict[str, PaperSimulationSession] = {}
+        self._active_session: Optional[PaperSimulationSession] = None
+
+    @property
+    def is_enabled(self) -> bool:
+        """Check whether paper trading workflow is actively enabled."""
+        with self._lock:
+            # Preserves foundational safety invariant: execution_locked must remain True
+            if not getattr(self.settings, "execution_locked", True):
+                logger.error("CRITICAL: Safety invariant execution_locked is False! Paper workflow disabled.")
+                return False
+
+            if not self._enabled:
+                return False
+
+            if self.engine is None or not self.engine.is_enabled:
+                return False
+
+            return True
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Explicitly enable or disable paper workflow coordination."""
+        with self._lock:
+            self._enabled = bool(enabled)
+            if self.engine is not None:
+                self.engine.set_enabled(bool(enabled))
+
+    def _publish_event(
+        self,
+        event_type: EventType,
+        payload: Dict[str, Any],
+        correlation_id: str,
+    ) -> None:
+        """Publish workflow event across the EventBus with strict error surfacing.
+
+        Raises:
+            Exception: Surfaces event publication failure clearly so workflow cannot report false success.
+        """
+        if self.event_bus is None:
+            return
+
+        try:
+            event = Event.create(
+                event_type=event_type,
+                source="paper_workflow_coordinator",
+                correlation_id=correlation_id,
+                payload=payload,
+                metadata={
+                    "execution_mode": "PAPER",
+                    "execution_locked": self.settings.execution_locked,
+                    "broker_provider": self.settings.broker_provider,
+                },
+            )
+            self.event_bus.publish(event)
+        except Exception as exc:
+            logger.error("Event publication failed for event_type %s [cid=%s]: %s", event_type, correlation_id, exc)
+            raise
+
+    def start_session(
+        self,
+        name: str = "paper_simulation_session",
+        notes: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> PaperSimulationSession:
+        """Start a new manual paper simulation session.
+
+        Does NOT reset or overwrite existing persisted financial state.
+        Does NOT enable paper execution by itself.
+        Does NOT create orders from strategy signals.
+        """
+        with self._lock:
+            if self._active_session is not None and self._active_session.status == "ACTIVE":
+                self.stop_session(self._active_session.session_id)
+
+            sess_id = f"psess_{uuid.uuid4().hex[:12]}"
+            init_cash = self.engine.portfolio.available_cash if self.engine else getattr(self.settings, "paper_initial_cash", 100_000.0)
+
+            session = PaperSimulationSession(
+                session_id=sess_id,
+                name=name,
+                created_at=time.time(),
+                initial_cash=init_cash,
+                status="ACTIVE",
+                notes=notes,
+                metadata=dict(metadata or {}),
+            )
+            self._sessions[sess_id] = session
+            self._active_session = session
+
+            self._publish_event(
+                EventType.PAPER_SESSION_STARTED,
+                session.to_dict(),
+                correlation_id=sess_id,
+            )
+            logger.info("Started paper simulation session '%s' (id=%s, init_cash=%.2f)", name, sess_id, init_cash)
+            return session
+
+    def stop_session(self, session_id: str) -> Optional[PaperSimulationSession]:
+        """Stop an active paper simulation session."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+
+            session.status = "STOPPED"
+            session.stopped_at = time.time()
+            if self._active_session and self._active_session.session_id == session_id:
+                self._active_session = None
+
+            self._publish_event(
+                EventType.PAPER_SESSION_STOPPED,
+                session.to_dict(),
+                correlation_id=session_id,
+            )
+            logger.info("Stopped paper simulation session (id=%s)", session_id)
+            return session
+
+    def get_session(self, session_id: str) -> Optional[PaperSimulationSession]:
+        """Retrieve simulation session by ID."""
+        with self._lock:
+            return self._sessions.get(session_id)
+
+    def get_active_session(self) -> Optional[PaperSimulationSession]:
+        """Retrieve the currently active simulation session."""
+        with self._lock:
+            return self._active_session
+
+    def get_session_summary(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve financial and operational summary for session."""
+        with self._lock:
+            target_id = session_id or (self._active_session.session_id if self._active_session else None)
+            if not target_id or target_id not in self._sessions:
+                return None
+            session = self._sessions[target_id]
+            if not self.engine:
+                return session.to_dict()
+            return session.summary(self.engine.portfolio, self.engine.ledger)
+
+    def submit_paper_order(
+        self,
+        request: PaperWorkflowRequest,
+        market_quote: Optional[Quote] = None,
+        reference_time: Optional[float] = None,
+    ) -> PaperWorkflowOutcome:
+        """Coordinate an explicit paper-order request through all 8 lifecycle stages.
+
+        Stages:
+        1. Operational Enablement Validation
+        2. Request Structure & Parameter Validation
+        3. Market Data Symbol Resolution
+        4. Market Data Quality & Freshness Assessment
+        5. Execution Engine & Pre-Trade Risk Submission
+        6. Structured Result Reception (ACCEPTED, FILLED, REJECTED)
+        7. State & Ledger Reconciliation Verification
+        8. Structured Workflow Outcome Return & Audit Persistence
+        """
+        now = reference_time if reference_time is not None else time.time()
+        workflow_id = f"pwf_{uuid.uuid4().hex[:12]}"
+        cid = request.correlation_id or uuid.uuid4().hex
+        client_order_id = request.client_order_id or f"pord_{uuid.uuid4().hex[:12]}"
+        audit_trail: List[str] = [f"REQUEST_RECEIVED at {now:.4f}"]
+
+        with self._lock:
+            # Stage 0: Lifecycle Event: Workflow Requested
+            try:
+                self._publish_event(
+                    EventType.PAPER_WORKFLOW_REQUESTED,
+                    {
+                        "workflow_id": workflow_id,
+                        "client_order_id": client_order_id,
+                        "symbol": request.symbol,
+                        "side": request.side.value,
+                        "order_type": request.order_type.value,
+                        "quantity": request.quantity,
+                        "limit_price": request.limit_price,
+                        "session_id": request.session_id,
+                    },
+                    correlation_id=cid,
+                )
+            except Exception as pub_err:
+                return PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.FAILED,
+                    success=False,
+                    stage=WorkflowStage.REQUEST_RECEIVED,
+                    error_message=f"Audit event publication failed: {pub_err}",
+                    audit_trail=tuple(audit_trail),
+                )
+
+            # Stage 1: Validate Paper Execution is Explicitly Enabled
+            if not self.is_enabled:
+                rejection_reason = "Paper execution is disabled in system settings (PAPER_EXECUTION_ENABLED=false)"
+                audit_trail.append("REJECTED: Paper execution disabled")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.REQUEST_RECEIVED,
+                    rejection_code=PaperRejectionCode.PAPER_EXECUTION_DISABLED.value,
+                    rejection_reason=rejection_reason,
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            # Stage 2: Idempotency Check & Request Validation
+            if client_order_id in self._outcomes_by_client_id:
+                existing_outcome = self._outcomes_by_client_id[client_order_id]
+                audit_trail.append(f"REJECTED: Duplicate client_order_id '{client_order_id}'")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.VALIDATION,
+                    order=existing_outcome.order,
+                    fill=existing_outcome.fill,
+                    rejection_code=PaperRejectionCode.DUPLICATE_ORDER.value,
+                    rejection_reason=f"Order with client_order_id '{client_order_id}' has already been processed",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            # Validate engine presence
+            assert self.engine is not None, "Engine must be attached when coordinator is enabled"
+
+            audit_trail.append("VALIDATION: Request syntax and parameters verified")
+            try:
+                self._publish_event(
+                    EventType.PAPER_WORKFLOW_VALIDATED,
+                    {
+                        "workflow_id": workflow_id,
+                        "client_order_id": client_order_id,
+                        "symbol": request.symbol,
+                        "validation_status": "PASSED",
+                    },
+                    correlation_id=cid,
+                )
+            except Exception as pub_err:
+                return PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.FAILED,
+                    success=False,
+                    stage=WorkflowStage.VALIDATION,
+                    error_message=f"Validation event publication failed: {pub_err}",
+                    audit_trail=tuple(audit_trail),
+                )
+
+            # Stage 3: Resolve Requested Symbol Against Eligible Market Data
+            quote = market_quote
+            if quote is None:
+                quote = self.engine.get_quote(request.symbol)
+
+            if quote is None and self.market_service is not None:
+                cached_quotes = self.market_service.state_store.get("latest_quotes", {})
+                raw_quote = cached_quotes.get(request.symbol)
+                if raw_quote:
+                    try:
+                        quote = Quote(
+                            symbol=raw_quote["symbol"],
+                            exchange=raw_quote.get("exchange", "MOCK"),
+                            timestamp=float(raw_quote["timestamp"]),
+                            last_price=float(raw_quote["last_price"]),
+                            bid=raw_quote.get("bid"),
+                            ask=raw_quote.get("ask"),
+                            bid_size=raw_quote.get("bid_size"),
+                            ask_size=raw_quote.get("ask_size"),
+                            volume=float(raw_quote.get("volume", 0.0)),
+                            source=raw_quote.get("source", "mock"),
+                        )
+                    except Exception as err:
+                        logger.error("Failed to parse quote from market_service: %s", err)
+
+            if quote is None:
+                audit_trail.append(f"REJECTED: Missing market data for '{request.symbol}'")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.MARKET_DATA_RESOLUTION,
+                    rejection_code=PaperRejectionCode.MISSING_MARKET_DATA.value,
+                    rejection_reason=f"No eligible market quote available for symbol '{request.symbol}'",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            # Stage 4: Check Market Data Quality, Timestamp Freshness, and Symbol Consistency
+            if quote.symbol.upper() != request.symbol.upper():
+                audit_trail.append(f"REJECTED: Quote symbol mismatch '{quote.symbol}' != '{request.symbol}'")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.MARKET_DATA_RESOLUTION,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                    rejection_reason=f"Market quote symbol '{quote.symbol}' does not match requested symbol '{request.symbol}'",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            if not math.isfinite(quote.last_price) or quote.last_price <= 0:
+                audit_trail.append(f"REJECTED: Quote price non-positive/finite: {quote.last_price}")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.MARKET_DATA_RESOLUTION,
+                    rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                    rejection_reason=f"Market quote has invalid price: {quote.last_price}",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            if quote.bid is not None and quote.ask is not None and quote.bid > 0 and quote.ask > 0:
+                if quote.ask < quote.bid:
+                    audit_trail.append("REJECTED: Inverted bid-ask spread")
+                    outcome = PaperWorkflowOutcome(
+                        workflow_id=workflow_id,
+                        correlation_id=cid,
+                        client_order_id=client_order_id,
+                        status=WorkflowStatus.REJECTED,
+                        success=False,
+                        stage=WorkflowStage.MARKET_DATA_RESOLUTION,
+                        rejection_code=PaperRejectionCode.INVALID_MARKET_DATA.value,
+                        rejection_reason=f"Market quote has inverted spread (ask {quote.ask} < bid {quote.bid})",
+                        audit_trail=tuple(audit_trail),
+                        session_id=request.session_id,
+                    )
+                    self._record_rejection_event(outcome)
+                    return outcome
+
+            freshness_threshold = getattr(self.engine.risk_config, "freshness_threshold_seconds", 60.0)
+            data_age = max(0.0, now - quote.timestamp)
+            if data_age > freshness_threshold:
+                audit_trail.append(f"REJECTED: Stale market quote (age={data_age:.1f}s > {freshness_threshold:.1f}s)")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.MARKET_DATA_RESOLUTION,
+                    rejection_code=PaperRejectionCode.STALE_MARKET_DATA.value,
+                    rejection_reason=f"Market quote for '{request.symbol}' is stale (age={data_age:.1f}s, threshold={freshness_threshold:.1f}s)",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            audit_trail.append(f"MARKET_DATA_RESOLUTION: Verified quote for '{quote.symbol}' at {quote.last_price}")
+
+            # Stage 5: Submit Request to Existing Paper Execution Engine & Risk Gate
+            engine_order_req = PaperOrderRequest(
+                symbol=request.symbol,
+                side=request.side,
+                order_type=request.order_type,
+                quantity=request.quantity,
+                limit_price=request.limit_price,
+                client_order_id=client_order_id,
+                correlation_id=cid,
+                notes=request.notes,
+            )
+
+            try:
+                exec_result = self.engine.submit_order(
+                    request=engine_order_req,
+                    market_quote=quote,
+                    reference_time=now,
+                )
+            except Exception as engine_exc:
+                logger.error("Engine order submission threw exception: %s", engine_exc)
+                audit_trail.append(f"FAILED: Engine exception: {engine_exc}")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.FAILED,
+                    success=False,
+                    stage=WorkflowStage.SIMULATED_EXECUTION,
+                    error_message=str(engine_exc),
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_failure_event(outcome)
+                return outcome
+
+            # Stage 6: Structured Result Evaluation
+            order = exec_result.order
+            fill = exec_result.fill
+
+            if order.status == PaperOrderStatus.REJECTED:
+                rej_code = (
+                    exec_result.rejection_code.value
+                    if exec_result.rejection_code
+                    else (order.rejection_code.value if order.rejection_code else "RISK_REJECTED")
+                )
+                rej_reason = exec_result.rejection_reason or order.rejection_reason or "Order rejected by risk gate"
+                audit_trail.append(f"REJECTED: {rej_code} - {rej_reason}")
+
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.RISK_GATE,
+                    order=order,
+                    fill=None,
+                    rejection_code=rej_code,
+                    rejection_reason=rej_reason,
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                self._record_rejection_event(outcome)
+                self._outcomes[workflow_id] = outcome
+                self._outcomes_by_client_id[client_order_id] = outcome
+                return outcome
+
+            elif order.status == PaperOrderStatus.ACCEPTED:
+                # Order is accepted and pending (e.g. limit order awaiting price match)
+                audit_trail.append(f"ACCEPTED: Pending limit order {order.order_id} at limit_price {order.limit_price}")
+                workflow_status = WorkflowStatus.ACCEPTED
+
+            elif order.status == PaperOrderStatus.FILLED:
+                # Order is filled
+                assert fill is not None, "FILLED order must have an associated fill record"
+                audit_trail.append(f"FILLED: Order {order.order_id} filled {fill.quantity} @ {fill.price} (fee={fill.fee})")
+                workflow_status = WorkflowStatus.FILLED
+
+            else:
+                audit_trail.append(f"UNEXPECTED_STATUS: {order.status}")
+                workflow_status = WorkflowStatus.FAILED
+
+            # Stage 7: State Reconciliation & Verification
+            recon = self.engine.ledger.reconcile(expected_current_cash=self.engine.portfolio.available_cash)
+            if not recon["is_balanced"]:
+                audit_trail.append(f"RECONCILIATION_FAILED: Discrepancy of {recon['discrepancy']} between portfolio and ledger")
+                reconciliation_failed_outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.RECONCILIATION_FAILED,
+                    success=False,
+                    stage=WorkflowStage.STATE_RECONCILIATION,
+                    order=order,
+                    fill=fill,
+                    reconciliation_result=recon,
+                    error_message=f"Ledger reconciliation failed: discrepancy={recon['discrepancy']}",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+                try:
+                    self._publish_event(
+                        EventType.PAPER_RECONCILIATION_FAILED,
+                        reconciliation_failed_outcome.to_dict(),
+                        correlation_id=cid,
+                    )
+                except Exception as pub_err:
+                    logger.error("Failed to publish PAPER_RECONCILIATION_FAILED event: %s", pub_err)
+
+                self._outcomes[workflow_id] = reconciliation_failed_outcome
+                self._outcomes_by_client_id[client_order_id] = reconciliation_failed_outcome
+                return reconciliation_failed_outcome
+
+            # Verify integrity invariants for fill
+            if workflow_status == WorkflowStatus.FILLED:
+                assert fill is not None
+                if abs(order.filled_quantity - fill.quantity) > 1e-6:
+                    raise ValidationError(f"Order filled quantity {order.filled_quantity} mismatch with fill {fill.quantity}")
+                if abs(order.fill_price - fill.price) > 1e-6:
+                    raise ValidationError(f"Order fill price {order.fill_price} mismatch with fill {fill.price}")
+
+            audit_trail.append("STATE_RECONCILIATION: Portfolio and ledger balance verified")
+
+            # Stage 8: Structured Workflow Outcome Return & Audit Persistence
+            outcome = PaperWorkflowOutcome(
+                workflow_id=workflow_id,
+                correlation_id=cid,
+                client_order_id=client_order_id,
+                status=workflow_status,
+                success=True,
+                stage=WorkflowStage.COMPLETED,
+                order=order,
+                fill=fill,
+                reconciliation_result=recon,
+                audit_trail=tuple(audit_trail),
+                session_id=request.session_id,
+            )
+
+            # Record in session if specified or if an active session exists
+            sess_id = request.session_id or (self._active_session.session_id if self._active_session else None)
+            if sess_id and sess_id in self._sessions:
+                sess = self._sessions[sess_id]
+                sess.workflow_ids.append(workflow_id)
+                if order:
+                    sess.order_ids.append(order.order_id)
+
+            self._outcomes[workflow_id] = outcome
+            self._outcomes_by_client_id[client_order_id] = outcome
+
+            # Publish Workflow Completed Event
+            try:
+                self._publish_event(
+                    EventType.PAPER_WORKFLOW_COMPLETED,
+                    outcome.to_dict(),
+                    correlation_id=cid,
+                )
+            except Exception as pub_err:
+                return PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=client_order_id,
+                    status=WorkflowStatus.FAILED,
+                    success=False,
+                    stage=WorkflowStage.COMPLETED,
+                    order=order,
+                    fill=fill,
+                    error_message=f"Completion event publication failed: {pub_err}",
+                    audit_trail=tuple(audit_trail),
+                    session_id=request.session_id,
+                )
+
+            return outcome
+
+    def cancel_order(
+        self,
+        order_id: str,
+        reason: str = "User cancellation",
+        correlation_id: Optional[str] = None,
+    ) -> PaperWorkflowOutcome:
+        """Cancel an open/pending paper order and reconcile ledger and portfolio."""
+        workflow_id = f"pwf_can_{uuid.uuid4().hex[:12]}"
+        cid = correlation_id or uuid.uuid4().hex
+        audit_trail: List[str] = [f"CANCELLATION_REQUESTED for order {order_id}"]
+
+        with self._lock:
+            if not self.is_enabled:
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.CANCELLATION,
+                    rejection_code=PaperRejectionCode.PAPER_EXECUTION_DISABLED.value,
+                    rejection_reason="Paper execution is disabled in system settings",
+                    audit_trail=tuple(audit_trail),
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            assert self.engine is not None
+            cancel_result = self.engine.cancel_order(order_id, reason=reason)
+
+            if not cancel_result.success:
+                code = cancel_result.rejection_code.value if cancel_result.rejection_code else "CANCEL_REJECTED"
+                audit_trail.append(f"REJECTED: Cannot cancel order {order_id}: {cancel_result.rejection_reason}")
+                outcome = PaperWorkflowOutcome(
+                    workflow_id=workflow_id,
+                    correlation_id=cid,
+                    client_order_id=cancel_result.order.client_order_id,
+                    status=WorkflowStatus.REJECTED,
+                    success=False,
+                    stage=WorkflowStage.CANCELLATION,
+                    order=cancel_result.order,
+                    rejection_code=code,
+                    rejection_reason=cancel_result.rejection_reason,
+                    audit_trail=tuple(audit_trail),
+                )
+                self._record_rejection_event(outcome)
+                return outcome
+
+            # Verify reconciliation post-cancellation
+            recon = self.engine.ledger.reconcile(expected_current_cash=self.engine.portfolio.available_cash)
+            audit_trail.append(f"CANCELLED: Order {order_id} successfully cancelled. Ledger balanced: {recon['is_balanced']}")
+
+            outcome = PaperWorkflowOutcome(
+                workflow_id=workflow_id,
+                correlation_id=cid,
+                client_order_id=cancel_result.order.client_order_id,
+                status=WorkflowStatus.CANCELLED,
+                success=True,
+                stage=WorkflowStage.COMPLETED,
+                order=cancel_result.order,
+                reconciliation_result=recon,
+                audit_trail=tuple(audit_trail),
+            )
+            self._outcomes[workflow_id] = outcome
+            self._publish_event(
+                EventType.PAPER_WORKFLOW_COMPLETED,
+                outcome.to_dict(),
+                correlation_id=cid,
+            )
+            return outcome
+
+    def on_market_quote(self, quote: Quote) -> List[PaperWorkflowOutcome]:
+        """Handle incoming market quote, updating engine cache and processing open pending limit orders."""
+        with self._lock:
+            if not self.is_enabled or self.engine is None:
+                return []
+
+            # 1. Forward quote to engine and receive results of filled pending limit orders
+            exec_results = self.engine.on_market_quote(quote)
+
+            # 2. Convert each filled limit order result into an auditable workflow outcome
+            completed_outcomes: List[PaperWorkflowOutcome] = []
+            for res in exec_results:
+                order = res.order
+                fill = res.fill
+                client_oid = order.client_order_id
+                prior_outcome = self._outcomes_by_client_id.get(client_oid)
+                sess_id = prior_outcome.session_id if prior_outcome else None
+
+                recon = self.engine.ledger.reconcile(expected_current_cash=self.engine.portfolio.available_cash)
+                new_outcome = PaperWorkflowOutcome(
+                    workflow_id=f"pwf_lim_fill_{uuid.uuid4().hex[:8]}",
+                    correlation_id=order.correlation_id or uuid.uuid4().hex,
+                    client_order_id=client_oid,
+                    status=WorkflowStatus.FILLED,
+                    success=True,
+                    stage=WorkflowStage.COMPLETED,
+                    order=order,
+                    fill=fill,
+                    reconciliation_result=recon,
+                    audit_trail=(
+                        f"PENDING limit order filled on market quote update at {quote.last_price}",
+                        f"Reconciliation balanced: {recon['is_balanced']}",
+                    ),
+                    session_id=sess_id,
+                )
+                self._outcomes[new_outcome.workflow_id] = new_outcome
+                self._outcomes_by_client_id[client_oid] = new_outcome
+                completed_outcomes.append(new_outcome)
+
+                self._publish_event(
+                    EventType.PAPER_WORKFLOW_COMPLETED,
+                    new_outcome.to_dict(),
+                    correlation_id=new_outcome.correlation_id,
+                )
+
+            return completed_outcomes
+
+    def _record_rejection_event(self, outcome: PaperWorkflowOutcome) -> None:
+        """Publish workflow rejection event."""
+        try:
+            self._publish_event(
+                EventType.PAPER_WORKFLOW_REJECTED,
+                outcome.to_dict(),
+                correlation_id=outcome.correlation_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to publish PAPER_WORKFLOW_REJECTED event: %s", exc)
+
+    def _record_failure_event(self, outcome: PaperWorkflowOutcome) -> None:
+        """Publish workflow failure event."""
+        try:
+            self._publish_event(
+                EventType.PAPER_WORKFLOW_FAILED,
+                outcome.to_dict(),
+                correlation_id=outcome.correlation_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to publish PAPER_WORKFLOW_FAILED event: %s", exc)
+
+    def get_outcome(self, workflow_id: str) -> Optional[PaperWorkflowOutcome]:
+        """Lookup workflow outcome by workflow_id."""
+        with self._lock:
+            return self._outcomes.get(workflow_id)
+
+    def get_outcome_by_client_id(self, client_order_id: str) -> Optional[PaperWorkflowOutcome]:
+        """Lookup workflow outcome by client_order_id."""
+        with self._lock:
+            return self._outcomes_by_client_id.get(client_order_id)
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Provide a minimal, strictly read-only paper workflow summary."""
+        with self._lock:
+            total_orders = 0
+            order_counts = {
+                "PENDING": 0,
+                "ACCEPTED": 0,
+                "FILLED": 0,
+                "REJECTED": 0,
+                "CANCELLED": 0,
+            }
+            cash = 0.0
+            equity = 0.0
+            realized_pnl = 0.0
+            unrealized_pnl = 0.0
+            positions_data = []
+            recon_data = {"is_balanced": True, "discrepancy": 0.0, "computed_balance": 0.0}
+
+            if self.engine is not None:
+                orders = self.engine.list_orders()
+                total_orders = len(orders)
+                for o in orders:
+                    s = o.status.value
+                    if s in order_counts:
+                        order_counts[s] += 1
+                p = self.engine.portfolio
+                cash = p.available_cash
+                equity = p.total_equity
+                realized_pnl = p.realized_pnl
+                unrealized_pnl = p.unrealized_pnl
+                positions_data = [pos.to_dict() for pos in p.positions.values()]
+                recon = self.engine.ledger.reconcile(expected_current_cash=cash)
+                recon_data = {
+                    "is_balanced": recon["is_balanced"],
+                    "discrepancy": recon["discrepancy"],
+                    "computed_balance": recon["computed_balance"],
+                }
+
+            recent_outcomes = [
+                outcome.to_dict()
+                for outcome in list(self._outcomes.values())[-10:]
+            ]
+
+            active_sess = self._active_session.to_dict() if self._active_session else None
+
+            return {
+                "status": "success",
+                "label": "PAPER ONLY",
+                "paper_execution_enabled": self.is_enabled,
+                "execution_locked": self.settings.execution_locked,
+                "broker_provider": self.settings.broker_provider,
+                "trading_engine": "not initialized",
+                "total_orders": total_orders,
+                "order_counts": order_counts,
+                "paper_cash": cash,
+                "paper_equity": equity,
+                "realized_pnl": realized_pnl,
+                "unrealized_pnl": unrealized_pnl,
+                "positions": positions_data,
+                "ledger_reconciliation": recon_data,
+                "active_session": active_sess,
+                "recent_outcomes": recent_outcomes,
+            }

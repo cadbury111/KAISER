@@ -215,6 +215,42 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # Paper Trading Workflow Summary Endpoint (/api/paper/summary and /api/paper/status)
+            if path in ("/api/paper/summary", "/api/paper/status"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                if coordinator is not None:
+                    summary = coordinator.get_summary()
+                    self._send_json_response(summary)
+                    return
+
+                engine = getattr(self.server, "paper_execution_engine", None)
+                if engine is not None:
+                    summary = engine.get_status()
+                    self._send_json_response({
+                        "status": "success",
+                        "label": "PAPER ONLY",
+                        "paper_execution_enabled": engine.is_enabled,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "trading_engine": "not initialized",
+                        "engine_status": summary,
+                    })
+                    return
+
+                state_store = getattr(self.server, "state_store", None)
+                paper_status = state_store.get("paper_status", "disabled") if state_store else "disabled"
+                paper_portfolio = state_store.get("paper_portfolio") if state_store else None
+                self._send_json_response({
+                    "status": "success",
+                    "label": "PAPER ONLY",
+                    "paper_execution_enabled": paper_status == "active",
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "trading_engine": "not initialized",
+                    "paper_portfolio": paper_portfolio,
+                })
+                return
+
             # 8. Operational Diagnostics Snapshot & Bounded History Endpoint (/api/diagnostics)
             if path == "/api/diagnostics":
                 diagnostics: Optional[PortfolioDiagnosticsService] = getattr(self.server, "diagnostics_service", None)
@@ -3416,6 +3452,8 @@ class PortfolioDashboardServer:
         reliability_service: Optional[Any] = None,
         state_store: Optional[Any] = None,
         audit_diagnostics_service: Optional[Any] = None,
+        paper_coordinator: Optional[Any] = None,
+        paper_execution_engine: Optional[Any] = None,
     ) -> None:
         """Initialize the dashboard server.
 
@@ -3443,6 +3481,8 @@ class PortfolioDashboardServer:
             reliability_service: Optional HistoricalReviewAuditReliabilityService for audit reliability queries.
             state_store: Optional StateStore instance.
             audit_diagnostics_service: Optional HistoricalReviewAuditDiagnosticsService instance.
+            paper_coordinator: Optional PaperTradingWorkflowCoordinator instance.
+            paper_execution_engine: Optional PaperExecutionEngine instance.
         """
         clean_host = (host or "").strip().lower()
         if clean_host not in ALLOWED_LOOPBACK_HOSTS:
@@ -3482,6 +3522,8 @@ class PortfolioDashboardServer:
         self.reliability_service = reliability_service
         self.state_store = state_store
         self.audit_diagnostics_service = audit_diagnostics_service
+        self.paper_coordinator = paper_coordinator
+        self.paper_execution_engine = paper_execution_engine
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -3535,6 +3577,8 @@ class PortfolioDashboardServer:
             setattr(self._server, "reliability_service", self.reliability_service)
             setattr(self._server, "state_store", self.state_store)
             setattr(self._server, "audit_diagnostics_service", self.audit_diagnostics_service)
+            setattr(self._server, "paper_coordinator", self.paper_coordinator)
+            setattr(self._server, "paper_execution_engine", self.paper_execution_engine)
 
 
 

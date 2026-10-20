@@ -900,14 +900,15 @@ class PaperExecutionEngine:
 
         return results
 
-    def on_market_quote(self, quote: Quote) -> None:
+    def on_market_quote(self, quote: Quote) -> List[PaperExecutionResult]:
         """Handle incoming market quote to update mark-to-market position valuations,
         cache quotes, and check open pending limit orders for execution."""
         with self._lock:
             self._quotes[quote.symbol.strip().upper()] = quote
             self.portfolio.mark_to_market(quote)
-            self._process_pending_limit_orders(quote)
+            results = self._process_pending_limit_orders(quote)
             self._update_state_store()
+            return results
 
     def get_quote(self, symbol: str) -> Optional[Quote]:
         """Retrieve cached quote for symbol if available."""
