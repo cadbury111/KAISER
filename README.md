@@ -177,11 +177,16 @@ Execution engine: locked
 
 ---
 
-## Operational Security & Dashboard Access Control (Phase 2, Steps 56 & 57)
+## Operational Security & Dashboard Access Control (Phase 2, Steps 56, 57, & 58)
 
 ### Access Control Model
 The Portfolio Analytics Command Center dashboard enforces strict read-only operation and defense-in-depth access controls:
 - **Loopback-Only Interface**: The dashboard server strictly binds to local loopback addresses (`127.0.0.1`, `localhost`, `::1`). Any attempt to configure an external or non-loopback host (such as `0.0.0.0` or public IP interfaces) is rejected at startup with a `ValidationError` / `ConfigurationError`.
+- **Host & Port Validation Rules**:
+  - **Host Validation**: Only loopback identifiers (`127.0.0.1`, `localhost`, `::1`) are accepted.
+  - **Port Validation**: Ports must be integers in the range `0`–`65535`. Ports outside this range (e.g., `-1`, `65536`) or non-integer representations raise `ConfigurationError`.
+  - **Port 0 Ephemeral Binding Policy**: Port `0` enables the operating system to dynamically assign an unused ephemeral port. This capability is supported in `development` and `test` environments to prevent socket port collision across concurrent test fixtures. However, port `0` is strictly prohibited in `production` environments (`APP_ENV=production`), failing startup with `ConfigurationError` to guarantee deterministic, monitored port binding.
+  - **Strict Boolean Parsing**: Environment boolean flags (`DASHBOARD_ENABLED`, `DASHBOARD_REQUIRE_AUTH`, etc.) accept standard explicit tokens (`true`, `false`, case-insensitive). Ambiguous strings (e.g. `yes`, `no`, `1`, `0`, `enable`, `disabled`) raise `ConfigurationError` rather than silently defaulting or misinterpreting configuration intent.
 - **Token-Based Authorization**: When `DASHBOARD_AUTH_TOKEN` is configured or `DASHBOARD_REQUIRE_AUTH=true`:
   - Protected endpoints require an authorization token provided via HTTP header:
     - Standard header: `Authorization: Bearer <token>`
@@ -229,7 +234,7 @@ The Portfolio Analytics Command Center dashboard enforces strict read-only opera
 | :--- | :--- | :--- |
 | `DASHBOARD_ENABLED` | `false` | Enable local dashboard HTTP server |
 | `DASHBOARD_HOST` | `127.0.0.1` | Bind address (must be loopback: `127.0.0.1`, `localhost`, `::1`) |
-| `DASHBOARD_PORT` | `8080` | Bind port (0 for ephemeral dynamic port) |
+| `DASHBOARD_PORT` | `8080` | Bind port (0 for ephemeral dynamic port in dev/test) |
 | `DASHBOARD_AUTH_TOKEN` | *(empty)* | Optional authorization secret token for protected dashboard endpoints |
 | `DASHBOARD_REQUIRE_AUTH` | `false` | When true, strictly enforces authentication across data endpoints |
 
@@ -250,5 +255,10 @@ python -m pytest -q
 Execute the Step 57 Security Configuration Audit & Endpoint Authorization test suite:
 ```bash
 python -m pytest tests/test_phase_2_step_57_security_audit.py -v
+```
+
+Execute the Step 58 Security Regression & Configuration Matrix test suite:
+```bash
+python -m pytest tests/test_phase_2_step_58_security_matrix.py -v
 ```
 

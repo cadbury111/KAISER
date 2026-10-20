@@ -46,7 +46,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "KAISER-Dashboard"
     sys_version = ""
-    server: ThreadingHTTPServer  # Attached server instance
+    server: ThreadingHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def version_string(self) -> str:
         """Override version_string to suppress runtime/OS version and trailing spaces."""
@@ -160,7 +160,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
         return True
 
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # pyright: ignore[reportGeneralTypeIssues]
         """Handle incoming read-only GET requests."""
         if len(self.path) > MAX_URI_LENGTH:
             self._send_json_response(
@@ -3544,7 +3544,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         try:
             msg = format % args
             sanitized = re.sub(
-                r"([?&](?:token|auth_token|api_key|key|secret)=)[^&\s]*",
+                r"([?&](?:token|auth_token|access_token|api_key|apikey|key|secret|bearer|bearer_token|password)=)[^&\s]*",
                 r"\1[REDACTED]",
                 msg,
                 flags=re.IGNORECASE,

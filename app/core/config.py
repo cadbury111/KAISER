@@ -227,6 +227,11 @@ class Settings:
                 f"Invalid DASHBOARD_PORT: {self.dashboard_port}. Port must be an integer between 0 and 65535."
             )
 
+        if self.dashboard_port == 0 and self.app_env.strip().lower() == "production":
+            raise ConfigurationError(
+                "Invalid DASHBOARD_PORT: 0. Ephemeral port binding (port 0) is reserved for test/development environments and is prohibited in production."
+            )
+
         if self.dashboard_auth_token is not None:
             if not isinstance(self.dashboard_auth_token, str):
                 raise ConfigurationError(
@@ -335,6 +340,23 @@ def get_settings(
     else:
         source = env_source
 
+    try:
+        rate_limit = int(source.get("TWELVE_DATA_RATE_LIMIT_PER_MINUTE", "8"))
+        poll_interval = float(source.get("TWELVE_DATA_POLL_INTERVAL_SECONDS", "15.0"))
+        timeout = float(source.get("TWELVE_DATA_TIMEOUT_SECONDS", "10.0"))
+        tts_rate = int(source.get("TTS_RATE", "175"))
+        tts_volume = float(source.get("TTS_VOLUME", "1.0"))
+        raw_device_id = source.get("PLAYBACK_DEVICE_ID", "").strip() if "PLAYBACK_DEVICE_ID" in source else ""
+        playback_device_id = int(raw_device_id) if raw_device_id else None
+        paper_initial_cash = float(source.get("PAPER_INITIAL_CASH", "100000.0"))
+        paper_max_order_notional = float(source.get("PAPER_MAX_ORDER_NOTIONAL", "50000.0"))
+        paper_max_position_exposure_pct = float(source.get("PAPER_MAX_POSITION_EXPOSURE_PCT", "50.0"))
+        paper_fee_rate = float(source.get("PAPER_FEE_RATE", "0.0005"))
+        paper_slippage_rate = float(source.get("PAPER_SLIPPAGE_RATE", "0.0002"))
+        paper_freshness = float(source.get("PAPER_FRESHNESS_THRESHOLD_SECONDS", "60.0"))
+    except ValueError as val_err:
+        raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
+
     return Settings(
         app_name=source.get("APP_NAME", "KAISER"),
         app_env=source.get("APP_ENV", "development"),
@@ -345,9 +367,9 @@ def get_settings(
         twelve_data_symbols=source.get("TWELVE_DATA_SYMBOLS", "RELIANCE,TCS,INFY"),
         twelve_data_exchange=source.get("TWELVE_DATA_EXCHANGE", "NSE"),
         twelve_data_base_url=source.get("TWELVE_DATA_BASE_URL", "https://api.twelvedata.com"),
-        twelve_data_rate_limit_per_minute=int(source.get("TWELVE_DATA_RATE_LIMIT_PER_MINUTE", "8")),
-        twelve_data_poll_interval_seconds=float(source.get("TWELVE_DATA_POLL_INTERVAL_SECONDS", "15.0")),
-        twelve_data_timeout_seconds=float(source.get("TWELVE_DATA_TIMEOUT_SECONDS", "10.0")),
+        twelve_data_rate_limit_per_minute=rate_limit,
+        twelve_data_poll_interval_seconds=poll_interval,
+        twelve_data_timeout_seconds=timeout,
         twelve_data_is_delayed=parse_bool(source.get("TWELVE_DATA_IS_DELAYED", "true"), "TWELVE_DATA_IS_DELAYED"),
         broker_provider=source.get("BROKER_PROVIDER", "none"),
         database_url=source.get("DATABASE_URL", "sqlite:///data/kaiser.db"),
@@ -361,22 +383,22 @@ def get_settings(
         stt_compute_type=source.get("STT_COMPUTE_TYPE", "int8"),
         tts_provider=source.get("TTS_PROVIDER", "mock"),
         tts_voice_id=source.get("TTS_VOICE_ID", None),
-        tts_rate=int(source.get("TTS_RATE", "175")),
-        tts_volume=float(source.get("TTS_VOLUME", "1.0")),
+        tts_rate=tts_rate,
+        tts_volume=tts_volume,
         playback_enabled=parse_bool(source.get("PLAYBACK_ENABLED", "false"), "PLAYBACK_ENABLED"),
-        playback_device_id=int(source["PLAYBACK_DEVICE_ID"]) if "PLAYBACK_DEVICE_ID" in source and source["PLAYBACK_DEVICE_ID"].strip() else None,
+        playback_device_id=playback_device_id,
         dashboard_enabled=parse_bool(source.get("DASHBOARD_ENABLED", "false"), "DASHBOARD_ENABLED"),
         dashboard_host=source.get("DASHBOARD_HOST", "127.0.0.1"),
-        dashboard_port=int(source.get("DASHBOARD_PORT", "8080")),
+        dashboard_port=source.get("DASHBOARD_PORT", 8080),  # type: ignore[arg-type]
         dashboard_auth_token=source.get("DASHBOARD_AUTH_TOKEN", None),
         dashboard_require_auth=parse_bool(source.get("DASHBOARD_REQUIRE_AUTH", "false"), "DASHBOARD_REQUIRE_AUTH"),
         paper_execution_enabled=parse_bool(source.get("PAPER_EXECUTION_ENABLED", "false"), "PAPER_EXECUTION_ENABLED"),
-        paper_initial_cash=float(source.get("PAPER_INITIAL_CASH", "100000.0")),
-        paper_max_order_notional=float(source.get("PAPER_MAX_ORDER_NOTIONAL", "50000.0")),
-        paper_max_position_exposure_pct=float(source.get("PAPER_MAX_POSITION_EXPOSURE_PCT", "50.0")),
-        paper_fee_rate=float(source.get("PAPER_FEE_RATE", "0.0005")),
-        paper_slippage_rate=float(source.get("PAPER_SLIPPAGE_RATE", "0.0002")),
-        paper_freshness_threshold_seconds=float(source.get("PAPER_FRESHNESS_THRESHOLD_SECONDS", "60.0")),
+        paper_initial_cash=paper_initial_cash,
+        paper_max_order_notional=paper_max_order_notional,
+        paper_max_position_exposure_pct=paper_max_position_exposure_pct,
+        paper_fee_rate=paper_fee_rate,
+        paper_slippage_rate=paper_slippage_rate,
+        paper_freshness_threshold_seconds=paper_freshness,
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )
