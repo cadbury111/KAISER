@@ -177,7 +177,7 @@ Execution engine: locked
 
 ---
 
-## Operational Security & Dashboard Access Control (Phase 2, Step 56)
+## Operational Security & Dashboard Access Control (Phase 2, Steps 56 & 57)
 
 ### Access Control Model
 The Portfolio Analytics Command Center dashboard enforces strict read-only operation and defense-in-depth access controls:
@@ -186,21 +186,37 @@ The Portfolio Analytics Command Center dashboard enforces strict read-only opera
   - Protected endpoints require an authorization token provided via HTTP header:
     - Standard header: `Authorization: Bearer <token>`
     - Alternative header: `X-API-Key: <token>`
+  - When **both** `Authorization` and `X-API-Key` headers are supplied, **both must match** the server authentication token. Conflicting or mismatched headers are rejected with HTTP `401 Unauthorized` to prevent ambiguous header bypasses.
   - Token comparison is strictly performed in constant time using Python standard library `secrets.compare_digest` to prevent timing side-channel attacks.
   - Missing or invalid credentials result in HTTP `401 Unauthorized` with `WWW-Authenticate: Bearer realm="KAISER Dashboard"`.
+  - Empty or whitespace-only tokens in headers (`Bearer ` or `X-API-Key: `) are rejected with HTTP `401 Unauthorized`.
+  - Authentication credentials passed via URL query parameters (`?token=...`, `?api_key=...`, `?auth_token=...`) are strictly ignored and rejected with HTTP `401 Unauthorized`.
   - When `DASHBOARD_REQUIRE_AUTH=true` is set without configuring `DASHBOARD_AUTH_TOKEN`, the server fails closed, returning HTTP `403 Forbidden`.
-  - Authentication failure never mutates order, ledger, portfolio, or session state.
-- **Zero Credential Reflection**: Authentication tokens, secrets, and environment keys are never echoed in error responses, server access logs, or exception payloads. In settings serialization (`Settings.to_dict()`), tokens are masked (`***`).
+  - Authentication failure never mutates order, ledger, portfolio, session, or execution state.
+- **Unauthenticated Local Development Mode**: Permitted **only** when `DASHBOARD_REQUIRE_AUTH=false` and `DASHBOARD_AUTH_TOKEN` is empty/unset, restricted strictly to local loopback interfaces. In this mode, local development tools may query dashboard endpoints without credentials.
+- **Zero Credential Reflection**: Authentication tokens, secrets, and environment keys are never echoed in error responses, server access logs, or exception payloads. Server request logs redact any query parameters containing secret identifiers. In settings serialization (`Settings.to_dict()`), tokens and API keys are masked (`***`).
+- **Server Header Hardening**: Server response headers suppress detailed runtime and OS version strings (`Server: KAISER-Dashboard`).
 
-### Endpoints and HTTP Method Safety
-- **Read-Only Endpoints**:
-  - `GET /` and `GET /index.html`: Single-page analytics interface shell.
-  - `GET /api/status`: Public local health and invariant check (`execution_locked: true`, `read_only: true`).
-  - `GET /api/paper/summary` & `GET /api/paper/status`: Paper trading session, execution status, order statistics, and position summary (protected by token authorization).
-  - `GET /api/report/latest`, `/api/reports`, `/api/series/<report_id>`, `/api/diagnostics`, etc.: Read-only portfolio and diagnostic query endpoints.
-- **Prohibited HTTP Methods**:
-  - `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `TRACE` are rejected on all dashboard routes with HTTP `405 Method Not Allowed` and `Allow: GET, HEAD`.
-  - There is **no dashboard mutation endpoint** for order submission, cancellation, execution, or ledger modification. All paper trading orders must be submitted programmatically through the Python `PaperTradingWorkflowCoordinator`.
+### Endpoint Inventory and Authorization Classification
+| Route Pattern | Method | Classification | Description & Sensitivity |
+| :--- | :--- | :--- | :--- |
+| `/` and `/index.html` | `GET`, `HEAD` | **Public** | Static SPA dashboard shell; contains no financial or portfolio data. |
+| `/api/status` | `GET`, `HEAD` | **Public** | Minimal operational health check (`status`, `execution_locked: true`, `read_only: true`). |
+| `/api/paper/summary`, `/api/paper/status` | `GET`, `HEAD` | **Protected** | Sensitive paper portfolio, positions, cash balance, orders, and execution state. |
+| `/api/report/latest`, `/api/reports`, `/api/report/<id>` | `GET`, `HEAD` | **Protected** | Sensitive portfolio performance metrics, attribution, risk measures, and trade history. |
+| `/api/series/<report_id>`, `/api/compare` | `GET`, `HEAD` | **Protected** | Sensitive equity curves, drawdown series, and multi-run comparative metrics. |
+| `/api/diagnostics` | `GET`, `HEAD` | **Protected** | Sensitive operational diagnostics snapshot, system telemetry, and audit event logs. |
+| `/api/data-quality`, `/api/data-provenance`, `/api/data-lineage` | `GET`, `HEAD` | **Protected** | Sensitive market data quality evaluations, anomaly logs, and data lineage audit graphs. |
+| `/api/analysis-runs`, `/api/analysis-comparisons` | `GET`, `HEAD` | **Protected** | Sensitive reproducible analysis run records and experiment comparisons. |
+| `/api/evidence-syntheses`, `/api/opportunity-*` | `GET`, `HEAD` | **Protected** | Sensitive opportunity assessments, prioritization records, and investigation queues. |
+| `/api/investigation-*`, `/api/discrepancy-*`, `/api/historical-*` | `GET`, `HEAD` | **Protected** | Sensitive human investigation reviews, outcomes, audit reports, and consistency metrics. |
+| `/api/unknown_route` (unrecognized API paths) | `GET`, `HEAD` | **Protected** | Requires auth when auth is enforced (401); returns 404 when authenticated or in local dev mode. |
+| *All routes* | `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `TRACE` | **Prohibited** | Strictly rejected with HTTP `405 Method Not Allowed` (`Allow: GET, HEAD`). |
+
+### Prohibited HTTP Methods and Read-Only Guarantees
+- The dashboard is **strictly read-only**.
+- Any attempt to send `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, or `TRACE` requests is rejected with HTTP `405 Method Not Allowed` and `Allow: GET, HEAD`.
+- There is **no HTTP mutation endpoint** for order submission, cancellation, execution, position modification, or ledger updates. All paper trading orders must be submitted programmatically through the Python `PaperTradingWorkflowCoordinator`.
 
 ### Paper Trading vs. Live Trading Boundary
 - **Simulated Paper Trading Only**: Paper trading executes exclusively against simulated order models, internal cash ledgers, and in-memory/SQLite accounting.
@@ -226,8 +242,13 @@ The Portfolio Analytics Command Center dashboard enforces strict read-only opera
 
 ## Running Tests
 
-Execute the deterministic test suite:
+Execute the full deterministic test suite:
 ```bash
 python -m pytest -q
+```
+
+Execute the Step 57 Security Configuration Audit & Endpoint Authorization test suite:
+```bash
+python -m pytest tests/test_phase_2_step_57_security_audit.py -v
 ```
 

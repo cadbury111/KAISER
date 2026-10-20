@@ -22,11 +22,10 @@ def main() -> int:
         launch_dashboard = "--dashboard" in sys.argv
         custom_settings = None
         if launch_dashboard:
-            from app.core.config import Settings, get_settings
+            import dataclasses
+            from app.core.config import get_settings
             base_s = get_settings()
-            custom_settings = Settings(
-                **{**base_s.to_dict(), "dashboard_enabled": True}
-            )
+            custom_settings = dataclasses.replace(base_s, dashboard_enabled=True)
 
         status = bootstrap_system(settings=custom_settings)
         print(format_banner(status))

@@ -198,14 +198,47 @@ class Settings:
             )
         object.__setattr__(self, "dashboard_host", norm_host)
 
+        # Boolean field validation & normalization
+        for bool_field in (
+            "dashboard_enabled",
+            "dashboard_require_auth",
+            "paper_execution_enabled",
+            "execution_locked",
+            "paper_trading_only",
+            "voice_enabled",
+            "playback_enabled",
+            "twelve_data_is_delayed",
+        ):
+            val = getattr(self, bool_field)
+            if not isinstance(val, bool):
+                parsed = parse_bool(val, bool_field.upper())
+                object.__setattr__(self, bool_field, parsed)
+
+        if isinstance(self.dashboard_port, str):
+            try:
+                object.__setattr__(self, "dashboard_port", int(self.dashboard_port.strip()))
+            except ValueError:
+                raise ConfigurationError(
+                    f"Invalid DASHBOARD_PORT: '{self.dashboard_port}'. Port must be an integer between 0 and 65535."
+                )
+
         if not isinstance(self.dashboard_port, int) or self.dashboard_port < 0 or self.dashboard_port > 65535:
             raise ConfigurationError(
                 f"Invalid DASHBOARD_PORT: {self.dashboard_port}. Port must be an integer between 0 and 65535."
             )
 
         if self.dashboard_auth_token is not None:
+            if not isinstance(self.dashboard_auth_token, str):
+                raise ConfigurationError(
+                    f"Invalid DASHBOARD_AUTH_TOKEN: expected string or None, got {type(self.dashboard_auth_token).__name__}."
+                )
             clean_tok = self.dashboard_auth_token.strip()
             object.__setattr__(self, "dashboard_auth_token", clean_tok if clean_tok else None)
+
+        if self.twelve_data_api_key is not None and not isinstance(self.twelve_data_api_key, str):
+            raise ConfigurationError(
+                f"Invalid TWELVE_DATA_API_KEY: expected string or None, got {type(self.twelve_data_api_key).__name__}."
+            )
 
         if self.paper_initial_cash <= 0:
             raise ConfigurationError(

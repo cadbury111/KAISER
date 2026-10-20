@@ -188,12 +188,14 @@ class TestPaperTradingEndToEndAcceptance:
     ) -> None:
         """Scenario 2: Enable paper execution explicitly while retaining the global live-execution lock."""
         assert coordinator.is_enabled is True
+        assert coordinator.engine is not None
         assert coordinator.engine.is_enabled is True
 
         # Invariant checks
         settings = coordinator.settings
         assert settings.execution_locked is True
         assert settings.broker_provider == "none"
+        assert coordinator.state_store is not None
         assert coordinator.state_store.get("trading_engine") == "not initialized"
         assert coordinator.state_store.get("execution_engine") == "locked"
 
@@ -222,7 +224,9 @@ class TestPaperTradingEndToEndAcceptance:
         fresh_quote: Quote,
     ) -> None:
         """Scenarios 4, 5, 6: Submit valid paper order, verify structured outcome, fill, and ledger reconciliation."""
-        initial_cash = coordinator.engine.portfolio.available_cash
+        engine = coordinator.engine
+        assert engine is not None
+        initial_cash = engine.portfolio.available_cash
         req = PaperWorkflowRequest(
             symbol="RELIANCE",
             side=PaperOrderSide.BUY,
@@ -245,9 +249,10 @@ class TestPaperTradingEndToEndAcceptance:
         assert outcome.fill.slippage >= 0.0
 
         # Scenario 6: Verify ledger records financial events and balances reconcile
-        position = coordinator.engine.portfolio.get_position("RELIANCE")
+        position = engine.portfolio.get_position("RELIANCE")
+        assert position is not None
         assert position.quantity == 10.0
-        assert coordinator.engine.portfolio.available_cash < initial_cash
+        assert engine.portfolio.available_cash < initial_cash
 
         # Ledger entries verification
         entries = paper_ledger.get_entries()
@@ -257,7 +262,7 @@ class TestPaperTradingEndToEndAcceptance:
         assert LedgerEntryType.ORDER_FILL in entry_types
 
         # Reconcile portfolio with ledger
-        recon = paper_ledger.reconcile(expected_current_cash=coordinator.engine.portfolio.available_cash)
+        recon = paper_ledger.reconcile(expected_current_cash=engine.portfolio.available_cash)
         assert recon["is_balanced"] is True
         assert recon["discrepancy"] == 0.0
 
@@ -343,8 +348,12 @@ class TestPaperTradingEndToEndAcceptance:
             quantity=10.0,
         )
         coordinator.submit_paper_order(req, market_quote=fresh_quote)
-        cash_before_restart = coordinator.engine.portfolio.available_cash
-        pos_before_restart = coordinator.engine.portfolio.get_position("RELIANCE").quantity
+        engine = coordinator.engine
+        assert engine is not None
+        pos = engine.portfolio.get_position("RELIANCE")
+        assert pos is not None
+        cash_before_restart = engine.portfolio.available_cash
+        pos_before_restart = pos.quantity
         db_path = paper_ledger.db_path
 
         # Simulate system restart: new engine instance loading from existing ledger DB
@@ -361,7 +370,9 @@ class TestPaperTradingEndToEndAcceptance:
         # Verify recovered portfolio
         recovered_portfolio = restarted_engine.portfolio
         assert recovered_portfolio.available_cash == cash_before_restart
-        assert recovered_portfolio.get_position("RELIANCE").quantity == pos_before_restart
+        rec_pos = recovered_portfolio.get_position("RELIANCE")
+        assert rec_pos is not None
+        assert rec_pos.quantity == pos_before_restart
         # Cash must NOT have been duplicated to 200_000
         assert recovered_portfolio.available_cash < 100_000.0
 
@@ -396,15 +407,21 @@ class TestPaperTradingEndToEndAcceptance:
         assert "already been processed" in outcome2.rejection_reason.lower() or "duplicate" in outcome2.rejection_reason.lower()
 
         # Position should only be 5.0, not 10.0
-        assert coordinator.engine.portfolio.get_position("RELIANCE").quantity == 5.0
+        engine = coordinator.engine
+        assert engine is not None
+        pos = engine.portfolio.get_position("RELIANCE")
+        assert pos is not None
+        assert pos.quantity == 5.0
 
     def test_e2e_10_force_quote_quality_and_risk_gate_failures_zero_financial_mutation(
         self,
         coordinator: PaperTradingWorkflowCoordinator,
     ) -> None:
         """Scenario 10: Force a quote-quality failure and a risk-gate rejection; verify zero mutation."""
-        initial_cash = coordinator.engine.portfolio.available_cash
-        initial_entries = len(coordinator.engine.ledger.get_entries())
+        engine = coordinator.engine
+        assert engine is not None
+        initial_cash = engine.portfolio.available_cash
+        initial_entries = len(engine.ledger.get_entries())
 
         # 1. Quote-quality failure: stale quote (> 60 seconds old)
         stale_quote = Quote(
@@ -430,8 +447,8 @@ class TestPaperTradingEndToEndAcceptance:
         assert outcome1.rejection_code == PaperRejectionCode.STALE_MARKET_DATA.value
 
         # Financial state unchanged
-        assert coordinator.engine.portfolio.available_cash == initial_cash
-        pos1 = coordinator.engine.portfolio.get_position("RELIANCE")
+        assert engine.portfolio.available_cash == initial_cash
+        pos1 = engine.portfolio.get_position("RELIANCE")
         assert pos1 is None or pos1.quantity == 0.0
 
         # 2. Risk-gate rejection: short selling prohibited without holding
@@ -458,18 +475,18 @@ class TestPaperTradingEndToEndAcceptance:
         assert outcome2.rejection_code == PaperRejectionCode.INSUFFICIENT_POSITION.value
 
         # Financial state remains strictly unchanged
-        assert coordinator.engine.portfolio.available_cash == initial_cash
-        pos2 = coordinator.engine.portfolio.get_position("RELIANCE")
+        assert engine.portfolio.available_cash == initial_cash
+        pos2 = engine.portfolio.get_position("RELIANCE")
         assert pos2 is None or pos2.quantity == 0.0
 
         # Ledger rejection entries must have zero financial impact (cash_change=0.0)
-        rejection_entries = [e for e in coordinator.engine.ledger.get_entries() if e.entry_type == LedgerEntryType.ORDER_REJECTION]
+        rejection_entries = [e for e in engine.ledger.get_entries() if e.entry_type == LedgerEntryType.ORDER_REJECTION]
         assert len(rejection_entries) == 1
         assert rejection_entries[0].cash_change == 0.0
         assert rejection_entries[0].cash_balance_after == initial_cash
 
         # Ledger remains perfectly balanced with portfolio
-        recon = coordinator.engine.ledger.reconcile(expected_current_cash=coordinator.engine.portfolio.available_cash)
+        recon = engine.ledger.reconcile(expected_current_cash=engine.portfolio.available_cash)
         assert recon["is_balanced"] is True
         assert recon["discrepancy"] == 0.0
 
@@ -484,7 +501,9 @@ class TestPaperTradingEndToEndAcceptance:
         def mock_record_failure(*args, **kwargs):
             raise IOError("Simulated SQLite write/IO failure")
 
-        monkeypatch.setattr(coordinator.engine.ledger, "record_entry", mock_record_failure)
+        engine = coordinator.engine
+        assert engine is not None
+        monkeypatch.setattr(engine.ledger, "record_entry", mock_record_failure)
 
         req = PaperWorkflowRequest(
             symbol="RELIANCE",
@@ -515,10 +534,12 @@ class TestPaperTradingEndToEndAcceptance:
 
         try:
             url = f"{server.url}/api/paper/summary"
-            initial_cash = coordinator.engine.portfolio.available_cash
-            pos_initial = coordinator.engine.portfolio.get_position("RELIANCE")
+            engine = coordinator.engine
+            assert engine is not None
+            initial_cash = engine.portfolio.available_cash
+            pos_initial = engine.portfolio.get_position("RELIANCE")
             initial_pos = pos_initial.quantity if pos_initial else 0.0
-            initial_entries = len(coordinator.engine.ledger.get_entries())
+            initial_entries = len(engine.ledger.get_entries())
 
             # 1. Unauthenticated GET -> 401
             with pytest.raises(urllib.error.HTTPError) as exc_info:
@@ -575,10 +596,10 @@ class TestPaperTradingEndToEndAcceptance:
             assert exc_info.value.code == 405
 
             # Verify complete state invariance
-            assert coordinator.engine.portfolio.available_cash == initial_cash
-            pos_after = coordinator.engine.portfolio.get_position("RELIANCE")
+            assert engine.portfolio.available_cash == initial_cash
+            pos_after = engine.portfolio.get_position("RELIANCE")
             assert (pos_after.quantity if pos_after else 0.0) == initial_pos
-            assert len(coordinator.engine.ledger.get_entries()) == initial_entries
+            assert len(engine.ledger.get_entries()) == initial_entries
 
         finally:
             server.stop()

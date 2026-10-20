@@ -44,7 +44,25 @@ MAX_URI_LENGTH = 2048
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
     """Read-only HTTP request handler for the Portfolio Analytics Command Center."""
 
+    server_version = "KAISER-Dashboard"
+    sys_version = ""
     server: ThreadingHTTPServer  # Attached server instance
+
+    def version_string(self) -> str:
+        """Override version_string to suppress runtime/OS version and trailing spaces."""
+        return self.server_version
+
+    def send_error(self, code: int, message: Optional[str] = None, explain: Optional[str] = None) -> None:
+        """Override default HTML send_error to return sanitized JSON without leaking server info."""
+        self.send_response(code, message)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._add_security_headers()
+        self.end_headers()
+        err_body = json.dumps({
+            "error": message or "Error",
+            "status": code,
+        }).encode("utf-8")
+        self.wfile.write(err_body)
 
     def _send_unauthorized_response(self, message: str = "Valid authentication credentials required.") -> None:
         """Send a 401 Unauthorized response with WWW-Authenticate header and sanitized message."""
@@ -64,6 +82,14 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _check_authorization(self) -> bool:
         """Validate authorization credentials for protected endpoints.
+
+        Supports:
+        - Authorization: Bearer <token>
+        - X-API-Key: <token>
+
+        When both headers are provided, both must match the server token.
+        Token comparison is strictly performed in constant time using secrets.compare_digest.
+        Tokens passed via URL query parameters are rejected.
 
         Returns:
             bool: True if authorized (or authentication not required), False if unauthorized.
@@ -86,28 +112,49 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             )
             return False
 
-        # Extract token from headers (Authorization: Bearer <token> or X-API-Key: <token>)
-        supplied_token: Optional[str] = None
+        # Extract credentials from Authorization and X-API-Key headers
+        bearer_token: Optional[str] = None
         auth_header = self.headers.get("Authorization")
-        if auth_header:
+        if auth_header is not None:
             parts = auth_header.strip().split(None, 1)
             if len(parts) == 2 and parts[0].lower() == "bearer":
-                supplied_token = parts[1].strip()
+                bearer_token = parts[1].strip()
+                if not bearer_token:
+                    self._send_unauthorized_response(message="Empty Bearer token provided.")
+                    return False
             else:
                 self._send_unauthorized_response(message="Invalid Authorization header format. Expected 'Bearer <token>'.")
                 return False
 
-        if not supplied_token:
-            api_key_header = self.headers.get("X-API-Key")
-            if api_key_header:
-                supplied_token = api_key_header.strip()
+        api_key_token: Optional[str] = None
+        api_key_header = self.headers.get("X-API-Key")
+        if api_key_header is not None:
+            clean_api_key = api_key_header.strip()
+            if not clean_api_key:
+                self._send_unauthorized_response(message="Empty X-API-Key header provided.")
+                return False
+            api_key_token = clean_api_key
 
-        if not supplied_token:
+        if bearer_token is None and api_key_token is None:
             self._send_unauthorized_response(message="Missing authentication credentials.")
             return False
 
-        # Constant-time comparison to prevent timing side-channels
-        if server_auth_token is None or not secrets.compare_digest(supplied_token, server_auth_token):
+        if server_auth_token is None:
+            self._send_unauthorized_response(message="Invalid authentication credentials.")
+            return False
+
+        # When both headers are provided, both must match the server token
+        if bearer_token is not None and api_key_token is not None:
+            bearer_match = secrets.compare_digest(bearer_token, server_auth_token)
+            api_key_match = secrets.compare_digest(api_key_token, server_auth_token)
+            if not (bearer_match and api_key_match):
+                self._send_unauthorized_response(message="Conflicting or invalid authentication credentials.")
+                return False
+            return True
+
+        # Single header provided
+        token_to_check = bearer_token if bearer_token is not None else api_key_token
+        if token_to_check is None or not secrets.compare_digest(token_to_check, server_auth_token):
             self._send_unauthorized_response(message="Invalid authentication credentials.")
             return False
 
@@ -147,18 +194,12 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
         try:
             # Check authorization for protected endpoints
-            is_paper_route = path.startswith("/api/paper")
             require_auth_flag = bool(getattr(self.server, "require_auth", False))
             server_token = getattr(self.server, "auth_token", None)
+            auth_enforced = bool(server_token or require_auth_flag)
 
-            # Enforce authorization:
-            # 1. Any paper trading endpoint if server_token is set or require_auth is enabled.
-            # 2. Any /api/* endpoint (except public health /api/status) if require_auth is enabled.
-            if is_paper_route:
-                if server_token or require_auth_flag:
-                    if not self._check_authorization():
-                        return
-            elif require_auth_flag and path.startswith("/api/") and path != "/api/status":
+            # Enforce authorization: all sensitive data APIs (/api/* except public health /api/status)
+            if auth_enforced and path.startswith("/api/") and path != "/api/status":
                 if not self._check_authorization():
                     return
 
@@ -3499,8 +3540,18 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
 
     def log_message(self, format: str, *args: Any) -> None:
-        """Route HTTP server logs through standard logging rather than raw stderr."""
-        logger.debug("Dashboard HTTP [%s]: %s", self.address_string(), format % args)
+        """Route HTTP server logs through standard logging with query parameter secret redaction."""
+        try:
+            msg = format % args
+            sanitized = re.sub(
+                r"([?&](?:token|auth_token|api_key|key|secret)=)[^&\s]*",
+                r"\1[REDACTED]",
+                msg,
+                flags=re.IGNORECASE,
+            )
+        except Exception:
+            sanitized = format
+        logger.debug("Dashboard HTTP [%s]: %s", self.address_string(), sanitized)
 
 
 class PortfolioDashboardServer:
@@ -3607,8 +3658,25 @@ class PortfolioDashboardServer:
         self.audit_diagnostics_service = audit_diagnostics_service
         self.paper_coordinator = paper_coordinator
         self.paper_execution_engine = paper_execution_engine
-        self.auth_token = auth_token.strip() if (auth_token and auth_token.strip()) else None
-        self.require_auth = bool(require_auth)
+
+        if auth_token is not None:
+            if not isinstance(auth_token, str):
+                raise ValidationError(
+                    f"Invalid auth_token: expected string or None, got {type(auth_token).__name__}."
+                )
+            clean_tok = auth_token.strip()
+            self.auth_token = clean_tok if clean_tok else None
+        else:
+            self.auth_token = None
+
+        if isinstance(require_auth, str):
+            from app.core.config import parse_bool
+            try:
+                self.require_auth = parse_bool(require_auth, "require_auth")
+            except Exception as err:
+                raise ValidationError(str(err)) from err
+        else:
+            self.require_auth = bool(require_auth)
 
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
