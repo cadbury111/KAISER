@@ -3505,6 +3505,59 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                     })
                     return
 
+            # 15. Paper Trading Multi-Scenario Stress Testing & Parameter Sensitivity Endpoint (/api/paper/stress-test)
+            if path in ("/api/paper/stress-test", "/api/paper/stress-test/report"):
+                scenario_id = query.get("scenario_id", [None])[0]
+                coordinator = getattr(self.server, "paper_coordinator", None)
+
+                report_dict: Optional[Dict[str, Any]] = None
+                if coordinator is not None and hasattr(coordinator, "get_stress_test_report"):
+                    report_dict = coordinator.get_stress_test_report()
+
+                if report_dict is None:
+                    stress_svc = getattr(self.server, "stress_service", None)
+                    if stress_svc is not None and hasattr(stress_svc, "to_dict"):
+                        report_dict = stress_svc.to_dict()
+                    elif isinstance(stress_svc, dict):
+                        report_dict = stress_svc
+
+                if report_dict is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper trading stress test report not available or not yet executed.",
+                    })
+                    return
+
+                if scenario_id:
+                    clean_id = scenario_id.strip()
+                    scenarios = report_dict.get("scenario_results", {})
+                    if clean_id in scenarios:
+                        self._send_json_response({
+                            "status": "success",
+                            "read_only": True,
+                            "execution_locked": True,
+                            "scenario": scenarios[clean_id],
+                        })
+                        return
+                    else:
+                        self._send_json_response(
+                            {"error": "Not Found", "message": f"Scenario ID '{clean_id}' not found in stress test report."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "report": report_dict,
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 

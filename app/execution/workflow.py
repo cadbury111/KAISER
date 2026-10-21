@@ -320,6 +320,7 @@ class PaperTradingWorkflowCoordinator:
         self._outcomes_by_client_id: Dict[str, PaperWorkflowOutcome] = {}
         self._sessions: Dict[str, PaperSimulationSession] = {}
         self._active_session: Optional[PaperSimulationSession] = None
+        self._last_stress_report: Optional[Any] = None
 
     @property
     def is_enabled(self) -> bool:
@@ -1495,4 +1496,29 @@ class PaperTradingWorkflowCoordinator:
                 "spread_calibration": self.get_calibration_summary(),
                 "metrics_digest": self.metrics_tracker.compute_digest(),
                 "latency_digest": self.metrics_tracker.profiler.compute_digest(),
+                "stress_test_report": self.get_stress_test_report(),
             }
+
+    def run_stress_scenarios(
+        self,
+        scenarios: Optional[Sequence[Any]] = None,
+        run_sensitivity: bool = True,
+    ) -> Any:
+        """Execute deterministic multi-scenario stress tests and parameter sensitivity sweeps."""
+        from app.execution.stress_testing import run_all_stress_scenarios
+        report = run_all_stress_scenarios(
+            scenarios=scenarios,
+            settings=self.settings,
+            run_sensitivity=run_sensitivity,
+        )
+        with self._lock:
+            self._last_stress_report = report
+        return report
+
+    def get_stress_test_report(self) -> Optional[Dict[str, Any]]:
+        """Retrieve the latest cached multi-scenario stress test report, if available."""
+        with self._lock:
+            if self._last_stress_report is not None:
+                return self._last_stress_report.to_dict()
+            return None
+
