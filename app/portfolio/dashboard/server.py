@@ -3661,6 +3661,32 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            if path in ("/api/paper/reconciliation", "/api/paper/reconcile"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                if alloc_mgr is None or not hasattr(alloc_mgr, "reconcile"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper portfolio reconciliation service not initialized.",
+                    })
+                    return
+
+                recon_res = alloc_mgr.reconcile()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "reconciliation": recon_res.to_dict() if hasattr(recon_res, "to_dict") else recon_res,
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 

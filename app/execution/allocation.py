@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import copy
 import hashlib
 import json
 import logging
@@ -86,6 +87,7 @@ class AllocationRejectionCode(str, Enum):
     PORTFOLIO_NOTIONAL_EXCEEDED = "PORTFOLIO_NOTIONAL_EXCEEDED"
     DISALLOWED_SYMBOL = "DISALLOWED_SYMBOL"
     DUPLICATE_REQUEST_ID = "DUPLICATE_REQUEST_ID"
+    DUPLICATE_CLIENT_ORDER_ID = "DUPLICATE_CLIENT_ORDER_ID"
     INSUFFICIENT_POSITION = "INSUFFICIENT_POSITION"
     SHORT_SELLING_PROHIBITED = "SHORT_SELLING_PROHIBITED"
     INVALID_MARKET_DATA = "INVALID_MARKET_DATA"
@@ -483,6 +485,49 @@ class StrategySleeve:
             "allowed_symbols": sorted(self.allowed_symbols) if self.allowed_symbols else None,
         }
 
+    def snapshot(self) -> Dict[str, Any]:
+        """Capture point-in-time state snapshot for transactional rollback."""
+        return {
+            "available_cash": self.available_cash,
+            "reserved_cash": self.reserved_cash,
+            "realized_pnl": self.realized_pnl,
+            "total_fees_paid": self.total_fees_paid,
+            "positions": {
+                sym: copy.copy(pos) for sym, pos in self.positions.items()
+            },
+        }
+
+    def restore_snapshot(self, snap: Dict[str, Any]) -> None:
+        """Restore point-in-time state from snapshot."""
+        self.available_cash = snap["available_cash"]
+        self.reserved_cash = snap["reserved_cash"]
+        self.realized_pnl = snap["realized_pnl"]
+        self.total_fees_paid = snap["total_fees_paid"]
+        self.positions = snap["positions"]
+
+    def reserve_cash(self, amount: float) -> bool:
+        """Reserve cash within the sleeve for an in-flight order."""
+        if not math.isfinite(amount) or amount <= 0:
+            return False
+        amt = round(float(amount), 4)
+        if self.available_cash < amt:
+            return False
+        self.available_cash = round(self.available_cash - amt, 4)
+        self.reserved_cash = round(self.reserved_cash + amt, 4)
+        return True
+
+    def release_reserved_cash(self, amount: float) -> bool:
+        """Release reserved cash back to available sleeve cash."""
+        if not math.isfinite(amount) or amount <= 0:
+            return False
+        amt = round(float(amount), 4)
+        if self.reserved_cash <= 0:
+            return False
+        actual_release = min(self.reserved_cash, amt)
+        self.reserved_cash = round(self.reserved_cash - actual_release, 4)
+        self.available_cash = round(self.available_cash + actual_release, 4)
+        return True
+
 
 @dataclass(frozen=True)
 class SleeveExposureSnapshot:
@@ -559,6 +604,99 @@ class PortfolioExposureSnapshot:
         }
 
 
+@dataclass(frozen=True)
+class ReconciliationCheckDetail:
+    """Detail for a specific reconciliation dimension."""
+
+    dimension: str
+    expected_value: float
+    actual_value: float
+    discrepancy: float
+    is_balanced: bool
+    tolerance: float = 1e-4
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "dimension": self.dimension,
+            "expected_value": round(self.expected_value, 4),
+            "actual_value": round(self.actual_value, 4),
+            "discrepancy": round(self.discrepancy, 6),
+            "is_balanced": self.is_balanced,
+            "tolerance": self.tolerance,
+            "details": dict(self.details),
+        }
+
+
+@dataclass(frozen=True)
+class PortfolioSleeveReconciliationResult:
+    """Structured, actionable mathematical reconciliation report between sleeves and portfolio."""
+
+    is_reconciled: bool
+    max_discrepancy: float
+    tolerance: float
+    discrepancies: List[str]
+    checks: Dict[str, ReconciliationCheckDetail]
+    portfolio_cash: float
+    sum_sleeve_cash: float
+    unallocated_cash: float
+    portfolio_equity: float
+    sum_sleeve_equity: float
+    timestamp: float = field(default_factory=time.time)
+    deterministic_digest: str = ""
+
+    def __getitem__(self, key: str) -> Any:
+        """Support dictionary-style access for backwards compatibility."""
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Safe dictionary-style get."""
+        return getattr(self, key, default)
+
+    def __contains__(self, key: str) -> bool:
+        """Support 'in' operator."""
+        return hasattr(self, key)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_reconciled": self.is_reconciled,
+            "max_discrepancy": round(self.max_discrepancy, 6),
+            "tolerance": self.tolerance,
+            "discrepancies": list(self.discrepancies),
+            "checks": {k: v.to_dict() for k, v in self.checks.items()},
+            "portfolio_cash": round(self.portfolio_cash, 4),
+            "sum_sleeve_cash": round(self.sum_sleeve_cash, 4),
+            "unallocated_cash": round(self.unallocated_cash, 4),
+            "portfolio_equity": round(self.portfolio_equity, 4),
+            "sum_sleeve_equity": round(self.sum_sleeve_equity, 4),
+            "timestamp": self.timestamp,
+            "deterministic_digest": self.deterministic_digest,
+            "advisory_disclaimer": "SIMULATION ONLY: Reconciliation metrics verify simulated accounting invariants and do not guarantee trading returns.",
+        }
+
+
+def _snapshot_portfolio(portfolio: PaperPortfolio) -> Dict[str, Any]:
+    """Capture portfolio point-in-time state for rollback."""
+    return {
+        "available_cash": portfolio.available_cash,
+        "realized_pnl": portfolio.realized_pnl,
+        "total_fees_paid": portfolio.total_fees_paid,
+        "positions": {
+            sym: copy.copy(pos) for sym, pos in portfolio.positions.items()
+        },
+    }
+
+
+def _restore_portfolio_snapshot(portfolio: PaperPortfolio, snap: Dict[str, Any]) -> None:
+    """Restore portfolio state from snapshot."""
+    portfolio.available_cash = snap["available_cash"]
+    portfolio.realized_pnl = snap["realized_pnl"]
+    portfolio.total_fees_paid = snap["total_fees_paid"]
+    portfolio.positions = snap["positions"]
+
+
 def compute_allocation_digest(result: PortfolioAllocationResult) -> str:
     """Compute a deterministic SHA-256 fingerprint of an allocation result."""
     parts = [
@@ -626,6 +764,8 @@ class PortfolioAllocationManager:
         self._allocation_history: List[PortfolioAllocationResult] = []
         self._allocation_requests: Dict[str, PortfolioAllocationRequest] = {}
         self._allocation_results: Dict[str, PortfolioAllocationResult] = {}
+        self._order_requests: Dict[str, Tuple[str, PaperOrderRequest]] = {}  # client_order_id -> (sleeve_id, request)
+        self._order_results: Dict[str, PaperExecutionResult] = {}            # client_order_id -> result
         self._lock = threading.RLock()
 
         # If ledger already contains allocation entries, attempt recovery
@@ -643,6 +783,22 @@ class PortfolioAllocationManager:
         """Sum of initial capital partitioned across all strategy sleeves."""
         with self._lock:
             return round(sum(s.allocated_capital for s in self._sleeves.values()), 4)
+
+    def reserve_sleeve_capital(self, sleeve_id: str, amount: float) -> bool:
+        """Reserve capital within a specific sleeve for pending execution."""
+        with self._lock:
+            sleeve = self._sleeves.get(sleeve_id.strip())
+            if sleeve is None:
+                return False
+            return sleeve.reserve_cash(amount)
+
+    def release_sleeve_capital(self, sleeve_id: str, amount: float) -> bool:
+        """Release previously reserved capital back to sleeve available cash."""
+        with self._lock:
+            sleeve = self._sleeves.get(sleeve_id.strip())
+            if sleeve is not None:
+                return sleeve.release_reserved_cash(amount)
+            return False
 
     def get_sleeve(self, sleeve_id: str) -> Optional[StrategySleeve]:
         """Retrieve a sleeve by its unique ID."""
@@ -760,52 +916,61 @@ class PortfolioAllocationManager:
                 self._allocation_results[request.request_id] = rej_res
                 return rej_res
 
-            # 4. Atomically Apply Partitions
-            self._sleeves.clear()
-            sleeve_results: Dict[str, SleeveAllocationResult] = {}
+            # 4. Atomically Apply Partitions with Rollback Protection
+            sleeves_backup = {sid: copy.copy(s) for sid, s in self._sleeves.items()}
+            unalloc_backup = self._unallocated_cash
 
-            for slv_def in request.sleeves:
-                cash_alloc, eff_w = planned_sleeve_cash[slv_def.sleeve_id]
-                new_sleeve = StrategySleeve(
-                    sleeve_id=slv_def.sleeve_id,
-                    name=slv_def.name,
-                    allocated_capital=cash_alloc,
-                    risk_budget=slv_def.risk_budget,
-                    allowed_symbols=slv_def.allowed_symbols,
-                    allowed_asset_classes=slv_def.allowed_asset_classes,
-                )
-                self._sleeves[slv_def.sleeve_id] = new_sleeve
-                sleeve_results[slv_def.sleeve_id] = SleeveAllocationResult(
-                    sleeve_id=slv_def.sleeve_id,
-                    name=slv_def.name,
-                    allocated_cash=cash_alloc,
-                    effective_weight=eff_w,
-                    status=AllocationStatus.APPROVED,
-                    risk_budget=slv_def.risk_budget,
-                    allowed_symbols=list(slv_def.allowed_symbols) if slv_def.allowed_symbols else None,
-                )
+            try:
+                self._sleeves.clear()
+                sleeve_results: Dict[str, SleeveAllocationResult] = {}
 
-                # Record in durable ledger (cash_change=0.0 because it's an internal capital partition)
-                alloc_entry = PaperLedgerEntry(
-                    entry_id=f"alloc_{uuid.uuid4().hex[:8]}",
-                    timestamp=time.time(),
-                    entry_type=LedgerEntryType.CAPITAL_ALLOCATION,
-                    cash_change=0.0,
-                    cash_balance_after=self.portfolio.available_cash,
-                    idempotency_key=f"alloc_{request.request_id}_{slv_def.sleeve_id}",
-                    correlation_id=request.correlation_id,
-                    metadata={
-                        "request_id": request.request_id,
-                        "sleeve_id": slv_def.sleeve_id,
-                        "name": slv_def.name,
-                        "allocated_cash": cash_alloc,
-                        "effective_weight": eff_w,
-                        "description": f"Capital partitioned to sleeve {slv_def.sleeve_id}",
-                    },
-                )
-                self.ledger.record_entry(alloc_entry)
+                for slv_def in request.sleeves:
+                    cash_alloc, eff_w = planned_sleeve_cash[slv_def.sleeve_id]
+                    new_sleeve = StrategySleeve(
+                        sleeve_id=slv_def.sleeve_id,
+                        name=slv_def.name,
+                        allocated_capital=cash_alloc,
+                        risk_budget=slv_def.risk_budget,
+                        allowed_symbols=slv_def.allowed_symbols,
+                        allowed_asset_classes=slv_def.allowed_asset_classes,
+                    )
+                    self._sleeves[slv_def.sleeve_id] = new_sleeve
+                    sleeve_results[slv_def.sleeve_id] = SleeveAllocationResult(
+                        sleeve_id=slv_def.sleeve_id,
+                        name=slv_def.name,
+                        allocated_cash=cash_alloc,
+                        effective_weight=eff_w,
+                        status=AllocationStatus.APPROVED,
+                        risk_budget=slv_def.risk_budget,
+                        allowed_symbols=list(slv_def.allowed_symbols) if slv_def.allowed_symbols else None,
+                    )
 
-            self._unallocated_cash = round(available_port_cash - total_planned_cash, 4)
+                    # Record in durable ledger (cash_change=0.0 because it's an internal capital partition)
+                    alloc_entry = PaperLedgerEntry(
+                        entry_id=f"alloc_{uuid.uuid4().hex[:8]}",
+                        timestamp=time.time(),
+                        entry_type=LedgerEntryType.CAPITAL_ALLOCATION,
+                        cash_change=0.0,
+                        cash_balance_after=self.portfolio.available_cash,
+                        idempotency_key=f"alloc_{request.request_id}_{slv_def.sleeve_id}",
+                        correlation_id=request.correlation_id,
+                        metadata={
+                            "request_id": request.request_id,
+                            "sleeve_id": slv_def.sleeve_id,
+                            "name": slv_def.name,
+                            "allocated_cash": cash_alloc,
+                            "effective_weight": eff_w,
+                            "description": f"Capital partitioned to sleeve {slv_def.sleeve_id}",
+                        },
+                    )
+                    self.ledger.record_entry(alloc_entry)
+
+                self._unallocated_cash = round(available_port_cash - total_planned_cash, 4)
+            except Exception as exc:
+                self._sleeves = sleeves_backup
+                self._unallocated_cash = unalloc_backup
+                logger.error("Transactional rollback in apply_allocation: %s", exc)
+                raise
 
             # 5. Build Result & Digest
             now = time.time()
@@ -879,6 +1044,45 @@ class PortfolioAllocationManager:
             now = reference_time if reference_time is not None else time.time()
             order_id = f"sord_{uuid.uuid4().hex[:10]}"
             cid = request.correlation_id or uuid.uuid4().hex
+            client_oid = (request.client_order_id or "").strip()
+
+            # Idempotency & Conflict Check for Client Order ID
+            if client_oid and client_oid in self._order_results:
+                prev_sleeve_id, prev_req = self._order_requests[client_oid]
+                prev_res = self._order_results[client_oid]
+
+                # Verify payload match
+                is_identical = (
+                    prev_sleeve_id == sleeve_id.strip()
+                    and prev_req.symbol.strip().upper() == request.symbol.strip().upper()
+                    and prev_req.side == request.side
+                    and prev_req.order_type == request.order_type
+                    and abs(prev_req.quantity - request.quantity) < 1e-6
+                    and prev_req.limit_price == request.limit_price
+                )
+                if is_identical:
+                    logger.info("Returning idempotent cached execution result for client_order_id '%s'", client_oid)
+                    return prev_res
+                else:
+                    rej_order = self._create_rejected_order(
+                        order_id=order_id,
+                        request=request,
+                        now=now,
+                        cid=cid,
+                        code=PaperRejectionCode.DUPLICATE_ORDER,
+                        reason=(
+                            f"Client order ID '{client_oid}' has already been processed with conflicting parameters: "
+                            f"previous (sleeve={prev_sleeve_id}, sym={prev_req.symbol}, side={prev_req.side.value}, qty={prev_req.quantity}) "
+                            f"vs requested (sleeve={sleeve_id}, sym={request.symbol}, side={request.side.value}, qty={request.quantity})."
+                        ),
+                    )
+                    self._record_rejection_ledger(rej_order, sleeve_id, cid)
+                    return PaperExecutionResult(
+                        success=False,
+                        order=rej_order,
+                        rejection_code=PaperRejectionCode.DUPLICATE_ORDER,
+                        rejection_reason=rej_order.rejection_reason,
+                    )
 
             # 1. Sleeve Existence Check
             sleeve = self._sleeves.get(sleeve_id.strip())
@@ -1097,9 +1301,46 @@ class PortfolioAllocationManager:
                     rejection_reason=fill_reason,
                 )
 
-            # 7. Apply Fill Atomically to Sleeve and Portfolio
-            sleeve.apply_fill(fill)
-            self.portfolio.apply_fill(fill)
+            # 7. Apply Fill Atomically to Sleeve and Portfolio with Rollback Protection
+            sleeve_snap = sleeve.snapshot()
+            port_snap = _snapshot_portfolio(self.portfolio)
+
+            try:
+                sleeve.apply_fill(fill)
+                self.portfolio.apply_fill(fill)
+
+                # 8. Record in Durable Ledger
+                fill_entry = PaperLedgerEntry(
+                    entry_id=f"ledg_fill_{uuid.uuid4().hex[:8]}",
+                    timestamp=now,
+                    entry_type=LedgerEntryType.ORDER_FILL,
+                    order_id=order_id,
+                    client_order_id=client_oid or order_id,
+                    symbol=norm_sym,
+                    side=request.side.value,
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    fee=fill.fee,
+                    cash_change=fill.net_cash_impact,
+                    cash_balance_after=self.portfolio.available_cash,
+                    realized_pnl=self.portfolio.realized_pnl,
+                    idempotency_key=f"sleeve_fill_{fill.fill_id}",
+                    correlation_id=cid,
+                    metadata={
+                        "sleeve_id": sleeve_id,
+                        "fill_id": fill.fill_id,
+                        "slippage": fill.slippage,
+                        "order_type": request.order_type.value,
+                        "sleeve_available_cash": sleeve.available_cash,
+                        "sleeve_total_equity": sleeve.total_equity,
+                    },
+                )
+                self.ledger.record_entry(fill_entry)
+            except Exception as exc:
+                sleeve.restore_snapshot(sleeve_snap)
+                _restore_portfolio_snapshot(self.portfolio, port_snap)
+                logger.error("Transactional rollback in execute_sleeve_order: %s", exc)
+                raise
 
             filled_order = PaperOrder(
                 order_id=order_id,
@@ -1120,33 +1361,10 @@ class PortfolioAllocationManager:
                 correlation_id=cid,
             )
 
-            # 8. Record in Durable Ledger
-            fill_entry = PaperLedgerEntry(
-                entry_id=f"ledg_fill_{uuid.uuid4().hex[:8]}",
-                timestamp=now,
-                entry_type=LedgerEntryType.ORDER_FILL,
-                order_id=order_id,
-                client_order_id=client_oid,
-                symbol=norm_sym,
-                side=request.side.value,
-                quantity=fill.quantity,
-                price=fill.price,
-                fee=fill.fee,
-                cash_change=fill.net_cash_impact,
-                cash_balance_after=self.portfolio.available_cash,
-                realized_pnl=self.portfolio.realized_pnl,
-                idempotency_key=f"sleeve_fill_{fill.fill_id}",
-                correlation_id=cid,
-                metadata={
-                    "sleeve_id": sleeve_id,
-                    "fill_id": fill.fill_id,
-                    "slippage": fill.slippage,
-                    "order_type": request.order_type.value,
-                    "sleeve_available_cash": sleeve.available_cash,
-                    "sleeve_total_equity": sleeve.total_equity,
-                },
-            )
-            self.ledger.record_entry(fill_entry)
+            final_res = PaperExecutionResult(success=True, order=filled_order, fill=fill)
+            if client_oid:
+                self._order_requests[client_oid] = (sleeve_id.strip(), request)
+                self._order_results[client_oid] = final_res
 
             # 9. Publish Events
             if self.event_bus:
@@ -1176,7 +1394,7 @@ class PortfolioAllocationManager:
                 fill.price,
                 fill.net_cash_impact,
             )
-            return PaperExecutionResult(success=True, order=filled_order, fill=fill)
+            return final_res
 
     def transfer_between_sleeves(
         self,
@@ -1240,7 +1458,7 @@ class PortfolioAllocationManager:
                     f"Source sleeve '{src_id}' has insufficient cash: required {amt:.2f}, available {source.available_cash:.2f}.",
                 )
 
-            # Atomic transfer: cash leaves source and enters target
+            # Atomic transfer: cash leaves source and enters target with rollback boundary
             source.available_cash = round(source.available_cash - amt, 4)
             target.available_cash = round(target.available_cash + amt, 4)
 
@@ -1261,7 +1479,13 @@ class PortfolioAllocationManager:
                     "target_balance_after": target.available_cash,
                 },
             )
-            self.ledger.record_entry(xfer_entry)
+            try:
+                self.ledger.record_entry(xfer_entry)
+            except Exception as exc:
+                source.available_cash = round(source.available_cash + amt, 4)
+                target.available_cash = round(target.available_cash - amt, 4)
+                logger.error("Transactional rollback in transfer_between_sleeves: %s", exc)
+                raise
 
             if self.event_bus:
                 try:
@@ -1378,147 +1602,324 @@ class PortfolioAllocationManager:
                 deterministic_digest=digest,
             )
 
-    def reconcile(self) -> Dict[str, Any]:
+    def reconcile(self, tolerance: float = 1e-4) -> PortfolioSleeveReconciliationResult:
         """Perform comprehensive mathematical reconciliation between sleeve sums and portfolio."""
         with self._lock:
             discrepancies: List[str] = []
+            checks: Dict[str, ReconciliationCheckDetail] = {}
 
             # 1. Cash Reconciliation
             sum_sleeve_cash = sum(s.available_cash for s in self._sleeves.values())
             expected_cash = round(sum_sleeve_cash + self._unallocated_cash, 4)
-            actual_cash = self.portfolio.available_cash
-            cash_diff = round(abs(expected_cash - actual_cash), 4)
-            if cash_diff > 0.0001:
-                discrepancies.append(f"Cash mismatch: sleeves+unalloc={expected_cash:.4f} vs port={actual_cash:.4f}")
+            actual_cash = round(self.portfolio.available_cash, 4)
+            cash_diff = round(abs(expected_cash - actual_cash), 6)
+            cash_ok = cash_diff <= tolerance
+            if not cash_ok:
+                discrepancies.append(
+                    f"Cash mismatch: sleeves+unalloc={expected_cash:.4f} vs port={actual_cash:.4f} (diff={cash_diff:.6f})"
+                )
+            checks["cash_check"] = ReconciliationCheckDetail(
+                dimension="cash",
+                expected_value=expected_cash,
+                actual_value=actual_cash,
+                discrepancy=cash_diff,
+                is_balanced=cash_ok,
+                tolerance=tolerance,
+                details={
+                    "sum_sleeve_cash": round(sum_sleeve_cash, 4),
+                    "unallocated_cash": self._unallocated_cash,
+                    "portfolio_cash": actual_cash,
+                },
+            )
 
-            # 2. Position Value Reconciliation
+            # 2. Reserved Cash Reconciliation
+            sum_sleeve_reserved = round(sum(s.reserved_cash for s in self._sleeves.values()), 4)
+            actual_reserved = getattr(self.portfolio, "reserved_cash", 0.0)
+            reserved_diff = round(abs(sum_sleeve_reserved - actual_reserved), 6)
+            reserved_ok = reserved_diff <= tolerance
+            if not reserved_ok:
+                discrepancies.append(
+                    f"Reserved cash mismatch: sum_sleeves={sum_sleeve_reserved:.4f} vs port={actual_reserved:.4f} (diff={reserved_diff:.6f})"
+                )
+            checks["reserved_cash_check"] = ReconciliationCheckDetail(
+                dimension="reserved_cash",
+                expected_value=sum_sleeve_reserved,
+                actual_value=actual_reserved,
+                discrepancy=reserved_diff,
+                is_balanced=reserved_ok,
+                tolerance=tolerance,
+                details={"sum_sleeve_reserved": sum_sleeve_reserved},
+            )
+
+            # 3. Position Value Reconciliation
             sum_sleeve_pos_val = round(sum(s.total_position_value for s in self._sleeves.values()), 4)
-            actual_pos_val = self.portfolio.total_position_value
-            pos_val_diff = round(abs(sum_sleeve_pos_val - actual_pos_val), 4)
-            if pos_val_diff > 0.0001:
-                discrepancies.append(f"Position value mismatch: sum_sleeves={sum_sleeve_pos_val:.4f} vs port={actual_pos_val:.4f}")
+            actual_pos_val = round(self.portfolio.total_position_value, 4)
+            pos_val_diff = round(abs(sum_sleeve_pos_val - actual_pos_val), 6)
+            pos_val_ok = pos_val_diff <= tolerance
+            if not pos_val_ok:
+                discrepancies.append(
+                    f"Position value mismatch: sum_sleeves={sum_sleeve_pos_val:.4f} vs port={actual_pos_val:.4f} (diff={pos_val_diff:.6f})"
+                )
+            checks["position_value_check"] = ReconciliationCheckDetail(
+                dimension="position_value",
+                expected_value=sum_sleeve_pos_val,
+                actual_value=actual_pos_val,
+                discrepancy=pos_val_diff,
+                is_balanced=pos_val_ok,
+                tolerance=tolerance,
+            )
 
-            # 3. Position Quantity per Symbol
+            # 4. Position Quantity and Cost per Symbol
             all_symbols = set(self.portfolio.positions.keys())
             for s in self._sleeves.values():
                 all_symbols.update(s.positions.keys())
 
+            sym_discrepancies: Dict[str, Any] = {}
             max_pos_diff = 0.0
+            pos_qty_ok = True
             for sym in sorted(all_symbols):
                 sleeve_qty = round(sum((s.get_position(sym).quantity if s.get_position(sym) else 0.0) for s in self._sleeves.values()), 6)
                 port_pos = self.portfolio.get_position(sym)
-                port_qty = port_pos.quantity if port_pos else 0.0
+                port_qty = round(port_pos.quantity, 6) if port_pos else 0.0
                 q_diff = round(abs(sleeve_qty - port_qty), 6)
-                if q_diff > 1e-5:
+                if q_diff > tolerance:
+                    pos_qty_ok = False
                     discrepancies.append(f"Quantity mismatch for {sym}: sleeves={sleeve_qty:.6f} vs port={port_qty:.6f}")
+                    sym_discrepancies[sym] = {"sleeve_qty": sleeve_qty, "port_qty": port_qty, "diff": q_diff}
                 max_pos_diff = max(max_pos_diff, q_diff)
 
-            # 4. Total Fees Paid
+            checks["position_quantities_check"] = ReconciliationCheckDetail(
+                dimension="position_quantities",
+                expected_value=0.0,
+                actual_value=max_pos_diff,
+                discrepancy=max_pos_diff,
+                is_balanced=pos_qty_ok,
+                tolerance=tolerance,
+                details=sym_discrepancies,
+            )
+
+            # 5. Total Fees Paid
             sum_fees = round(sum(s.total_fees_paid for s in self._sleeves.values()), 4)
             port_fees = round(self.portfolio.total_fees_paid, 4)
-            fee_diff = round(abs(sum_fees - port_fees), 4)
-            if fee_diff > 0.0001:
-                discrepancies.append(f"Fee mismatch: sleeves={sum_fees:.4f} vs port={port_fees:.4f}")
+            fee_diff = round(abs(sum_fees - port_fees), 6)
+            fee_ok = fee_diff <= tolerance
+            if not fee_ok:
+                discrepancies.append(f"Fee mismatch: sleeves={sum_fees:.4f} vs port={port_fees:.4f} (diff={fee_diff:.6f})")
+            checks["fees_check"] = ReconciliationCheckDetail(
+                dimension="fees",
+                expected_value=sum_fees,
+                actual_value=port_fees,
+                discrepancy=fee_diff,
+                is_balanced=fee_ok,
+                tolerance=tolerance,
+            )
 
-            # 5. Realized P&L
-            sum_pnl = round(sum(s.realized_pnl for s in self._sleeves.values()), 4)
-            port_pnl = round(self.portfolio.realized_pnl, 4)
-            pnl_diff = round(abs(sum_pnl - port_pnl), 4)
-            if pnl_diff > 0.0001:
-                discrepancies.append(f"Realized P&L mismatch: sleeves={sum_pnl:.4f} vs port={port_pnl:.4f}")
+            # 6. Realized P&L
+            sum_realized = round(sum(s.realized_pnl for s in self._sleeves.values()), 4)
+            port_realized = round(self.portfolio.realized_pnl, 4)
+            pnl_diff = round(abs(sum_realized - port_realized), 6)
+            pnl_ok = pnl_diff <= tolerance
+            if not pnl_ok:
+                discrepancies.append(f"Realized P&L mismatch: sleeves={sum_realized:.4f} vs port={port_realized:.4f} (diff={pnl_diff:.6f})")
+            checks["realized_pnl_check"] = ReconciliationCheckDetail(
+                dimension="realized_pnl",
+                expected_value=sum_realized,
+                actual_value=port_realized,
+                discrepancy=pnl_diff,
+                is_balanced=pnl_ok,
+                tolerance=tolerance,
+            )
 
-            max_disc = max(cash_diff, pos_val_diff, max_pos_diff, fee_diff, pnl_diff)
+            # 7. Unrealized P&L
+            sum_unrealized = round(sum(s.unrealized_pnl for s in self._sleeves.values()), 4)
+            port_unrealized = round(self.portfolio.unrealized_pnl, 4)
+            unrealized_diff = round(abs(sum_unrealized - port_unrealized), 6)
+            unrealized_ok = unrealized_diff <= tolerance
+            if not unrealized_ok:
+                discrepancies.append(f"Unrealized P&L mismatch: sleeves={sum_unrealized:.4f} vs port={port_unrealized:.4f} (diff={unrealized_diff:.6f})")
+            checks["unrealized_pnl_check"] = ReconciliationCheckDetail(
+                dimension="unrealized_pnl",
+                expected_value=sum_unrealized,
+                actual_value=port_unrealized,
+                discrepancy=unrealized_diff,
+                is_balanced=unrealized_ok,
+                tolerance=tolerance,
+            )
+
+            # 8. Total Equity / Capital Reconciliation
+            sum_sleeve_equity = round(sum(s.total_equity for s in self._sleeves.values()), 4)
+            expected_equity = round(sum_sleeve_equity + self._unallocated_cash, 4)
+            actual_equity = round(self.portfolio.total_equity, 4)
+            equity_diff = round(abs(expected_equity - actual_equity), 6)
+            equity_ok = equity_diff <= tolerance
+            if not equity_ok:
+                discrepancies.append(f"Total equity mismatch: sleeves+unalloc={expected_equity:.4f} vs port={actual_equity:.4f} (diff={equity_diff:.6f})")
+            checks["total_equity_check"] = ReconciliationCheckDetail(
+                dimension="total_equity",
+                expected_value=expected_equity,
+                actual_value=actual_equity,
+                discrepancy=equity_diff,
+                is_balanced=equity_ok,
+                tolerance=tolerance,
+            )
+
+            max_disc = max(cash_diff, reserved_diff, pos_val_diff, max_pos_diff, fee_diff, pnl_diff, unrealized_diff, equity_diff)
             is_ok = len(discrepancies) == 0
 
-            return {
-                "is_reconciled": is_ok,
-                "discrepancies": discrepancies,
-                "max_discrepancy": max_disc,
-                "portfolio_cash": actual_cash,
-                "sum_sleeve_cash": round(sum_sleeve_cash, 4),
-                "unallocated_cash": self._unallocated_cash,
-            }
+            # Compute digest
+            digest = compute_multi_sleeve_financial_digest(
+                self.portfolio, self._sleeves, self._unallocated_cash
+            )
+
+            return PortfolioSleeveReconciliationResult(
+                is_reconciled=is_ok,
+                max_discrepancy=max_disc,
+                tolerance=tolerance,
+                discrepancies=discrepancies,
+                checks=checks,
+                portfolio_cash=actual_cash,
+                sum_sleeve_cash=round(sum_sleeve_cash, 4),
+                unallocated_cash=self._unallocated_cash,
+                portfolio_equity=actual_equity,
+                sum_sleeve_equity=sum_sleeve_equity,
+                timestamp=time.time(),
+                deterministic_digest=digest,
+            )
 
     def recover_from_ledger(self, ledger: PaperLedger) -> Dict[str, Any]:
         """Reconstruct sleeve partitions, cash allocations, and trades strictly from the ledger.
 
         Guarantees:
         1. Idempotency: replaying multiple times produces identical state.
-        2. Detects corrupted or inconsistent records and fails closed.
+        2. Detects corrupted, non-finite, unknown sleeve, or conflicting records and fails closed.
         3. Fills are mapped to their respective strategy sleeves via entry metadata.
+        4. Atomic rollback on recovery failure.
         """
         with self._lock:
             entries = ledger.get_entries(limit=1_000_000)
             if not entries:
                 return {"recovered_sleeves": 0, "status": "no_entries"}
 
-            # Clear in-memory sleeves cleanly
-            self._sleeves.clear()
-            total_allocated = 0.0
+            # Sort entries chronologically to guarantee correct replay order
+            entries = sorted(entries, key=lambda e: (e.timestamp, e.entry_id))
 
-            # 1. First pass: Reconstruct sleeves from CAPITAL_ALLOCATION entries
-            for entry in entries:
-                if entry.entry_type == LedgerEntryType.CAPITAL_ALLOCATION:
-                    meta = entry.metadata
-                    sid = meta.get("sleeve_id")
-                    if not sid:
-                        raise ValidationError(f"Corrupted CAPITAL_ALLOCATION entry {entry.entry_id}: missing sleeve_id")
-                    alloc_cash = meta.get("allocated_cash", 0.0)
-                    if not math.isfinite(alloc_cash) or alloc_cash <= 0:
-                        raise ValidationError(f"Corrupted CAPITAL_ALLOCATION entry {entry.entry_id}: non-finite or negative cash")
+            # Backup state for atomicity
+            sleeves_backup = {sid: copy.copy(s) for sid, s in self._sleeves.items()}
+            unalloc_backup = self._unallocated_cash
 
-                    name = meta.get("name", sid)
-                    self._sleeves[sid] = StrategySleeve(
-                        sleeve_id=sid,
-                        name=name,
-                        allocated_capital=alloc_cash,
-                        risk_budget=self.risk_config and SleeveRiskBudget(
-                            max_order_notional=self.risk_config.max_order_notional,
-                            max_position_exposure_pct=self.risk_config.max_position_exposure_pct,
-                        ) or SleeveRiskBudget(),
-                    )
-                    total_allocated = round(total_allocated + alloc_cash, 4)
+            try:
+                # Clear in-memory sleeves cleanly
+                self._sleeves.clear()
+                total_allocated = 0.0
+                seen_alloc_keys: Dict[str, float] = {}  # sleeve_id -> allocated_cash
 
-            # 2. Second pass: Replay fills and transfers
-            for entry in entries:
-                if entry.entry_type == LedgerEntryType.ORDER_FILL:
-                    sid = entry.metadata.get("sleeve_id")
-                    if sid and sid in self._sleeves:
-                        sleeve = self._sleeves[sid]
-                        # Reconstruct fill object
-                        fill = PaperFill(
-                            fill_id=entry.metadata.get("fill_id", f"fill_{entry.order_id}"),
-                            order_id=entry.order_id or "unknown",
-                            client_order_id=entry.client_order_id or "unknown",
-                            symbol=entry.symbol or "UNKNOWN",
-                            side=PaperOrderSide(entry.side) if entry.side else PaperOrderSide.BUY,
-                            quantity=entry.quantity or 0.0,
-                            price=entry.price or 0.0,
-                            fee=entry.fee,
-                            slippage=entry.metadata.get("slippage", 0.0),
-                            timestamp=entry.timestamp,
-                            market_data_timestamp=entry.timestamp,
-                            market_data_source="replay",
+                # 1. First pass: Reconstruct sleeves from CAPITAL_ALLOCATION entries
+                for entry in entries:
+                    # Validate non-finite numbers in entry
+                    for val, label in (
+                        (entry.cash_change, "cash_change"),
+                        (entry.cash_balance_after, "cash_balance_after"),
+                        (entry.quantity, "quantity"),
+                        (entry.price, "price"),
+                        (entry.fee, "fee"),
+                    ):
+                        if val is not None and (not math.isfinite(val)):
+                            raise ValidationError(f"Corrupted ledger entry {entry.entry_id}: non-finite {label} ({val})")
+
+                    if entry.entry_type == LedgerEntryType.CAPITAL_ALLOCATION:
+                        meta = entry.metadata
+                        sid = meta.get("sleeve_id")
+                        if not sid:
+                            raise ValidationError(f"Corrupted CAPITAL_ALLOCATION entry {entry.entry_id}: missing sleeve_id")
+                        alloc_cash = meta.get("allocated_cash", 0.0)
+                        if not math.isfinite(alloc_cash) or alloc_cash <= 0:
+                            raise ValidationError(f"Corrupted CAPITAL_ALLOCATION entry {entry.entry_id}: non-finite or negative cash")
+
+                        # Check for conflicting duplicate allocation records
+                        if sid in seen_alloc_keys:
+                            prev_alloc = seen_alloc_keys[sid]
+                            if abs(prev_alloc - alloc_cash) > 1e-4:
+                                raise ValidationError(
+                                    f"Conflicting duplicate CAPITAL_ALLOCATION entry for sleeve '{sid}': "
+                                    f"previous {prev_alloc:.2f} vs new {alloc_cash:.2f}"
+                                )
+                            continue  # Idempotently skip identical duplicate
+
+                        seen_alloc_keys[sid] = alloc_cash
+                        name = meta.get("name", sid)
+                        self._sleeves[sid] = StrategySleeve(
+                            sleeve_id=sid,
+                            name=name,
+                            allocated_capital=alloc_cash,
+                            risk_budget=self.risk_config and SleeveRiskBudget(
+                                max_order_notional=self.risk_config.max_order_notional,
+                                max_position_exposure_pct=self.risk_config.max_position_exposure_pct,
+                            ) or SleeveRiskBudget(),
                         )
-                        sleeve.apply_fill(fill)
+                        total_allocated = round(total_allocated + alloc_cash, 4)
 
-                elif entry.entry_type == LedgerEntryType.SLEEVE_TRANSFER:
-                    meta = entry.metadata
-                    src_id = meta.get("source_sleeve_id")
-                    tgt_id = meta.get("target_sleeve_id")
-                    amt = meta.get("amount", 0.0)
-                    if src_id in self._sleeves and tgt_id in self._sleeves and amt > 0:
-                        self._sleeves[src_id].available_cash = round(self._sleeves[src_id].available_cash - amt, 4)
-                        self._sleeves[tgt_id].available_cash = round(self._sleeves[tgt_id].available_cash + amt, 4)
+                # 2. Second pass: Replay fills and transfers
+                seen_fill_ids: Set[str] = set()
 
-            self._unallocated_cash = round(self.portfolio.available_cash - sum(s.available_cash for s in self._sleeves.values()), 4)
+                for entry in entries:
+                    if entry.entry_type == LedgerEntryType.ORDER_FILL:
+                        sid = entry.metadata.get("sleeve_id")
+                        fill_id = entry.metadata.get("fill_id", f"fill_{entry.order_id}")
+
+                        # Skip duplicate fill records
+                        if fill_id in seen_fill_ids:
+                            continue
+                        seen_fill_ids.add(fill_id)
+
+                        if sid:
+                            if sid not in self._sleeves:
+                                raise ValidationError(
+                                    f"Corrupted ledger history: fill entry '{entry.entry_id}' "
+                                    f"references unknown strategy sleeve '{sid}'"
+                                )
+                            sleeve = self._sleeves[sid]
+                            fill = PaperFill(
+                                fill_id=fill_id,
+                                order_id=entry.order_id or "unknown",
+                                client_order_id=entry.client_order_id or "unknown",
+                                symbol=entry.symbol or "UNKNOWN",
+                                side=PaperOrderSide(entry.side) if entry.side else PaperOrderSide.BUY,
+                                quantity=entry.quantity or 0.0,
+                                price=entry.price or 0.0,
+                                fee=entry.fee,
+                                slippage=entry.metadata.get("slippage", 0.0),
+                                timestamp=entry.timestamp,
+                                market_data_timestamp=entry.timestamp,
+                                market_data_source="replay",
+                            )
+                            sleeve.apply_fill(fill)
+                        # Note: if sid is None, it is a legacy entry predating Step 62 (safe to skip for sleeves)
+
+                    elif entry.entry_type == LedgerEntryType.SLEEVE_TRANSFER:
+                        meta = entry.metadata
+                        src_id = meta.get("source_sleeve_id")
+                        tgt_id = meta.get("target_sleeve_id")
+                        amt = meta.get("amount", 0.0)
+                        if src_id in self._sleeves and tgt_id in self._sleeves and amt > 0:
+                            self._sleeves[src_id].available_cash = round(self._sleeves[src_id].available_cash - amt, 4)
+                            self._sleeves[tgt_id].available_cash = round(self._sleeves[tgt_id].available_cash + amt, 4)
+
+                self._unallocated_cash = round(self.portfolio.available_cash - sum(s.available_cash for s in self._sleeves.values()), 4)
+
+            except Exception as exc:
+                # Rollback to pre-recovery state on corruption or interruption
+                self._sleeves = sleeves_backup
+                self._unallocated_cash = unalloc_backup
+                logger.error("Transactional rollback during recover_from_ledger: %s", exc)
+                raise
 
             logger.info("PortfolioAllocationManager recovered from ledger: %d sleeves", len(self._sleeves))
+            recon = self.reconcile()
             return {
                 "recovered_sleeves": len(self._sleeves),
                 "total_allocated": total_allocated,
                 "unallocated_cash": self._unallocated_cash,
-                "reconciled": self.reconcile()["is_reconciled"],
+                "reconciled": recon["is_reconciled"],
             }
 
     def mark_to_market(self, quote: Quote) -> None:

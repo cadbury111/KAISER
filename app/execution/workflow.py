@@ -1534,6 +1534,7 @@ class PaperTradingWorkflowCoordinator:
                 "latency_digest": self.metrics_tracker.profiler.compute_digest(),
                 "stress_test_report": self.get_stress_test_report(),
                 "portfolio_exposure": self.get_portfolio_exposure().to_dict() if self.get_portfolio_exposure() else None,
+                "allocation_reconciliation": self.reconcile_allocations().to_dict() if self.reconcile_allocations() else None,
             }
 
     def allocate_capital(self, request: Any) -> Any:
@@ -1560,6 +1561,13 @@ class PaperTradingWorkflowCoordinator:
         with self._lock:
             if self.allocation_manager is not None:
                 return self.allocation_manager.get_sleeve_exposure(sleeve_id)
+            return None
+
+    def reconcile_allocations(self, tolerance: float = 1e-4) -> Optional[Any]:
+        """Perform mathematical reconciliation between strategy sleeves and portfolio."""
+        with self._lock:
+            if self.allocation_manager is not None:
+                return self.allocation_manager.reconcile(tolerance=tolerance)
             return None
 
     def run_stress_scenarios(
