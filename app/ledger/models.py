@@ -25,6 +25,9 @@ class LedgerEntryType(str, Enum):
     ORDER_REJECTION = "ORDER_REJECTION"
     ORDER_FILL = "ORDER_FILL"
     ORDER_CANCELLATION = "ORDER_CANCELLATION"
+    CAPITAL_ALLOCATION = "CAPITAL_ALLOCATION"
+    CAPITAL_DEALLOCATION = "CAPITAL_DEALLOCATION"
+    SLEEVE_TRANSFER = "SLEEVE_TRANSFER"
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,11 @@ class PaperLedgerEntry:
             if any(bad in norm_k for bad in forbidden_keys):
                 raise ValidationError(f"PaperLedgerEntry metadata must not contain credential or secret keys: '{k}'")
 
+    @property
+    def sleeve_id(self) -> Optional[str]:
+        """Associated strategy sleeve ID from metadata if present."""
+        return self.metadata.get("sleeve_id")
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert ledger entry to dictionary."""
         return {
@@ -81,6 +89,7 @@ class PaperLedgerEntry:
             "entry_type": self.entry_type.value,
             "order_id": self.order_id,
             "client_order_id": self.client_order_id,
+            "sleeve_id": self.sleeve_id,
             "symbol": self.symbol,
             "side": self.side,
             "quantity": self.quantity,

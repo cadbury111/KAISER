@@ -105,6 +105,7 @@ class PaperWorkflowRequest:
     notes: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     quote: Optional[Quote] = None
+    sleeve_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Validate input parameters and sanitize against malicious payloads."""
@@ -144,6 +145,12 @@ class PaperWorkflowRequest:
         if self.correlation_id is None:
             object.__setattr__(self, "correlation_id", uuid.uuid4().hex)
 
+        if self.sleeve_id is not None:
+            clean_sleeve = str(self.sleeve_id).strip()
+            if not clean_sleeve:
+                raise ValidationError("sleeve_id cannot be an empty string when provided.")
+            object.__setattr__(self, "sleeve_id", clean_sleeve)
+
 
 @dataclass(frozen=True)
 class PaperWorkflowOutcome:
@@ -163,6 +170,7 @@ class PaperWorkflowOutcome:
     audit_trail: Tuple[str, ...] = field(default_factory=tuple)
     timestamp: float = field(default_factory=time.time)
     session_id: Optional[str] = None
+    sleeve_id: Optional[str] = None
     error_message: Optional[str] = None
 
     @property
@@ -214,6 +222,7 @@ class PaperWorkflowOutcome:
             "audit_trail": list(self.audit_trail),
             "timestamp": self.timestamp,
             "session_id": self.session_id,
+            "sleeve_id": self.sleeve_id,
             "error_message": self.error_message,
         }
 
@@ -289,6 +298,7 @@ class PaperTradingWorkflowCoordinator:
         enabled: Optional[bool] = None,
         metrics_tracker: Optional[OrderLifecycleTracker] = None,
         calibrator: Optional[HistoricalSpreadCalibrator] = None,
+        allocation_manager: Optional[Any] = None,
     ) -> None:
         self.name = name
         self.settings = settings or Settings()
@@ -307,6 +317,21 @@ class PaperTradingWorkflowCoordinator:
         self.calibrator = calibrator or HistoricalSpreadCalibrator(
             risk_config=self.engine.risk_config if self.engine else None
         )
+
+        # Attach PortfolioAllocationManager
+        if allocation_manager is not None:
+            self.allocation_manager = allocation_manager
+        elif self.engine is not None:
+            from app.execution.allocation import PortfolioAllocationManager
+            self.allocation_manager = PortfolioAllocationManager(
+                portfolio=self.engine.portfolio,
+                ledger=self.engine.ledger,
+                risk_config=self.engine.risk_config,
+                event_bus=self.event_bus,
+                broker_adapter=self.engine.broker_adapter,
+            )
+        else:
+            self.allocation_manager = None
 
         # Enabled flag respects explicit override or system settings
         self._enabled = (
@@ -956,11 +981,19 @@ class PaperTradingWorkflowCoordinator:
             )
 
             try:
-                exec_result = self.engine.submit_order(
-                    request=engine_order_req,
-                    market_quote=quote,
-                    reference_time=now,
-                )
+                if request.sleeve_id and self.allocation_manager is not None:
+                    exec_result = self.allocation_manager.execute_sleeve_order(
+                        sleeve_id=request.sleeve_id,
+                        request=engine_order_req,
+                        quote=quote,
+                        reference_time=now,
+                    )
+                else:
+                    exec_result = self.engine.submit_order(
+                        request=engine_order_req,
+                        market_quote=quote,
+                        reference_time=now,
+                    )
             except Exception as engine_exc:
                 logger.error("Engine order submission threw exception: %s", engine_exc)
                 audit_trail.append(f"FAILED: Engine exception: {engine_exc}")
@@ -1033,6 +1066,7 @@ class PaperTradingWorkflowCoordinator:
                     rejection_reason=rej_reason,
                     audit_trail=tuple(audit_trail),
                     session_id=request.session_id,
+                    sleeve_id=request.sleeve_id,
                 )
                 self._record_rejection_event(outcome)
                 self._outcomes[workflow_id] = outcome
@@ -1096,6 +1130,7 @@ class PaperTradingWorkflowCoordinator:
                     error_message=f"Ledger reconciliation failed: discrepancy={recon['discrepancy']}",
                     audit_trail=tuple(audit_trail),
                     session_id=request.session_id,
+                    sleeve_id=request.sleeve_id,
                 )
                 try:
                     self._publish_event(
@@ -1143,6 +1178,7 @@ class PaperTradingWorkflowCoordinator:
                 reconciliation_result=recon,
                 audit_trail=tuple(audit_trail),
                 session_id=request.session_id,
+                sleeve_id=request.sleeve_id,
             )
 
             # Record in session if specified or if an active session exists
@@ -1497,7 +1533,34 @@ class PaperTradingWorkflowCoordinator:
                 "metrics_digest": self.metrics_tracker.compute_digest(),
                 "latency_digest": self.metrics_tracker.profiler.compute_digest(),
                 "stress_test_report": self.get_stress_test_report(),
+                "portfolio_exposure": self.get_portfolio_exposure().to_dict() if self.get_portfolio_exposure() else None,
             }
+
+    def allocate_capital(self, request: Any) -> Any:
+        """Execute portfolio capital partitioning across strategy sleeves."""
+        with self._lock:
+            if self.allocation_manager is None:
+                raise ValidationError("PortfolioAllocationManager is not initialized on this coordinator.")
+            return self.allocation_manager.apply_allocation(request)
+
+    def get_allocation_manager(self) -> Optional[Any]:
+        """Retrieve the attached PortfolioAllocationManager."""
+        with self._lock:
+            return self.allocation_manager
+
+    def get_portfolio_exposure(self) -> Optional[Any]:
+        """Retrieve consolidated multi-sleeve exposure snapshot."""
+        with self._lock:
+            if self.allocation_manager is not None:
+                return self.allocation_manager.get_portfolio_exposure()
+            return None
+
+    def get_sleeve_exposure(self, sleeve_id: str) -> Optional[Any]:
+        """Retrieve single sleeve exposure snapshot."""
+        with self._lock:
+            if self.allocation_manager is not None:
+                return self.allocation_manager.get_sleeve_exposure(sleeve_id)
+            return None
 
     def run_stress_scenarios(
         self,
@@ -1521,4 +1584,8 @@ class PaperTradingWorkflowCoordinator:
             if self._last_stress_report is not None:
                 return self._last_stress_report.to_dict()
             return None
+
+    # Aliases for consistency
+    execute_order = submit_paper_order
+    export_workflow_diagnostics = get_summary
 

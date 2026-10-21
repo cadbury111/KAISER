@@ -3558,6 +3558,109 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 16. Paper Trading Multi-Asset Portfolio Allocation & Sleeves (/api/paper/allocations, /api/paper/sleeves, /api/paper/portfolio-exposure)
+            if path in ("/api/paper/allocations", "/api/paper/allocation"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                if alloc_mgr is None or not hasattr(alloc_mgr, "list_sleeves"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper portfolio allocation service not initialized or no active allocations.",
+                    })
+                    return
+
+                sleeves = alloc_mgr.list_sleeves()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "total_allocated_capital": alloc_mgr.total_allocated_capital,
+                    "unallocated_cash": alloc_mgr.unallocated_cash,
+                    "sleeve_count": len(sleeves),
+                    "sleeves": [s.to_dict() for s in sleeves],
+                    "advisory_disclaimer": "SIMULATION ONLY: Capital partitions are offline simulation tools.",
+                })
+                return
+
+            if path == "/api/paper/sleeves":
+                sleeve_id = query.get("sleeve_id", [None])[0]
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                if alloc_mgr is None or not hasattr(alloc_mgr, "get_sleeve_exposure"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper portfolio allocation service not initialized.",
+                    })
+                    return
+
+                if sleeve_id:
+                    clean_sid = sleeve_id.strip()
+                    snap = alloc_mgr.get_sleeve_exposure(clean_sid)
+                    if snap is None:
+                        self._send_json_response(
+                            {"error": "Not Found", "message": f"Strategy sleeve '{clean_sid}' not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "sleeve": snap.to_dict(),
+                    })
+                    return
+
+                sleeves_list = [s.to_dict() for s in alloc_mgr.list_sleeves()]
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(sleeves_list),
+                    "sleeves": sleeves_list,
+                })
+                return
+
+            if path in ("/api/paper/portfolio-exposure", "/api/paper/exposure"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                if alloc_mgr is None or not hasattr(alloc_mgr, "get_portfolio_exposure"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper portfolio exposure service not initialized.",
+                    })
+                    return
+
+                snap = alloc_mgr.get_portfolio_exposure()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "exposure": snap.to_dict(),
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -3716,6 +3819,7 @@ class PortfolioDashboardServer:
         audit_diagnostics_service: Optional[Any] = None,
         paper_coordinator: Optional[Any] = None,
         paper_execution_engine: Optional[Any] = None,
+        allocation_manager: Optional[Any] = None,
         auth_token: Optional[str] = None,
         require_auth: bool = False,
         workflow_coordinator: Optional[Any] = None,
@@ -3791,6 +3895,7 @@ class PortfolioDashboardServer:
         self.audit_diagnostics_service = audit_diagnostics_service
         self.paper_coordinator = workflow_coordinator or paper_coordinator
         self.paper_execution_engine = paper_execution_engine
+        self.allocation_manager = allocation_manager
 
         if auth_token is not None:
             if not isinstance(auth_token, str):
@@ -3865,6 +3970,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "audit_diagnostics_service", self.audit_diagnostics_service)
             setattr(self._server, "paper_coordinator", self.paper_coordinator)
             setattr(self._server, "paper_execution_engine", self.paper_execution_engine)
+            setattr(self._server, "allocation_manager", self.allocation_manager)
             setattr(self._server, "auth_token", self.auth_token)
             setattr(self._server, "require_auth", self.require_auth)
 

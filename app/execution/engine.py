@@ -244,7 +244,12 @@ class PaperExecutionEngine:
                 if not math.isfinite(entry.fee) or not math.isfinite(entry.realized_pnl):
                     raise ValidationError(f"Corrupted ledger entry {entry.entry_id}: non-finite fee or realized_pnl")
 
-                if entry.entry_type == LedgerEntryType.INITIAL_CAPITAL:
+                if entry.entry_type in (
+                    LedgerEntryType.INITIAL_CAPITAL,
+                    LedgerEntryType.CAPITAL_ALLOCATION,
+                    LedgerEntryType.CAPITAL_DEALLOCATION,
+                    LedgerEntryType.SLEEVE_TRANSFER,
+                ):
                     continue
 
                 elif entry.entry_type == LedgerEntryType.ORDER_ACCEPTANCE:

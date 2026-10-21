@@ -11,6 +11,22 @@ SAFETY INVARIANTS:
 
 from __future__ import annotations
 
+from app.execution.allocation import (
+    AllocationRejectionCode,
+    AllocationStatus,
+    PortfolioAllocationManager,
+    PortfolioAllocationRequest,
+    PortfolioAllocationResult,
+    PortfolioExposureSnapshot,
+    SleeveAllocationResult,
+    SleeveExposureSnapshot,
+    SleeveRiskBudget,
+    StrategySleeve,
+    StrategySleeveDefinition,
+    compute_allocation_digest,
+    compute_multi_sleeve_financial_digest,
+    create_standard_multi_sleeve_request,
+)
 from app.execution.calibration import (
     HistoricalSpreadCalibrator,
     ObservationRejectionReason,
@@ -139,6 +155,20 @@ __all__ = [
     "create_scenario_h_risk_boundary",
     "create_scenario_i_pending_limit_order",
     "create_scenario_j_duplicate_events",
+    "AllocationStatus",
+    "AllocationRejectionCode",
+    "SleeveRiskBudget",
+    "StrategySleeveDefinition",
+    "PortfolioAllocationRequest",
+    "SleeveAllocationResult",
+    "PortfolioAllocationResult",
+    "StrategySleeve",
+    "SleeveExposureSnapshot",
+    "PortfolioExposureSnapshot",
+    "PortfolioAllocationManager",
+    "compute_allocation_digest",
+    "compute_multi_sleeve_financial_digest",
+    "create_standard_multi_sleeve_request",
 ]
 
 
