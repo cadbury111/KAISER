@@ -43,11 +43,13 @@ from app.execution.models import (
     PaperRejectionCode,
     PaperRiskConfig,
 )
+from app.execution.outbox_dispatcher import OutboxDispatcher
 from app.execution.portfolio import PaperPortfolio, PaperPosition
 from app.execution.risk import PaperRiskGate
 from app.execution.simulated_broker import SimulatedBrokerAdapter
 from app.ledger.ledger import PaperLedger
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
+from app.ledger.outbox import OutboxRecord, TransactionalOutbox
 from app.market.models import Quote
 
 logger = logging.getLogger("execution.allocation")
@@ -756,12 +758,25 @@ class PortfolioAllocationManager:
         risk_config: Optional[PaperRiskConfig] = None,
         event_bus: Optional[EventBus] = None,
         broker_adapter: Optional[SimulatedBrokerAdapter] = None,
+        outbox: Optional[TransactionalOutbox] = None,
+        outbox_dispatcher: Optional[OutboxDispatcher] = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = ledger
         self.risk_config = risk_config or PaperRiskConfig()
         self.event_bus = event_bus
         self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(config=self.risk_config)
+        self.outbox: Optional[TransactionalOutbox] = outbox or getattr(self.ledger, "outbox", None)
+        if outbox_dispatcher is not None:
+            self.outbox_dispatcher = outbox_dispatcher
+        elif self.outbox is not None:
+            self.outbox_dispatcher = OutboxDispatcher(
+                outbox=self.outbox,
+                event_bus=self.event_bus,
+                auto_start=False,
+            )
+        else:
+            self.outbox_dispatcher = None
 
         self._sleeves: Dict[str, StrategySleeve] = {}
         self._unallocated_cash: float = portfolio.available_cash
@@ -801,6 +816,12 @@ class PortfolioAllocationManager:
         """Sum of initial capital partitioned across all strategy sleeves."""
         with self._lock:
             return round(sum(s.allocated_capital for s in self._sleeves.values()), 4)
+
+    @property
+    def outbox_stats(self) -> Dict[str, Any]:
+        """Aggregate statistics from the attached transactional outbox."""
+        with self._lock:
+            return self.outbox.get_stats() if self.outbox else {}
 
     def reserve_sleeve_capital(self, sleeve_id: str, amount: float) -> bool:
         """Reserve capital within a specific sleeve for pending execution."""
@@ -938,9 +959,11 @@ class PortfolioAllocationManager:
             sleeves_backup = {sid: copy.copy(s) for sid, s in self._sleeves.items()}
             unalloc_backup = self._unallocated_cash
 
+            now = time.time()
             try:
                 self._sleeves.clear()
                 sleeve_results: Dict[str, SleeveAllocationResult] = {}
+                alloc_entries: List[PaperLedgerEntry] = []
 
                 for slv_def in request.sleeves:
                     cash_alloc, eff_w = planned_sleeve_cash[slv_def.sleeve_id]
@@ -966,7 +989,7 @@ class PortfolioAllocationManager:
                     # Record in durable ledger (cash_change=0.0 because it's an internal capital partition)
                     alloc_entry = PaperLedgerEntry(
                         entry_id=f"alloc_{uuid.uuid4().hex[:8]}",
-                        timestamp=time.time(),
+                        timestamp=now,
                         entry_type=LedgerEntryType.CAPITAL_ALLOCATION,
                         cash_change=0.0,
                         cash_balance_after=self.portfolio.available_cash,
@@ -981,9 +1004,34 @@ class PortfolioAllocationManager:
                             "description": f"Capital partitioned to sleeve {slv_def.sleeve_id}",
                         },
                     )
-                    self.ledger.record_entry(alloc_entry)
+                    alloc_entries.append(alloc_entry)
 
-                self._unallocated_cash = round(available_port_cash - total_planned_cash, 4)
+                temp_unalloc = round(available_port_cash - total_planned_cash, 4)
+                alloc_outbox_rec = OutboxRecord(
+                    event_id=f"outbox_alloc_{request.request_id}_{int(now * 1000)}",
+                    event_type=EventType.PAPER_ALLOCATION_UPDATED.value,
+                    schema_version=1,
+                    correlation_id=request.correlation_id or request.request_id,
+                    causation_id=request.request_id,
+                    payload={
+                        "request_id": request.request_id,
+                        "status": AllocationStatus.APPROVED.value,
+                        "total_portfolio_capital": available_port_cash,
+                        "allocated_capital": total_planned_cash,
+                        "unallocated_capital": temp_unalloc,
+                        "sleeve_count": len(sleeve_results),
+                        "timestamp": now,
+                    },
+                    created_at=now,
+                )
+
+                if self.outbox and hasattr(self.ledger, "record_entries_with_outbox"):
+                    self.ledger.record_entries_with_outbox(alloc_entries, [alloc_outbox_rec])
+                else:
+                    for entry in alloc_entries:
+                        self.ledger.record_entry(entry)
+
+                self._unallocated_cash = temp_unalloc
             except Exception as exc:
                 self._sleeves = sleeves_backup
                 self._unallocated_cash = unalloc_backup
@@ -991,7 +1039,6 @@ class PortfolioAllocationManager:
                 raise
 
             # 5. Build Result & Digest
-            now = time.time()
             success_result = PortfolioAllocationResult(
                 request_id=request.request_id,
                 status=AllocationStatus.APPROVED,
@@ -1025,7 +1072,7 @@ class PortfolioAllocationManager:
             # EventBus is an in-memory decoupled broker; publication failure does NOT roll back
             # the committed financial ledger state (which would cause fatal divergence between
             # ledger and memory). Instead, delivery failure is surfaced on the result container
-            # and tracked in audit metrics.
+            # and tracked in audit metrics and transactional outbox.
             event_failed = False
             if self.event_bus:
                 try:
@@ -1037,6 +1084,8 @@ class PortfolioAllocationManager:
                             payload=final_result.to_dict(),
                         )
                     )
+                    if self.outbox:
+                        self.outbox.mark_delivered(alloc_outbox_rec.event_id, delivered_at=now)
                 except Exception as err:
                     event_failed = True
                     self._failed_event_deliveries += 1
@@ -1046,6 +1095,8 @@ class PortfolioAllocationManager:
                         "error": str(err),
                         "timestamp": now,
                     })
+                    if self.outbox:
+                        self.outbox.record_failure(alloc_outbox_rec.event_id, error=str(err), next_retry_at=now + 2.0)
                     logger.warning(
                         "Post-commit event publication failed for allocation '%s': %s (financial state remains committed)",
                         request.request_id,
@@ -1387,7 +1438,30 @@ class PortfolioAllocationManager:
                         "sleeve_total_equity": sleeve.total_equity,
                     },
                 )
-                self.ledger.record_entry(fill_entry)
+                order_outbox_rec = OutboxRecord(
+                    event_id=f"outbox_order_{order_id}_{int(now * 1000)}",
+                    event_type=EventType.PAPER_SLEEVE_ORDER_EXECUTED.value,
+                    schema_version=1,
+                    correlation_id=cid,
+                    causation_id=client_oid or order_id,
+                    payload={
+                        "order_id": order_id,
+                        "client_order_id": client_oid,
+                        "sleeve_id": sleeve_id.strip(),
+                        "symbol": norm_sym,
+                        "side": request.side.value if hasattr(request.side, "value") else str(request.side),
+                        "quantity": fill.quantity,
+                        "price": fill.price,
+                        "fee": fill.fee,
+                        "timestamp": now,
+                    },
+                    created_at=now,
+                )
+
+                if self.outbox and hasattr(self.ledger, "record_entry_with_outbox"):
+                    self.ledger.record_entry_with_outbox(fill_entry, order_outbox_rec)
+                else:
+                    self.ledger.record_entry(fill_entry)
             except Exception as exc:
                 sleeve.restore_snapshot(sleeve_snap)
                 _restore_portfolio_snapshot(self.portfolio, port_snap)
@@ -1435,6 +1509,8 @@ class PortfolioAllocationManager:
                             },
                         )
                     )
+                    if self.outbox:
+                        self.outbox.mark_delivered(order_outbox_rec.event_id, delivered_at=now)
                 except Exception as err:
                     event_failed = True
                     self._failed_event_deliveries += 1
@@ -1445,6 +1521,8 @@ class PortfolioAllocationManager:
                         "error": str(err),
                         "timestamp": now,
                     })
+                    if self.outbox:
+                        self.outbox.record_failure(order_outbox_rec.event_id, error=str(err), next_retry_at=now + 2.0)
                     logger.warning(
                         "Post-commit event publication failed for sleeve order '%s': %s (financial state remains committed)",
                         order_id,
@@ -1538,13 +1616,16 @@ class PortfolioAllocationManager:
             target.available_cash = round(target.available_cash + amt, 4)
 
             # Record in ledger (cash_change=0.0 because total portfolio cash is unchanged)
+            now_ts = time.time()
+            cid = f"xfer_{src_id}_{tgt_id}_{int(now_ts * 1000)}"
             xfer_entry = PaperLedgerEntry(
                 entry_id=f"xfer_{uuid.uuid4().hex[:8]}",
-                timestamp=time.time(),
+                timestamp=now_ts,
                 entry_type=LedgerEntryType.SLEEVE_TRANSFER,
                 cash_change=0.0,
                 cash_balance_after=self.portfolio.available_cash,
                 idempotency_key=f"sleeve_xfer_{uuid.uuid4().hex}",
+                correlation_id=cid,
                 metadata={
                     "source_sleeve_id": src_id,
                     "target_sleeve_id": tgt_id,
@@ -1554,8 +1635,26 @@ class PortfolioAllocationManager:
                     "target_balance_after": target.available_cash,
                 },
             )
+            xfer_outbox_rec = OutboxRecord(
+                event_id=f"outbox_xfer_{src_id}_{tgt_id}_{int(now_ts * 1000)}",
+                event_type=EventType.PAPER_SLEEVE_TRANSFER_RECORDED.value,
+                schema_version=1,
+                correlation_id=cid,
+                causation_id=f"transfer_{src_id}_{tgt_id}_{int(now_ts * 1000)}",
+                payload={
+                    "source_sleeve_id": src_id,
+                    "target_sleeve_id": tgt_id,
+                    "amount": amt,
+                    "reason": reason or "Explicit authorized inter-sleeve transfer",
+                    "timestamp": now_ts,
+                },
+                created_at=now_ts,
+            )
             try:
-                self.ledger.record_entry(xfer_entry)
+                if self.outbox and hasattr(self.ledger, "record_entry_with_outbox"):
+                    self.ledger.record_entry_with_outbox(xfer_entry, xfer_outbox_rec)
+                else:
+                    self.ledger.record_entry(xfer_entry)
             except Exception as exc:
                 source.available_cash = round(source.available_cash + amt, 4)
                 target.available_cash = round(target.available_cash - amt, 4)
@@ -1575,6 +1674,8 @@ class PortfolioAllocationManager:
                             },
                         )
                     )
+                    if self.outbox:
+                        self.outbox.mark_delivered(xfer_outbox_rec.event_id, delivered_at=now_ts)
                 except Exception as err:
                     self._failed_event_deliveries += 1
                     self._event_delivery_failures.append({
@@ -1583,8 +1684,10 @@ class PortfolioAllocationManager:
                         "target_sleeve_id": tgt_id,
                         "amount": amt,
                         "error": str(err),
-                        "timestamp": time.time(),
+                        "timestamp": now_ts,
                     })
+                    if self.outbox:
+                        self.outbox.record_failure(xfer_outbox_rec.event_id, error=str(err), next_retry_at=now_ts + 2.0)
                     logger.warning(
                         "Post-commit event publication failed for transfer %s -> %s: %s (financial state remains committed)",
                         src_id,

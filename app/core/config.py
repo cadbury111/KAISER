@@ -159,6 +159,14 @@ class Settings:
     paper_slippage_rate: float = 0.0002
     paper_freshness_threshold_seconds: float = 60.0
 
+    # Durable Transactional Outbox (Phase 2, Step 64)
+    outbox_enabled: bool = True
+    outbox_max_attempts: int = 5
+    outbox_batch_size: int = 50
+    outbox_retry_backoff_seconds: float = 2.0
+    outbox_max_backoff_seconds: float = 60.0
+    outbox_auto_dispatch: bool = False
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -208,6 +216,8 @@ class Settings:
             "voice_enabled",
             "playback_enabled",
             "twelve_data_is_delayed",
+            "outbox_enabled",
+            "outbox_auto_dispatch",
         ):
             val = getattr(self, bool_field)
             if not isinstance(val, bool):
@@ -271,6 +281,25 @@ class Settings:
                 f"Invalid PAPER_FRESHNESS_THRESHOLD_SECONDS: {self.paper_freshness_threshold_seconds}. Must be positive."
             )
 
+        # Durable Transactional Outbox Validation
+        if self.outbox_max_attempts <= 0:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_MAX_ATTEMPTS: {self.outbox_max_attempts}. Must be a positive integer."
+            )
+        if self.outbox_batch_size <= 0:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_BATCH_SIZE: {self.outbox_batch_size}. Must be a positive integer."
+            )
+        if self.outbox_retry_backoff_seconds < 0:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_RETRY_BACKOFF_SECONDS: {self.outbox_retry_backoff_seconds}. Must be non-negative."
+            )
+        if self.outbox_max_backoff_seconds < self.outbox_retry_backoff_seconds:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_MAX_BACKOFF_SECONDS: {self.outbox_max_backoff_seconds}. "
+                f"Must be >= OUTBOX_RETRY_BACKOFF_SECONDS ({self.outbox_retry_backoff_seconds})."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {
@@ -315,6 +344,12 @@ class Settings:
             "paper_fee_rate": self.paper_fee_rate,
             "paper_slippage_rate": self.paper_slippage_rate,
             "paper_freshness_threshold_seconds": self.paper_freshness_threshold_seconds,
+            "outbox_enabled": self.outbox_enabled,
+            "outbox_max_attempts": self.outbox_max_attempts,
+            "outbox_batch_size": self.outbox_batch_size,
+            "outbox_retry_backoff_seconds": self.outbox_retry_backoff_seconds,
+            "outbox_max_backoff_seconds": self.outbox_max_backoff_seconds,
+            "outbox_auto_dispatch": self.outbox_auto_dispatch,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -354,6 +389,11 @@ def get_settings(
         paper_fee_rate = float(source.get("PAPER_FEE_RATE", "0.0005"))
         paper_slippage_rate = float(source.get("PAPER_SLIPPAGE_RATE", "0.0002"))
         paper_freshness = float(source.get("PAPER_FRESHNESS_THRESHOLD_SECONDS", "60.0"))
+
+        outbox_max_attempts = int(source.get("OUTBOX_MAX_ATTEMPTS", "5"))
+        outbox_batch_size = int(source.get("OUTBOX_BATCH_SIZE", "50"))
+        outbox_retry_backoff = float(source.get("OUTBOX_RETRY_BACKOFF_SECONDS", "2.0"))
+        outbox_max_backoff = float(source.get("OUTBOX_MAX_BACKOFF_SECONDS", "60.0"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -399,6 +439,13 @@ def get_settings(
         paper_fee_rate=paper_fee_rate,
         paper_slippage_rate=paper_slippage_rate,
         paper_freshness_threshold_seconds=paper_freshness,
+        outbox_enabled=parse_bool(source.get("OUTBOX_ENABLED", "true"), "OUTBOX_ENABLED"),
+        outbox_max_attempts=outbox_max_attempts,
+        outbox_batch_size=outbox_batch_size,
+        outbox_retry_backoff_seconds=outbox_retry_backoff,
+        outbox_max_backoff_seconds=outbox_max_backoff,
+        outbox_auto_dispatch=parse_bool(source.get("OUTBOX_AUTO_DISPATCH", "false"), "OUTBOX_AUTO_DISPATCH"),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )
+

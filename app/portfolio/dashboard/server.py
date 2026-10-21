@@ -3687,6 +3687,138 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 17. Paper Trading Transactional Outbox Diagnostics (/api/paper/outbox, /api/paper/outbox/events, /api/paper/outbox/events/<event_id>)
+            if path in ("/api/paper/outbox", "/api/paper/outbox/summary"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                outbox = getattr(self.server, "outbox", None)
+                if outbox is None and alloc_mgr is not None:
+                    outbox = getattr(alloc_mgr, "outbox", None)
+                if outbox is None and coordinator is not None:
+                    outbox = getattr(coordinator, "outbox", None)
+
+                dispatcher = getattr(self.server, "outbox_dispatcher", None)
+                if dispatcher is None and alloc_mgr is not None:
+                    dispatcher = getattr(alloc_mgr, "outbox_dispatcher", None)
+                if dispatcher is None and coordinator is not None:
+                    dispatcher = getattr(coordinator, "outbox_dispatcher", None)
+
+                if outbox is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Transactional outbox service not initialized or not attached.",
+                    })
+                    return
+
+                stats = outbox.get_stats()
+                worker_status = dispatcher.get_status() if dispatcher else {
+                    "is_running": False,
+                    "auto_dispatch": False,
+                    "last_dispatch_time": None,
+                }
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "summary": stats,
+                    "worker": worker_status,
+                })
+                return
+
+            if path == "/api/paper/outbox/events" or path.startswith("/api/paper/outbox/events/"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                outbox = getattr(self.server, "outbox", None)
+                if outbox is None and alloc_mgr is not None:
+                    outbox = getattr(alloc_mgr, "outbox", None)
+                if outbox is None and coordinator is not None:
+                    outbox = getattr(coordinator, "outbox", None)
+
+                if outbox is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Transactional outbox service not initialized or not attached.",
+                    })
+                    return
+
+                # Check if querying single event ID
+                if path.startswith("/api/paper/outbox/events/"):
+                    event_id = path[len("/api/paper/outbox/events/"):].strip()
+                    if not event_id or not SAFE_ID_PATTERN.match(event_id) or ".." in event_id or len(event_id) > 128:
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": "Invalid outbox event_id format."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    rec = outbox.get_record(event_id)
+                    if rec is None:
+                        self._send_json_response(
+                            {"error": "Not Found", "message": f"Outbox record '{event_id}' not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    rec_dict = rec.to_dict()
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "event": rec_dict,
+                    })
+                    return
+
+                # Listing with pagination and status filter
+                status_filter = query.get("status", [None])[0]
+                status_enum = None
+                if status_filter:
+                    try:
+                        from app.ledger.outbox import OutboxStatus
+                        status_enum = OutboxStatus(status_filter.strip().upper())
+                    except ValueError:
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": f"Invalid outbox status filter: '{status_filter}'."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                records = outbox.list_records(status=status_enum, limit=limit_clamped, offset=offset_clamped)
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(records),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "events": [r.to_dict() for r in records],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
