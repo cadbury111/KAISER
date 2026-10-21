@@ -750,23 +750,35 @@ class PortfolioSleeveReconciliationResult:
     timestamp: float = field(default_factory=time.time)
     deterministic_digest: str = ""
 
+    @property
+    def is_balanced(self) -> bool:
+        """Alias for is_reconciled."""
+        return self.is_reconciled
+
     def __getitem__(self, key: str) -> Any:
         """Support dictionary-style access for backwards compatibility."""
+        if key == "is_balanced":
+            return self.is_reconciled
         if hasattr(self, key):
             return getattr(self, key)
         raise KeyError(key)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Safe dictionary-style get."""
+        if key == "is_balanced":
+            return self.is_reconciled
         return getattr(self, key, default)
 
     def __contains__(self, key: str) -> bool:
         """Support 'in' operator."""
+        if key == "is_balanced":
+            return True
         return hasattr(self, key)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "is_reconciled": self.is_reconciled,
+            "is_balanced": self.is_reconciled,
             "max_discrepancy": round(self.max_discrepancy, 6),
             "tolerance": self.tolerance,
             "discrepancies": list(self.discrepancies),

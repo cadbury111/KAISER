@@ -94,6 +94,12 @@ class OutboxDispatcher:
         with self._lock:
             return self._is_running
 
+    @property
+    def in_flight_event_ids(self) -> Set[str]:
+        """Get copy of currently in-flight event IDs."""
+        with self._lock:
+            return set(self._in_flight_event_ids)
+
     def start(self) -> None:
         """Start the background dispatch worker loop."""
         with self._lock:

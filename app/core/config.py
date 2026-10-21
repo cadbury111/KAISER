@@ -174,6 +174,16 @@ class Settings:
     outbox_prune_batch_size: int = 100
     outbox_archival_enabled: bool = False
 
+    # Automated Maintenance Scheduler (Phase 2, Step 66)
+    maintenance_scheduler_enabled: bool = False
+    maintenance_pruning_enabled: bool = False
+    maintenance_pruning_interval_seconds: float = 3600.0
+    maintenance_health_digest_enabled: bool = False
+    maintenance_health_digest_interval_seconds: float = 300.0
+    maintenance_active_session_policy: str = "skip"
+    maintenance_shutdown_timeout_seconds: float = 5.0
+    maintenance_history_limit: int = 1000
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -319,6 +329,30 @@ class Settings:
                 f"Invalid OUTBOX_PRUNE_BATCH_SIZE: {self.outbox_prune_batch_size}. Must be an integer between 1 and 50000."
             )
 
+        # Automated Maintenance Scheduler Validation (Phase 2, Step 66)
+        if not math.isfinite(self.maintenance_pruning_interval_seconds) or self.maintenance_pruning_interval_seconds <= 0 or self.maintenance_pruning_interval_seconds > 86400.0 * 30:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_PRUNING_INTERVAL_SECONDS: {self.maintenance_pruning_interval_seconds}. Must be a positive finite float <= 2592000 (30 days)."
+            )
+        if not math.isfinite(self.maintenance_health_digest_interval_seconds) or self.maintenance_health_digest_interval_seconds <= 0 or self.maintenance_health_digest_interval_seconds > 86400.0 * 7:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_HEALTH_DIGEST_INTERVAL_SECONDS: {self.maintenance_health_digest_interval_seconds}. Must be a positive finite float <= 604800 (7 days)."
+            )
+        if not math.isfinite(self.maintenance_shutdown_timeout_seconds) or self.maintenance_shutdown_timeout_seconds <= 0 or self.maintenance_shutdown_timeout_seconds > 60.0:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS: {self.maintenance_shutdown_timeout_seconds}. Must be a positive finite float <= 60.0."
+            )
+        if self.maintenance_history_limit < 10 or self.maintenance_history_limit > 100_000:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_HISTORY_LIMIT: {self.maintenance_history_limit}. Must be an integer between 10 and 100000."
+            )
+        norm_policy = str(self.maintenance_active_session_policy).strip().lower()
+        if norm_policy not in ("skip", "allow"):
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_ACTIVE_SESSION_POLICY: '{self.maintenance_active_session_policy}'. Must be 'skip' or 'allow'."
+            )
+        object.__setattr__(self, "maintenance_active_session_policy", norm_policy)
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {
@@ -373,6 +407,14 @@ class Settings:
             "outbox_retention_days": self.outbox_retention_days,
             "outbox_prune_batch_size": self.outbox_prune_batch_size,
             "outbox_archival_enabled": self.outbox_archival_enabled,
+            "maintenance_scheduler_enabled": self.maintenance_scheduler_enabled,
+            "maintenance_pruning_enabled": self.maintenance_pruning_enabled,
+            "maintenance_pruning_interval_seconds": self.maintenance_pruning_interval_seconds,
+            "maintenance_health_digest_enabled": self.maintenance_health_digest_enabled,
+            "maintenance_health_digest_interval_seconds": self.maintenance_health_digest_interval_seconds,
+            "maintenance_active_session_policy": self.maintenance_active_session_policy,
+            "maintenance_shutdown_timeout_seconds": self.maintenance_shutdown_timeout_seconds,
+            "maintenance_history_limit": self.maintenance_history_limit,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -419,6 +461,10 @@ def get_settings(
         outbox_max_backoff = float(source.get("OUTBOX_MAX_BACKOFF_SECONDS", "60.0"))
         outbox_retention_days = float(source.get("OUTBOX_RETENTION_DAYS", "7.0"))
         outbox_prune_batch_size = int(source.get("OUTBOX_PRUNE_BATCH_SIZE", "100"))
+        maint_prune_interval = float(source.get("MAINTENANCE_PRUNING_INTERVAL_SECONDS", "3600.0"))
+        maint_digest_interval = float(source.get("MAINTENANCE_HEALTH_DIGEST_INTERVAL_SECONDS", "300.0"))
+        maint_shutdown_timeout = float(source.get("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", "5.0"))
+        maint_history_limit = int(source.get("MAINTENANCE_HISTORY_LIMIT", "1000"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -474,6 +520,14 @@ def get_settings(
         outbox_retention_days=outbox_retention_days,
         outbox_prune_batch_size=outbox_prune_batch_size,
         outbox_archival_enabled=parse_bool(source.get("OUTBOX_ARCHIVAL_ENABLED", "false"), "OUTBOX_ARCHIVAL_ENABLED"),
+        maintenance_scheduler_enabled=parse_bool(source.get("MAINTENANCE_SCHEDULER_ENABLED", "false"), "MAINTENANCE_SCHEDULER_ENABLED"),
+        maintenance_pruning_enabled=parse_bool(source.get("MAINTENANCE_PRUNING_ENABLED", "false"), "MAINTENANCE_PRUNING_ENABLED"),
+        maintenance_pruning_interval_seconds=maint_prune_interval,
+        maintenance_health_digest_enabled=parse_bool(source.get("MAINTENANCE_HEALTH_DIGEST_ENABLED", "false"), "MAINTENANCE_HEALTH_DIGEST_ENABLED"),
+        maintenance_health_digest_interval_seconds=maint_digest_interval,
+        maintenance_active_session_policy=source.get("MAINTENANCE_ACTIVE_SESSION_POLICY", "skip"),
+        maintenance_shutdown_timeout_seconds=maint_shutdown_timeout,
+        maintenance_history_limit=maint_history_limit,
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

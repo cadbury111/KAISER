@@ -3972,6 +3972,151 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 21. Maintenance Scheduler Status (/api/paper/maintenance/status)
+            if path == "/api/paper/maintenance/status":
+                scheduler = getattr(self.server, "maintenance_scheduler", None)
+                if scheduler is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_maintenance_scheduler"):
+                        scheduler = coordinator.get_maintenance_scheduler()
+
+                if scheduler is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Automated maintenance scheduler not initialized or not attached.",
+                    })
+                    return
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "scheduler": scheduler.get_status(),
+                })
+                return
+
+            # 22. Maintenance Scheduler Audit Runs (/api/paper/maintenance/runs)
+            if path == "/api/paper/maintenance/runs":
+                scheduler = getattr(self.server, "maintenance_scheduler", None)
+                if scheduler is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_maintenance_scheduler"):
+                        scheduler = coordinator.get_maintenance_scheduler()
+
+                if scheduler is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Automated maintenance scheduler not initialized or not attached.",
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                task_filter = query.get("task_name", [None])[0]
+                status_filter = query.get("status", [None])[0]
+
+                runs = scheduler.list_maintenance_runs(
+                    task_name=task_filter,
+                    status=status_filter,
+                    limit=limit_clamped,
+                    offset=offset_clamped,
+                )
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(runs),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "runs": [r.to_dict() for r in runs],
+                })
+                return
+
+            # 23. Health Digest Snapshots (/api/paper/maintenance/digests, /api/paper/maintenance/digests/<digest_id>)
+            if path == "/api/paper/maintenance/digests" or path.startswith("/api/paper/maintenance/digests/"):
+                scheduler = getattr(self.server, "maintenance_scheduler", None)
+                if scheduler is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_maintenance_scheduler"):
+                        scheduler = coordinator.get_maintenance_scheduler()
+
+                if scheduler is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Automated maintenance scheduler not initialized or not attached.",
+                    })
+                    return
+
+                if path.startswith("/api/paper/maintenance/digests/"):
+                    digest_id = path[len("/api/paper/maintenance/digests/"):].strip()
+                    if not digest_id or not SAFE_ID_PATTERN.match(digest_id) or ".." in digest_id or len(digest_id) > 128:
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": "Invalid digest_id format."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    digest = scheduler.get_health_digest(digest_id)
+                    if digest is None:
+                        self._send_json_response(
+                            {"error": "Not Found", "message": f"Health digest '{digest_id}' not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "digest": digest.to_dict(),
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                digests = scheduler.list_health_digests(limit=limit_clamped, offset=offset_clamped)
+                latest_digest = digests[0].to_dict() if digests else None
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(digests),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "latest_digest": latest_digest,
+                    "digests": [d.to_dict() for d in digests],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -4131,6 +4276,7 @@ class PortfolioDashboardServer:
         paper_coordinator: Optional[Any] = None,
         paper_execution_engine: Optional[Any] = None,
         allocation_manager: Optional[Any] = None,
+        maintenance_scheduler: Optional[Any] = None,
         auth_token: Optional[str] = None,
         require_auth: bool = False,
         workflow_coordinator: Optional[Any] = None,
@@ -4207,6 +4353,7 @@ class PortfolioDashboardServer:
         self.paper_coordinator = workflow_coordinator or paper_coordinator
         self.paper_execution_engine = paper_execution_engine
         self.allocation_manager = allocation_manager
+        self.maintenance_scheduler = maintenance_scheduler
 
         if auth_token is not None:
             if not isinstance(auth_token, str):
@@ -4282,6 +4429,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "paper_coordinator", self.paper_coordinator)
             setattr(self._server, "paper_execution_engine", self.paper_execution_engine)
             setattr(self._server, "allocation_manager", self.allocation_manager)
+            setattr(self._server, "maintenance_scheduler", self.maintenance_scheduler)
             setattr(self._server, "auth_token", self.auth_token)
             setattr(self._server, "require_auth", self.require_auth)
 

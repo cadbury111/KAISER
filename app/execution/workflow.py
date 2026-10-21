@@ -370,6 +370,9 @@ class PaperTradingWorkflowCoordinator:
         self._sessions: Dict[str, PaperSimulationSession] = {}
         self._active_session: Optional[PaperSimulationSession] = None
         self._last_stress_report: Optional[Any] = None
+        self._sessions_recovered: bool = False
+        self._recovery_error: Optional[str] = None
+        self._maintenance_scheduler: Optional[Any] = None
 
         if self.db_path:
             self._init_session_db()
@@ -460,9 +463,11 @@ class PaperTradingWorkflowCoordinator:
     def recover_sessions(self) -> int:
         """Recover persisted simulation sessions from SQLite. Idempotent."""
         if not self.db_path or not Path(self.db_path).is_file():
+            self._sessions_recovered = True
             return 0
         with self._lock:
             recovered_count = 0
+            self._recovery_error = None
             try:
                 with sqlite3.connect(self.db_path, timeout=5.0) as conn:
                     cursor = conn.execute(
@@ -493,8 +498,11 @@ class PaperTradingWorkflowCoordinator:
                         if status == "ACTIVE":
                             self._active_session = sess
                         recovered_count += 1
+                self._sessions_recovered = True
             except Exception as err:
                 logger.error("Failed to recover simulation sessions from SQLite: %s", err)
+                self._recovery_error = str(err)
+                self._sessions_recovered = False
             return recovered_count
 
     def _get_db_connection(self) -> sqlite3.Connection:
@@ -712,10 +720,76 @@ class PaperTradingWorkflowCoordinator:
         with self._lock:
             return self._sessions.get(session_id)
 
+    def is_session_recovery_complete(self) -> bool:
+        """Check whether session recovery completed without errors."""
+        with self._lock:
+            if not self.db_path:
+                return True
+            return self._sessions_recovered and (self._recovery_error is None)
+
+    def is_session_active(self) -> bool:
+        """Authoritatively verify if a simulation session is currently ACTIVE.
+
+        Fails closed: if recovery is incomplete or error querying SQLite, returns True
+        to protect against executing destructive maintenance while state is uncertain.
+        """
+        with self._lock:
+            if not self.is_session_recovery_complete():
+                return True
+            if self._active_session is not None and self._active_session.status == "ACTIVE":
+                return True
+            if self.db_path and Path(self.db_path).is_file():
+                try:
+                    with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                        cursor = conn.execute(
+                            "SELECT COUNT(*) FROM paper_simulation_sessions WHERE status = 'ACTIVE'"
+                        )
+                        cnt = cursor.fetchone()[0]
+                        return cnt > 0
+                except Exception as exc:
+                    logger.error("Error querying active session from SQLite, failing closed: %s", exc)
+                    return True
+            return False
+
     def get_active_session(self) -> Optional[PaperSimulationSession]:
         """Retrieve the currently active simulation session."""
         with self._lock:
-            return self._active_session
+            if self._active_session is not None and self._active_session.status == "ACTIVE":
+                return self._active_session
+            if self.db_path and Path(self.db_path).is_file():
+                try:
+                    with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                        cursor = conn.execute(
+                            "SELECT session_id FROM paper_simulation_sessions WHERE status = 'ACTIVE' LIMIT 1"
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            return self._sessions.get(row[0])
+                except Exception as exc:
+                    logger.warning("Error checking active session in SQLite: %s", exc)
+            return None
+
+    def attach_maintenance_scheduler(self, scheduler: Any) -> None:
+        """Attach automated maintenance scheduler to workflow coordinator."""
+        with self._lock:
+            self._maintenance_scheduler = scheduler
+
+    def get_maintenance_scheduler(self) -> Optional[Any]:
+        """Retrieve attached maintenance scheduler."""
+        with self._lock:
+            return self._maintenance_scheduler
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Gracefully shut down coordinator and any attached maintenance scheduler."""
+        with self._lock:
+            scheduler = self._maintenance_scheduler
+        if scheduler is not None and hasattr(scheduler, "stop"):
+            scheduler.stop(timeout=timeout)
+        logger.info("PaperTradingWorkflowCoordinator shut down cleanly.")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Alias for shutdown."""
+        self.shutdown(timeout=timeout)
 
     def get_session_summary(self, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Retrieve financial and operational summary for session."""

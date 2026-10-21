@@ -89,6 +89,12 @@ from app.execution.stress_testing import (
     create_standard_scenarios,
     run_all_stress_scenarios,
 )
+from app.execution.maintenance import (
+    HealthDigestSnapshot,
+    MaintenanceScheduler,
+    MaintenanceTaskResult,
+    MaintenanceTaskStatus,
+)
 from app.execution.workflow import (
     PaperSimulationSession,
     PaperTradingWorkflowCoordinator,
@@ -99,6 +105,10 @@ from app.execution.workflow import (
 )
 
 __all__ = [
+    "HealthDigestSnapshot",
+    "MaintenanceScheduler",
+    "MaintenanceTaskResult",
+    "MaintenanceTaskStatus",
     "PaperOrderSide",
     "PaperOrderType",
     "PaperOrderStatus",
