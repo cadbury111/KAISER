@@ -16,8 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 import math
+from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -28,12 +31,14 @@ from app.core.events import Event, EventBus, EventType
 from app.core.exceptions import ValidationError
 from app.core.logging_config import get_logger
 from app.core.state import StateStore
+from app.execution.allocation import PortfolioEquitySnapshot
 from app.execution.calibration import (
     HistoricalSpreadCalibrator,
     SpreadCalibrationReport,
     SpreadObservation,
 )
 from app.execution.engine import PaperExecutionEngine
+from app.ledger.outbox import OutboxRecord, TransactionalOutbox
 from app.execution.metrics import (
     LatencyStage,
     OrderLifecycleStage,
@@ -242,6 +247,11 @@ class PaperSimulationSession:
     notes: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def initial_capital(self) -> float:
+        """Alias for initial_cash."""
+        return self.initial_cash
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert session to dictionary."""
         return {
@@ -299,6 +309,8 @@ class PaperTradingWorkflowCoordinator:
         metrics_tracker: Optional[OrderLifecycleTracker] = None,
         calibrator: Optional[HistoricalSpreadCalibrator] = None,
         allocation_manager: Optional[Any] = None,
+        outbox: Optional[TransactionalOutbox] = None,
+        db_path: Optional[str] = None,
     ) -> None:
         self.name = name
         self.settings = settings or Settings()
@@ -333,6 +345,18 @@ class PaperTradingWorkflowCoordinator:
         else:
             self.allocation_manager = None
 
+        # Attach TransactionalOutbox
+        if outbox is not None:
+            self.outbox = outbox
+        elif self.allocation_manager is not None and getattr(self.allocation_manager, "outbox", None) is not None:
+            self.outbox = self.allocation_manager.outbox
+        elif self.engine is not None and getattr(self.engine, "ledger", None) is not None and getattr(self.engine.ledger, "outbox", None) is not None:
+            self.outbox = self.engine.ledger.outbox
+        else:
+            self.outbox = None
+
+        self.db_path = db_path or (getattr(self.engine.ledger, "db_path", None) if self.engine and getattr(self.engine, "ledger", None) else None)
+
         # Enabled flag respects explicit override or system settings
         self._enabled = (
             enabled
@@ -346,6 +370,10 @@ class PaperTradingWorkflowCoordinator:
         self._sessions: Dict[str, PaperSimulationSession] = {}
         self._active_session: Optional[PaperSimulationSession] = None
         self._last_stress_report: Optional[Any] = None
+
+        if self.db_path:
+            self._init_session_db()
+            self.recover_sessions()
 
     @property
     def is_enabled(self) -> bool:
@@ -402,64 +430,282 @@ class PaperTradingWorkflowCoordinator:
             logger.error("Event publication failed for event_type %s [cid=%s]: %s", event_type, correlation_id, exc)
             raise
 
+    def _init_session_db(self) -> None:
+        """Initialize SQLite table for simulation session persistence."""
+        if not self.db_path:
+            return
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with sqlite3.connect(self.db_path, timeout=10.0) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS paper_simulation_sessions (
+                        session_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        stopped_at REAL,
+                        initial_cash REAL NOT NULL,
+                        notes TEXT,
+                        metadata_json TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_paper_session_status ON paper_simulation_sessions(status)"
+                )
+        except Exception as err:
+            logger.error("Failed to initialize paper sessions SQLite table at %s: %s", self.db_path, err)
+
+    def recover_sessions(self) -> int:
+        """Recover persisted simulation sessions from SQLite. Idempotent."""
+        if not self.db_path or not Path(self.db_path).is_file():
+            return 0
+        with self._lock:
+            recovered_count = 0
+            try:
+                with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT session_id, name, status, created_at, stopped_at,
+                               initial_cash, notes, metadata_json
+                        FROM paper_simulation_sessions
+                        ORDER BY created_at ASC
+                        """
+                    )
+                    for row in cursor.fetchall():
+                        (sess_id, name, status, c_at, st_at, init_c, notes, meta_json) = row
+                        try:
+                            meta = json.loads(meta_json) if meta_json else {}
+                        except Exception:
+                            meta = {}
+                        sess = PaperSimulationSession(
+                            session_id=sess_id,
+                            name=name,
+                            created_at=c_at,
+                            initial_cash=init_c,
+                            status=status,
+                            stopped_at=st_at,
+                            notes=notes,
+                            metadata=meta,
+                        )
+                        self._sessions[sess_id] = sess
+                        if status == "ACTIVE":
+                            self._active_session = sess
+                        recovered_count += 1
+            except Exception as err:
+                logger.error("Failed to recover simulation sessions from SQLite: %s", err)
+            return recovered_count
+
+    def _get_db_connection(self) -> sqlite3.Connection:
+        """Get an active SQLite connection for workflow and session persistence."""
+        if not self.db_path:
+            raise RuntimeError("Database path not configured.")
+        return sqlite3.connect(self.db_path, timeout=10.0)
+
     def start_session(
         self,
         name: str = "paper_simulation_session",
         notes: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        initial_capital: Optional[float] = None,
     ) -> PaperSimulationSession:
-        """Start a new manual paper simulation session.
-
-        Does NOT reset or overwrite existing persisted financial state.
-        Does NOT enable paper execution by itself.
-        Does NOT create orders from strategy signals.
-        """
+        """Start a new manual paper simulation session with transactional outbox event delivery."""
         with self._lock:
+            if session_id is not None:
+                clean_id = session_id.strip()
+                if clean_id in self._sessions:
+                    return self._sessions[clean_id]
+                sess_id = clean_id
+            else:
+                sess_id = f"psess_{uuid.uuid4().hex[:12]}"
+
             if self._active_session is not None and self._active_session.status == "ACTIVE":
                 self.stop_session(self._active_session.session_id)
 
-            sess_id = f"psess_{uuid.uuid4().hex[:12]}"
-            init_cash = self.engine.portfolio.available_cash if self.engine else getattr(self.settings, "paper_initial_cash", 100_000.0)
+            if initial_capital is not None:
+                init_cash = float(initial_capital)
+            else:
+                init_cash = self.engine.portfolio.available_cash if self.engine else getattr(self.settings, "paper_initial_cash", 100_000.0)
+            now = time.time()
 
             session = PaperSimulationSession(
                 session_id=sess_id,
                 name=name,
-                created_at=time.time(),
+                created_at=now,
                 initial_cash=init_cash,
                 status="ACTIVE",
                 notes=notes,
                 metadata=dict(metadata or {}),
             )
+
+            outbox_rec = OutboxRecord(
+                event_id=f"outbox_sess_start_{sess_id}",
+                event_type=EventType.PAPER_SESSION_STARTED.value,
+                schema_version=1,
+                correlation_id=sess_id,
+                causation_id=sess_id,
+                payload=session.to_dict(),
+                created_at=now,
+            )
+
+            if self.db_path:
+                try:
+                    with self._get_db_connection() as conn:
+                        with conn:
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO paper_simulation_sessions (
+                                    session_id, name, status, created_at, stopped_at,
+                                    initial_cash, notes, metadata_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    session.session_id,
+                                    session.name,
+                                    session.status,
+                                    session.created_at,
+                                    session.stopped_at,
+                                    session.initial_cash,
+                                    session.notes,
+                                    json.dumps(session.metadata),
+                                ),
+                            )
+                            if self.outbox:
+                                self.outbox.stage_record(outbox_rec, conn=conn)
+                except Exception as err:
+                    logger.error("Failed to commit session start to SQLite: %s", err)
+                    raise
+            elif self.outbox:
+                self.outbox.stage_record(outbox_rec)
+
             self._sessions[sess_id] = session
             self._active_session = session
 
-            self._publish_event(
-                EventType.PAPER_SESSION_STARTED,
-                session.to_dict(),
-                correlation_id=sess_id,
-            )
+            if self.event_bus:
+                try:
+                    self.event_bus.publish(outbox_rec.to_event())
+                    if self.outbox:
+                        self.outbox.mark_delivered(outbox_rec.event_id, delivered_at=time.time())
+                except Exception as exc:
+                    logger.warning(
+                        "Post-commit session start event publication failed for %s: %s (session remains committed)",
+                        sess_id,
+                        exc,
+                    )
+                    if self.outbox:
+                        self.outbox.record_failure(outbox_rec.event_id, error=str(exc), next_retry_at=time.time() + 2.0)
+
             logger.info("Started paper simulation session '%s' (id=%s, init_cash=%.2f)", name, sess_id, init_cash)
             return session
 
-    def stop_session(self, session_id: str) -> Optional[PaperSimulationSession]:
-        """Stop an active paper simulation session."""
+    def stop_session(self, session_id: str, reason: Optional[str] = None) -> Optional[PaperSimulationSession]:
+        """Stop an active paper simulation session with transactional outbox event delivery."""
         with self._lock:
             session = self._sessions.get(session_id)
             if not session:
                 return None
 
+            if session.status == "STOPPED":
+                # Idempotent: already stopped
+                return session
+
+            now = time.time()
             session.status = "STOPPED"
-            session.stopped_at = time.time()
+            session.stopped_at = now
+            if reason:
+                session.notes = reason
+
             if self._active_session and self._active_session.session_id == session_id:
                 self._active_session = None
 
-            self._publish_event(
-                EventType.PAPER_SESSION_STOPPED,
-                session.to_dict(),
+            stop_payload = session.to_dict()
+            if reason:
+                stop_payload["reason"] = reason
+
+            outbox_rec = OutboxRecord(
+                event_id=f"outbox_sess_stop_{session_id}",
+                event_type=EventType.PAPER_SESSION_STOPPED.value,
+                schema_version=1,
                 correlation_id=session_id,
+                causation_id=session_id,
+                payload=stop_payload,
+                created_at=now,
             )
+
+            if self.db_path:
+                try:
+                    with self._get_db_connection() as conn:
+                        with conn:
+                            conn.execute(
+                                """
+                                UPDATE paper_simulation_sessions
+                                SET status = ?, stopped_at = ?, notes = ?
+                                WHERE session_id = ?
+                                """,
+                                ("STOPPED", now, session.notes, session_id),
+                            )
+                            if self.outbox:
+                                self.outbox.stage_record(outbox_rec, conn=conn)
+                except Exception as err:
+                    logger.error("Failed to commit session stop to SQLite: %s", err)
+                    raise
+            elif self.outbox:
+                self.outbox.stage_record(outbox_rec)
+
+            if self.event_bus:
+                try:
+                    self.event_bus.publish(outbox_rec.to_event())
+                    if self.outbox:
+                        self.outbox.mark_delivered(outbox_rec.event_id, delivered_at=time.time())
+                except Exception as exc:
+                    logger.warning(
+                        "Post-commit session stop event publication failed for %s: %s (session remains committed)",
+                        session_id,
+                        exc,
+                    )
+                    if self.outbox:
+                        self.outbox.record_failure(outbox_rec.event_id, error=str(exc), next_retry_at=time.time() + 2.0)
+
             logger.info("Stopped paper simulation session (id=%s)", session_id)
             return session
+
+    def list_sessions(self) -> List[PaperSimulationSession]:
+        """Return all tracked paper simulation sessions."""
+        with self._lock:
+            return list(self._sessions.values())
+
+    def create_equity_snapshot(
+        self,
+        snapshot_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        source: str = "manual",
+        reference_time: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> PortfolioEquitySnapshot:
+        """Create and durably persist a portfolio equity snapshot via the allocation manager."""
+        if self.allocation_manager is not None:
+            return self.allocation_manager.create_equity_snapshot(
+                snapshot_id=snapshot_id,
+                correlation_id=correlation_id,
+                source=source,
+                reference_time=reference_time,
+                reason=reason,
+            )
+        raise ValidationError("PortfolioAllocationManager is required for equity snapshot creation.")
+
+    def get_equity_snapshot(self, snapshot_id: str) -> Optional[PortfolioEquitySnapshot]:
+        """Retrieve point-in-time equity snapshot."""
+        if self.allocation_manager is not None:
+            return self.allocation_manager.get_equity_snapshot(snapshot_id)
+        return None
+
+    def list_equity_snapshots(self, limit: int = 50, offset: int = 0) -> List[PortfolioEquitySnapshot]:
+        """List historical equity snapshots with pagination."""
+        if self.allocation_manager is not None:
+            return self.allocation_manager.list_equity_snapshots(limit=limit, offset=offset)
+        return []
 
     def get_session(self, session_id: str) -> Optional[PaperSimulationSession]:
         """Retrieve simulation session by ID."""

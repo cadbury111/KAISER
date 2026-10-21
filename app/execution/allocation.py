@@ -23,7 +23,9 @@ import hashlib
 import json
 import logging
 import math
+from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -611,6 +613,103 @@ class PortfolioExposureSnapshot:
 
 
 @dataclass(frozen=True)
+class PortfolioEquitySnapshot:
+    """Immutable point-in-time portfolio equity and exposure snapshot."""
+
+    snapshot_id: str
+    timestamp: float
+    currency: str
+    total_equity: float
+    available_cash: float = 0.0
+    reserved_cash: float = 0.0
+    unallocated_cash: float = 0.0
+    allocated_capital: float = 0.0
+    total_position_value: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    total_fees_paid: float = 0.0
+    sleeve_equities: Dict[str, float] = field(default_factory=dict)
+    positions_summary: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    schema_version: int = 1
+    correlation_id: Optional[str] = None
+    source: str = "manual"
+    is_reconciled: bool = True
+    reconciliation_discrepancy: float = 0.0
+    deterministic_digest: str = ""
+
+    @property
+    def cash(self) -> float:
+        return self.available_cash
+
+    @property
+    def positions_valuation(self) -> float:
+        return self.total_position_value
+
+    @property
+    def sleeve_allocations(self) -> Dict[str, float]:
+        return self.sleeve_equities
+
+    def __post_init__(self) -> None:
+        if not self.snapshot_id or not isinstance(self.snapshot_id, str) or not self.snapshot_id.strip():
+            raise ValidationError("PortfolioEquitySnapshot snapshot_id must be a non-empty string.")
+        clean_id = self.snapshot_id.strip()
+        object.__setattr__(self, "snapshot_id", clean_id)
+
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"timestamp must be a positive finite float, got {self.timestamp}")
+
+        if self.available_cash < 0:
+            raise ValidationError(f"available_cash must be non-negative, got {self.available_cash}")
+        if self.reserved_cash < 0:
+            raise ValidationError(f"reserved_cash must be non-negative, got {self.reserved_cash}")
+
+        for field_name in (
+            "total_equity",
+            "available_cash",
+            "reserved_cash",
+            "unallocated_cash",
+            "allocated_capital",
+            "total_position_value",
+            "realized_pnl",
+            "unrealized_pnl",
+            "total_fees_paid",
+            "reconciliation_discrepancy",
+        ):
+            val = getattr(self, field_name)
+            if not isinstance(val, (int, float)) or not math.isfinite(val):
+                raise ValidationError(f"{field_name} must be a finite number, got {val}")
+
+        for sid, eq in self.sleeve_equities.items():
+            if not isinstance(eq, (int, float)) or not math.isfinite(eq):
+                raise ValidationError(f"Sleeve '{sid}' equity must be finite, got {eq}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "timestamp": self.timestamp,
+            "currency": self.currency,
+            "total_equity": self.total_equity,
+            "available_cash": self.available_cash,
+            "reserved_cash": self.reserved_cash,
+            "unallocated_cash": self.unallocated_cash,
+            "allocated_capital": self.allocated_capital,
+            "total_position_value": self.total_position_value,
+            "realized_pnl": self.realized_pnl,
+            "unrealized_pnl": self.unrealized_pnl,
+            "total_fees_paid": self.total_fees_paid,
+            "sleeve_equities": dict(self.sleeve_equities),
+            "positions_summary": dict(self.positions_summary),
+            "schema_version": self.schema_version,
+            "correlation_id": self.correlation_id,
+            "source": self.source,
+            "is_reconciled": self.is_reconciled,
+            "reconciliation_discrepancy": self.reconciliation_discrepancy,
+            "deterministic_digest": self.deterministic_digest,
+            "advisory_disclaimer": "SIMULATION ONLY: Portfolio equity snapshots are offline paper-trading metrics.",
+        }
+
+
+@dataclass(frozen=True)
 class ReconciliationCheckDetail:
     """Detail for a specific reconciliation dimension."""
 
@@ -760,9 +859,11 @@ class PortfolioAllocationManager:
         broker_adapter: Optional[SimulatedBrokerAdapter] = None,
         outbox: Optional[TransactionalOutbox] = None,
         outbox_dispatcher: Optional[OutboxDispatcher] = None,
+        db_path: Optional[str] = None,
     ) -> None:
         self.portfolio = portfolio
         self.ledger = ledger
+        self.db_path = db_path or getattr(self.ledger, "db_path", None)
         self.risk_config = risk_config or PaperRiskConfig()
         self.event_bus = event_bus
         self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(config=self.risk_config)
@@ -785,9 +886,15 @@ class PortfolioAllocationManager:
         self._allocation_results: Dict[str, PortfolioAllocationResult] = {}
         self._order_requests: Dict[str, Tuple[str, PaperOrderRequest]] = {}  # client_order_id -> (sleeve_id, request)
         self._order_results: Dict[str, PaperExecutionResult] = {}            # client_order_id -> result
+        self._snapshots: Dict[str, PortfolioEquitySnapshot] = {}
         self._event_delivery_failures: List[Dict[str, Any]] = []
         self._failed_event_deliveries: int = 0
         self._lock = threading.RLock()
+
+        # Initialize SQLite snapshot persistence if ledger has db_path
+        if getattr(self.ledger, "db_path", None):
+            self._init_snapshot_db()
+            self.recover_snapshots()
 
         # If ledger already contains allocation entries, attempt recovery
         if self.ledger.count() > 0:
@@ -859,6 +966,9 @@ class PortfolioAllocationManager:
         4. Rejections leave portfolio and sleeve state untouched.
         5. Atomic ledger recording of sleeve capital partitions.
         """
+        if request is None or not isinstance(request, PortfolioAllocationRequest):
+            raise ValidationError("A valid PortfolioAllocationRequest is required.")
+
         with self._lock:
             # 1. Idempotency Check
             if request.request_id in self._allocation_results:
@@ -2146,6 +2256,242 @@ class PortfolioAllocationManager:
             rejection_reason=reason,
             correlation_id=cid,
         )
+
+    def _init_snapshot_db(self) -> None:
+        """Initialize SQLite table for equity snapshot persistence."""
+        db_path = getattr(self.ledger, "db_path", None)
+        if not db_path:
+            return
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with sqlite3.connect(db_path, timeout=10.0) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS paper_equity_snapshots (
+                        snapshot_id TEXT PRIMARY KEY,
+                        timestamp REAL NOT NULL,
+                        currency TEXT NOT NULL,
+                        total_equity REAL NOT NULL,
+                        available_cash REAL NOT NULL,
+                        reserved_cash REAL NOT NULL,
+                        unallocated_cash REAL NOT NULL,
+                        allocated_capital REAL NOT NULL,
+                        total_position_value REAL NOT NULL,
+                        realized_pnl REAL NOT NULL,
+                        unrealized_pnl REAL NOT NULL,
+                        total_fees_paid REAL NOT NULL,
+                        is_reconciled INTEGER NOT NULL,
+                        reconciliation_discrepancy REAL NOT NULL,
+                        deterministic_digest TEXT NOT NULL,
+                        snapshot_json TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_paper_equity_snap_time ON paper_equity_snapshots(timestamp)"
+                )
+        except Exception as err:
+            logger.error("Failed to initialize paper equity snapshots SQLite table: %s", err)
+
+    def recover_snapshots(self) -> int:
+        """Recover persisted equity snapshots from SQLite."""
+        db_path = getattr(self.ledger, "db_path", None)
+        if not db_path or not Path(db_path).is_file():
+            return 0
+        with self._lock:
+            recovered = 0
+            try:
+                with sqlite3.connect(db_path, timeout=5.0) as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT snapshot_id, snapshot_json FROM paper_equity_snapshots
+                        ORDER BY timestamp ASC
+                        """
+                    )
+                    for sid, s_json in cursor.fetchall():
+                        try:
+                            data = json.loads(s_json)
+                            snap = PortfolioEquitySnapshot(
+                                snapshot_id=data["snapshot_id"],
+                                timestamp=data["timestamp"],
+                                currency=data.get("currency", "USD"),
+                                total_equity=data["total_equity"],
+                                available_cash=data["available_cash"],
+                                reserved_cash=data.get("reserved_cash", 0.0),
+                                unallocated_cash=data.get("unallocated_cash", 0.0),
+                                allocated_capital=data.get("allocated_capital", 0.0),
+                                total_position_value=data.get("total_position_value", 0.0),
+                                realized_pnl=data.get("realized_pnl", 0.0),
+                                unrealized_pnl=data.get("unrealized_pnl", 0.0),
+                                total_fees_paid=data.get("total_fees_paid", 0.0),
+                                sleeve_equities=data.get("sleeve_equities", {}),
+                                positions_summary=data.get("positions_summary", {}),
+                                schema_version=data.get("schema_version", 1),
+                                correlation_id=data.get("correlation_id"),
+                                source=data.get("source", "recovery"),
+                                is_reconciled=bool(data.get("is_reconciled", True)),
+                                reconciliation_discrepancy=data.get("reconciliation_discrepancy", 0.0),
+                                deterministic_digest=data.get("deterministic_digest", ""),
+                            )
+                            self._snapshots[sid] = snap
+                            recovered += 1
+                        except Exception as e:
+                            logger.warning("Skipping corrupted equity snapshot %s during recovery: %s", sid, e)
+            except Exception as err:
+                logger.error("Failed to recover equity snapshots from SQLite: %s", err)
+            return recovered
+
+    def create_equity_snapshot(
+        self,
+        snapshot_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        source: str = "manual",
+        reference_time: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> PortfolioEquitySnapshot:
+        """Capture and durably record an authoritative point-in-time equity snapshot."""
+        if reference_time is not None:
+            if not math.isfinite(reference_time) or reference_time <= 0:
+                raise ValidationError(f"reference_time must be positive finite float, got {reference_time}")
+        now = reference_time if reference_time is not None else time.time()
+
+        with self._lock:
+            # Idempotency check: duplicate snapshot_id returns existing record without duplicating events
+            if snapshot_id is not None:
+                clean_id = snapshot_id.strip()
+                if clean_id in self._snapshots:
+                    return self._snapshots[clean_id]
+                target_id = clean_id
+            else:
+                target_id = f"peq_{uuid.uuid4().hex[:12]}"
+
+            sleeve_eqs = {sid: round(s.total_equity, 4) for sid, s in self._sleeves.items()}
+            sum_reserved = round(sum(s.reserved_cash for s in self._sleeves.values()), 4)
+            pos_summary = {
+                sym: {
+                    "quantity": pos.quantity,
+                    "market_value": round(pos.market_value, 4),
+                    "current_price": round(pos.current_price, 4),
+                    "unrealized_pnl": round(pos.unrealized_pnl, 4),
+                }
+                for sym, pos in self.portfolio.positions.items()
+            }
+            recon = self.reconcile()
+            digest = compute_multi_sleeve_financial_digest(
+                self.portfolio, self._sleeves, self._unallocated_cash
+            )
+
+            snap = PortfolioEquitySnapshot(
+                snapshot_id=target_id,
+                timestamp=now,
+                currency="USD",
+                total_equity=round(self.portfolio.total_equity, 4),
+                available_cash=round(self.portfolio.available_cash, 4),
+                reserved_cash=sum_reserved,
+                unallocated_cash=round(self._unallocated_cash, 4),
+                allocated_capital=round(self.total_allocated_capital, 4),
+                total_position_value=round(self.portfolio.total_position_value, 4),
+                realized_pnl=round(self.portfolio.realized_pnl, 4),
+                unrealized_pnl=round(self.portfolio.unrealized_pnl, 4),
+                total_fees_paid=round(self.portfolio.total_fees_paid, 4),
+                sleeve_equities=sleeve_eqs,
+                positions_summary=pos_summary,
+                schema_version=1,
+                correlation_id=correlation_id or target_id,
+                source=source,
+                is_reconciled=recon["is_reconciled"],
+                reconciliation_discrepancy=recon["max_discrepancy"],
+                deterministic_digest=digest,
+            )
+
+            outbox_payload = snap.to_dict()
+            if reason:
+                outbox_payload["reason"] = reason
+
+            outbox_rec = OutboxRecord(
+                event_id=snap.snapshot_id,
+                event_type=EventType.PAPER_PORTFOLIO_EQUITY_SNAPSHOT.value,
+                schema_version=1,
+                correlation_id=correlation_id or snap.snapshot_id,
+                causation_id=snap.snapshot_id,
+                payload=outbox_payload,
+                created_at=now,
+            )
+
+            db_path = getattr(self.ledger, "db_path", None)
+            if db_path:
+                try:
+                    with sqlite3.connect(db_path, timeout=10.0) as conn:
+                        with conn:
+                            conn.execute(
+                                """
+                                INSERT OR REPLACE INTO paper_equity_snapshots (
+                                    snapshot_id, timestamp, currency, total_equity, available_cash,
+                                    reserved_cash, unallocated_cash, allocated_capital, total_position_value,
+                                    realized_pnl, unrealized_pnl, total_fees_paid, is_reconciled,
+                                    reconciliation_discrepancy, deterministic_digest, snapshot_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    snap.snapshot_id,
+                                    snap.timestamp,
+                                    snap.currency,
+                                    snap.total_equity,
+                                    snap.available_cash,
+                                    snap.reserved_cash,
+                                    snap.unallocated_cash,
+                                    snap.allocated_capital,
+                                    snap.total_position_value,
+                                    snap.realized_pnl,
+                                    snap.unrealized_pnl,
+                                    snap.total_fees_paid,
+                                    1 if snap.is_reconciled else 0,
+                                    snap.reconciliation_discrepancy,
+                                    snap.deterministic_digest,
+                                    json.dumps(snap.to_dict()),
+                                ),
+                            )
+                            if self.outbox:
+                                self.outbox.stage_record(outbox_rec, conn=conn)
+                except Exception as err:
+                    logger.error("Failed to commit equity snapshot to SQLite: %s", err)
+                    raise
+            elif self.outbox:
+                self.outbox.stage_record(outbox_rec)
+
+            self._snapshots[snap.snapshot_id] = snap
+
+            # Post-commit publication
+            if self.event_bus:
+                try:
+                    self.event_bus.publish(outbox_rec.to_event())
+                    if self.outbox:
+                        self.outbox.mark_delivered(outbox_rec.event_id, delivered_at=time.time())
+                except Exception as exc:
+                    self._failed_event_deliveries += 1
+                    if self.outbox:
+                        self.outbox.record_failure(outbox_rec.event_id, error=str(exc), next_retry_at=time.time() + 2.0)
+                    logger.warning(
+                        "Post-commit equity snapshot publication failed for %s: %s (snapshot remains committed)",
+                        snap.snapshot_id,
+                        exc,
+                    )
+
+            logger.info("Created portfolio equity snapshot %s (equity=%.2f)", snap.snapshot_id, snap.total_equity)
+            return snap
+
+    def get_equity_snapshot(self, snapshot_id: str) -> Optional[PortfolioEquitySnapshot]:
+        """Retrieve equity snapshot by ID."""
+        with self._lock:
+            return self._snapshots.get(snapshot_id.strip())
+
+    def list_equity_snapshots(self, limit: int = 50, offset: int = 0) -> List[PortfolioEquitySnapshot]:
+        """List tracked equity snapshots with pagination."""
+        with self._lock:
+            sorted_snaps = sorted(self._snapshots.values(), key=lambda s: s.timestamp, reverse=True)
+            clamped_limit = max(1, min(100, limit))
+            clamped_offset = max(0, offset)
+            return sorted_snaps[clamped_offset : clamped_offset + clamped_limit]
 
     def _record_rejection_ledger(self, order: PaperOrder, sleeve_id: str, cid: str) -> None:
         """Record an immutable rejection entry in the ledger."""

@@ -235,11 +235,15 @@ class EventType(str, Enum):
     PAPER_RECONCILIATION_FAILED = "PAPER_RECONCILIATION_FAILED"
     PAPER_SESSION_STARTED = "PAPER_SESSION_STARTED"
     PAPER_SESSION_STOPPED = "PAPER_SESSION_STOPPED"
+    PAPER_SESSION_RESET = "PAPER_SESSION_RESET"
 
     # Paper Trading Portfolio Allocation & Capital Partitioning (Phase 2, Step 62)
     PAPER_ALLOCATION_UPDATED = "PAPER_ALLOCATION_UPDATED"
     PAPER_SLEEVE_ORDER_EXECUTED = "PAPER_SLEEVE_ORDER_EXECUTED"
     PAPER_SLEEVE_TRANSFER_RECORDED = "PAPER_SLEEVE_TRANSFER_RECORDED"
+
+    # Paper Trading Portfolio Equity Snapshots (Phase 2, Step 65)
+    PAPER_PORTFOLIO_EQUITY_SNAPSHOT = "PAPER_PORTFOLIO_EQUITY_SNAPSHOT"
 
 
     # Backtesting & Strategy Evaluation (Phase 2, Step 05)
@@ -393,6 +397,11 @@ class Event:
             payload=clean_payload,
             metadata=clean_metadata,
         )
+
+    @property
+    def data(self) -> Mapping[str, Any]:
+        """Alias for payload for backwards compatibility."""
+        return self.payload
 
     @property
     def iso_timestamp(self) -> str:

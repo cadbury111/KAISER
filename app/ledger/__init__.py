@@ -11,6 +11,7 @@ from app.ledger.ledger import PaperLedger
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
 from app.ledger.outbox import (
     DeduplicatingEventHandler,
+    OutboxPruneResult,
     OutboxRecord,
     OutboxStatus,
     TransactionalOutbox,
@@ -23,6 +24,7 @@ __all__ = [
     "PaperLedger",
     "OutboxStatus",
     "OutboxRecord",
+    "OutboxPruneResult",
     "TransactionalOutbox",
     "DeduplicatingEventHandler",
     "redact_sensitive_payload",

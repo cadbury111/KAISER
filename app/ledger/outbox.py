@@ -27,12 +27,13 @@ from enum import Enum
 import copy
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import sqlite3
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from app.core.events.event import Event, EventType
 from app.core.exceptions import ValidationError
@@ -93,6 +94,53 @@ class OutboxStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class OutboxPruneResult:
+    """Structured audit report for an outbox retention pruning run."""
+
+    cutoff_timestamp: float
+    records_inspected: int
+    records_pruned: int
+    records_archived: int
+    records_skipped_by_status: int
+    records_skipped_by_age: int
+    has_more: bool
+    error: Optional[str] = None
+    pruned_event_ids: Tuple[str, ...] = field(default_factory=tuple)
+    records_skipped_in_flight: int = 0
+
+    @property
+    def pruned_count(self) -> int:
+        return self.records_pruned
+
+    @property
+    def archived_count(self) -> int:
+        return self.records_archived
+
+    @property
+    def inspected_count(self) -> int:
+        return self.records_inspected
+
+    @property
+    def skipped_count(self) -> int:
+        return self.records_skipped_by_status + self.records_skipped_by_age + self.records_skipped_in_flight
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert prune audit result to a JSON-serializable dictionary."""
+        return {
+            "cutoff_timestamp": self.cutoff_timestamp,
+            "records_inspected": self.records_inspected,
+            "records_pruned": self.records_pruned,
+            "records_archived": self.records_archived,
+            "records_skipped_by_status": self.records_skipped_by_status,
+            "records_skipped_by_age": self.records_skipped_by_age,
+            "records_skipped_in_flight": self.records_skipped_in_flight,
+            "has_more": self.has_more,
+            "error": self.error,
+            "pruned_event_ids": list(self.pruned_event_ids),
+        }
+
+
+@dataclass(frozen=True)
 class OutboxRecord:
     """Durable record representing an event staged for publication via the outbox."""
 
@@ -109,6 +157,7 @@ class OutboxRecord:
     last_error: Optional[str] = None
     next_retry_at: Optional[float] = None
     delivered_at: Optional[float] = None
+    last_attempt_at: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not self.event_id or not isinstance(self.event_id, str):
@@ -142,6 +191,11 @@ class OutboxRecord:
         # Ensure payload is sanitized and deep-copied to guarantee immutability
         sanitized_payload = redact_sensitive_payload(self.payload)
         object.__setattr__(self, "payload", copy.deepcopy(sanitized_payload))
+
+    @property
+    def retry_count(self) -> int:
+        """Alias for attempt_count."""
+        return self.attempt_count
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert outbox record to a JSON-serializable dictionary."""
@@ -210,9 +264,17 @@ class TransactionalOutbox:
         self,
         db_path: Optional[str] = None,
         name: str = "paper_outbox",
+        retention_enabled: bool = False,
+        retention_days: float = 30.0,
+        prune_batch_size: int = 500,
+        archival_enabled: bool = False,
     ) -> None:
         self.name = name
         self.db_path = db_path
+        self.retention_enabled = retention_enabled
+        self.retention_days = float(retention_days)
+        self.prune_batch_size = int(prune_batch_size)
+        self.archival_enabled = archival_enabled
         self._records: Dict[str, OutboxRecord] = {}
         self._lock = threading.RLock()
         self._recovery_diagnostics: Dict[str, Any] = {
@@ -220,13 +282,20 @@ class TransactionalOutbox:
             "corrupt_count": 0,
             "last_recovery_time": None,
         }
+        self._total_pruned: int = 0
+        self._total_archived: int = 0
+        self._last_prune_result: Optional[OutboxPruneResult] = None
 
         if self.db_path:
             self._init_sqlite_db()
             self.recover()
 
+    # Alias for compatibility
+    def stage_event(self, record: OutboxRecord, conn: Optional[sqlite3.Connection] = None) -> bool:
+        return self.stage_record(record=record, conn=conn)
+
     def _init_sqlite_db(self) -> None:
-        """Initialize SQLite table for outbox persistence."""
+        """Initialize SQLite tables and indexes for outbox persistence and archival."""
         assert self.db_path is not None
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -256,9 +325,43 @@ class TransactionalOutbox:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_paper_outbox_retry ON paper_outbox_entries(next_retry_at)"
                 )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_paper_outbox_delivered ON paper_outbox_entries(delivered_at)"
+                )
+                # Historical Archive Table (Phase 2, Step 65)
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS paper_outbox_archive (
+                        event_id TEXT PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL DEFAULT 1,
+                        correlation_id TEXT,
+                        causation_id TEXT,
+                        payload_json TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        status TEXT NOT NULL,
+                        attempt_count INTEGER NOT NULL DEFAULT 0,
+                        max_attempts INTEGER NOT NULL DEFAULT 5,
+                        last_error TEXT,
+                        next_retry_at REAL,
+                        delivered_at REAL,
+                        archived_at REAL NOT NULL,
+                        archive_reason TEXT DEFAULT 'retention_prune'
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_paper_outbox_archive_at ON paper_outbox_archive(archived_at)"
+                )
         except Exception as err:
             logger.error("Failed to initialize paper outbox SQLite table at %s: %s", self.db_path, err)
             raise
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Create a new SQLite connection for internal operations."""
+        if not self.db_path:
+            raise ValidationError("db_path is not configured for this outbox instance")
+        return sqlite3.connect(self.db_path, timeout=10.0)
 
     def stage_record(
         self,
@@ -616,6 +719,317 @@ class TransactionalOutbox:
             }
             return dict(self._recovery_diagnostics)
 
+    def prune_delivered_records(
+        self,
+        retention_seconds: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        archive: Optional[bool] = None,
+        now: Optional[float] = None,
+        exclude_event_ids: Optional[Set[str]] = None,
+    ) -> OutboxPruneResult:
+        """Prune older DELIVERED outbox records whose delivered_at is older than retention_seconds.
+
+        Strict Safety Guarantees:
+        - ONLY records with status=DELIVERED are eligible.
+        - NEVER prunes PENDING, RETRYABLE_FAILURE, or EXHAUSTED records.
+        - Requires a valid, finite delivered_at timestamp.
+        - Does NOT substitute creation time for delivered time.
+        - Bounded: processes at most batch_size records per invocation (capped at 1000).
+        - Atomic: in SQLite, deletion (and optional archive) runs in a single transaction.
+          In-memory state is only evicted if the database transaction commits.
+        - Excludes any event IDs currently in-flight or specified by the caller.
+
+        Args:
+            retention_seconds: Age in seconds since delivery required for pruning (> 0).
+                If None, uses self.retention_days * 86400.0.
+            batch_size: Maximum records to prune in this batch (> 0, capped at 1000).
+                If None, uses self.prune_batch_size.
+            archive: If True, copy eligible records to paper_outbox_archive before deletion.
+                If None, uses self.archival_enabled.
+            now: Optional override for current timestamp (for deterministic testing).
+            exclude_event_ids: Set of event IDs to protect from pruning (e.g. in-flight).
+
+        Returns:
+            OutboxPruneResult: Comprehensive audit record of the pruning operation.
+        """
+        sec = float(retention_seconds) if retention_seconds is not None else (self.retention_days * 86400.0)
+        bs = int(batch_size) if batch_size is not None else self.prune_batch_size
+        do_archive = bool(archive) if archive is not None else self.archival_enabled
+
+        if not math.isfinite(sec) or sec <= 0:
+            raise ValidationError(
+                f"retention_seconds must be a positive finite float, got {sec}"
+            )
+        if bs <= 0:
+            raise ValidationError(f"batch_size must be a positive integer, got {bs}")
+
+        clamped_batch = min(1000, bs)
+        current_time = now if now is not None else time.time()
+        cutoff = current_time - sec
+        protected_ids = set(exclude_event_ids or ())
+
+        with self._lock:
+            records_inspected = 0
+            records_skipped_by_status = 0
+            records_skipped_by_age = 0
+            records_skipped_in_flight = 0
+            eligible_ids: List[str] = []
+
+            if self.db_path:
+                try:
+                    with self._get_connection() as conn:
+                        # 1. Inspect status counts for auditability
+                        cursor = conn.execute(
+                            "SELECT status, COUNT(*) FROM paper_outbox_entries GROUP BY status"
+                        )
+                        for stat_str, cnt in cursor.fetchall():
+                            if stat_str != OutboxStatus.DELIVERED.value:
+                                records_skipped_by_status += cnt
+
+                        # 2. Query delivered records
+                        cursor = conn.execute(
+                            """
+                            SELECT event_id, delivered_at FROM paper_outbox_entries
+                            WHERE status = ? AND delivered_at IS NOT NULL
+                            ORDER BY delivered_at ASC, rowid ASC
+                            LIMIT ?
+                            """,
+                            (OutboxStatus.DELIVERED.value, clamped_batch * 3 + 1),
+                        )
+                        rows = cursor.fetchall()
+                        records_inspected = len(rows)
+
+                        for eid, deliv_at in rows:
+                            if eid in protected_ids:
+                                records_skipped_in_flight += 1
+                                continue
+                            if deliv_at is None or not math.isfinite(deliv_at) or deliv_at <= 0.0 or deliv_at > cutoff:
+                                records_skipped_by_age += 1
+                                continue
+                            eligible_ids.append(eid)
+                            if len(eligible_ids) >= clamped_batch:
+                                break
+
+                        has_more = len(rows) > len(eligible_ids) + records_skipped_by_age + records_skipped_in_flight
+
+                        if not eligible_ids:
+                            res = OutboxPruneResult(
+                                cutoff_timestamp=cutoff,
+                                records_inspected=records_inspected,
+                                records_pruned=0,
+                                records_archived=0,
+                                records_skipped_by_status=records_skipped_by_status,
+                                records_skipped_by_age=records_skipped_by_age,
+                                records_skipped_in_flight=records_skipped_in_flight,
+                                has_more=has_more,
+                            )
+                            self._last_prune_result = res
+                            return res
+
+                        # 3. Atomic SQLite Transaction
+                        with conn:
+                            placeholders = ",".join("?" for _ in eligible_ids)
+                            archived_count = 0
+                            if do_archive:
+                                conn.execute(
+                                    f"""
+                                    INSERT OR IGNORE INTO paper_outbox_archive (
+                                        event_id, event_type, schema_version, correlation_id, causation_id,
+                                        payload_json, created_at, status, attempt_count, max_attempts,
+                                        last_error, next_retry_at, delivered_at, archived_at, archive_reason
+                                    )
+                                    SELECT event_id, event_type, schema_version, correlation_id, causation_id,
+                                           payload_json, created_at, status, attempt_count, max_attempts,
+                                           last_error, next_retry_at, delivered_at, ?, 'retention_prune'
+                                    FROM paper_outbox_entries
+                                    WHERE event_id IN ({placeholders})
+                                    """,
+                                    [current_time] + eligible_ids,
+                                )
+                                archived_count = len(eligible_ids)
+
+                            conn.execute(
+                                f"DELETE FROM paper_outbox_entries WHERE event_id IN ({placeholders})",
+                                eligible_ids,
+                            )
+
+                        # 4. In-Memory Eviction (only after successful SQLite commit)
+                        for eid in eligible_ids:
+                            self._records.pop(eid, None)
+
+                        self._total_pruned += len(eligible_ids)
+                        self._total_archived += archived_count
+
+                        res = OutboxPruneResult(
+                            cutoff_timestamp=cutoff,
+                            records_inspected=records_inspected,
+                            records_pruned=len(eligible_ids),
+                            records_archived=archived_count,
+                            records_skipped_by_status=records_skipped_by_status,
+                            records_skipped_by_age=records_skipped_by_age,
+                            records_skipped_in_flight=records_skipped_in_flight,
+                            has_more=has_more,
+                            pruned_event_ids=tuple(eligible_ids),
+                        )
+                        self._last_prune_result = res
+                        logger.info(
+                            "Outbox pruned %d records (archived=%d, cutoff=%.2f, has_more=%s)",
+                            len(eligible_ids),
+                            archived_count,
+                            cutoff,
+                            has_more,
+                        )
+                        return res
+
+                except Exception as err:
+                    logger.error("Failed to prune delivered outbox records in SQLite: %s", err)
+                    raise
+
+            else:
+                # In-memory only outbox
+                records_inspected = len(self._records)
+                delivered_candidates = []
+                for r in self._records.values():
+                    if r.status != OutboxStatus.DELIVERED:
+                        records_skipped_by_status += 1
+                        continue
+                    if r.event_id in protected_ids:
+                        continue
+                    if r.delivered_at is None or not math.isfinite(r.delivered_at) or r.delivered_at > cutoff:
+                        records_skipped_by_age += 1
+                        continue
+                    delivered_candidates.append(r)
+
+                delivered_candidates.sort(key=lambda r: r.delivered_at or 0.0)
+                to_prune_recs = delivered_candidates[:clamped_batch]
+                has_more = len(delivered_candidates) > len(to_prune_recs)
+
+                pruned_eids = [r.event_id for r in to_prune_recs]
+                for eid in pruned_eids:
+                    self._records.pop(eid, None)
+
+                archived_count = len(pruned_eids) if archive else 0
+                self._total_pruned += len(pruned_eids)
+                self._total_archived += archived_count
+
+                res = OutboxPruneResult(
+                    cutoff_timestamp=cutoff,
+                    records_inspected=records_inspected,
+                    records_pruned=len(pruned_eids),
+                    records_archived=archived_count,
+                    records_skipped_by_status=records_skipped_by_status,
+                    records_skipped_by_age=records_skipped_by_age,
+                    has_more=has_more,
+                    pruned_event_ids=tuple(pruned_eids),
+                )
+                self._last_prune_result = res
+                return res
+
+    def preview_prune_delivered_records(
+        self,
+        retention_seconds: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        now: Optional[float] = None,
+    ) -> OutboxPruneResult:
+        """Inspect and return what would be pruned without mutating any database or in-memory records."""
+        sec = float(retention_seconds) if retention_seconds is not None else (self.retention_days * 86400.0)
+        bs = int(batch_size) if batch_size is not None else self.prune_batch_size
+
+        if not math.isfinite(sec) or sec <= 0:
+            raise ValidationError(
+                f"retention_seconds must be a positive finite float, got {sec}"
+            )
+        if bs <= 0:
+            raise ValidationError(f"batch_size must be a positive integer, got {bs}")
+
+        clamped_batch = min(1000, bs)
+        current_time = now if now is not None else time.time()
+        cutoff = current_time - sec
+
+        with self._lock:
+            eligible_ids: List[str] = []
+            records_skipped_by_status = 0
+            records_skipped_by_age = 0
+
+            for r in self._records.values():
+                if r.status != OutboxStatus.DELIVERED:
+                    records_skipped_by_status += 1
+                    continue
+                if r.delivered_at is None or not math.isfinite(r.delivered_at) or r.delivered_at <= 0.0 or r.delivered_at > cutoff:
+                    records_skipped_by_age += 1
+                    continue
+                eligible_ids.append(r.event_id)
+
+            eligible_ids.sort(key=lambda eid: self._records[eid].delivered_at or 0.0)
+            preview_batch = eligible_ids[:clamped_batch]
+            has_more = len(eligible_ids) > len(preview_batch)
+
+            return OutboxPruneResult(
+                cutoff_timestamp=cutoff,
+                records_inspected=len(self._records),
+                records_pruned=0,
+                records_archived=0,
+                records_skipped_by_status=records_skipped_by_status,
+                records_skipped_by_age=records_skipped_by_age,
+                has_more=has_more,
+                pruned_event_ids=tuple(preview_batch),
+            )
+
+    def get_retention_status(self) -> Dict[str, Any]:
+        """Summary of outbox retention metrics and last prune results."""
+        with self._lock:
+            return {
+                "total_pruned": self._total_pruned,
+                "total_archived": self._total_archived,
+                "total_records": len(self._records),
+                "last_prune": self._last_prune_result.to_dict() if self._last_prune_result else None,
+            }
+
+    def get_archived_record(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an archived outbox record by event ID if present in SQLite."""
+        if not self.db_path:
+            return None
+        with self._lock:
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.execute(
+                        """
+                        SELECT event_id, event_type, schema_version, correlation_id, causation_id,
+                               payload_json, created_at, status, attempt_count, max_attempts,
+                               last_error, next_retry_at, delivered_at, archived_at, archive_reason
+                        FROM paper_outbox_archive
+                        WHERE event_id = ?
+                        """,
+                        (event_id,),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return None
+                    try:
+                        payload = json.loads(row[5]) if row[5] else {}
+                    except Exception:
+                        payload = {}
+                    return {
+                        "event_id": row[0],
+                        "event_type": row[1],
+                        "schema_version": row[2],
+                        "correlation_id": row[3],
+                        "causation_id": row[4],
+                        "payload": payload,
+                        "created_at": row[6],
+                        "status": row[7],
+                        "attempt_count": row[8],
+                        "max_attempts": row[9],
+                        "last_error": row[10],
+                        "next_retry_at": row[11],
+                        "delivered_at": row[12],
+                        "archived_at": row[13],
+                        "archive_reason": row[14],
+                    }
+            except Exception as err:
+                logger.error("Failed to fetch archived outbox record %s: %s", event_id, err)
+                return None
+
     def prune_delivered(self, keep_last_n: int = 1000) -> int:
         """Bounded retention: Prune older DELIVERED records, preserving at least keep_last_n.
 
@@ -649,12 +1063,26 @@ class TransactionalOutbox:
             for eid in to_prune:
                 self._records.pop(eid, None)
 
+            self._total_pruned += len(to_prune)
             return len(to_prune)
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get an active SQLite connection for outbox persistence."""
+        if not self.db_path:
+            raise RuntimeError("Database path not configured.")
+        return sqlite3.connect(self.db_path, timeout=10.0)
 
     def count(self) -> int:
         """Total records in the outbox."""
         with self._lock:
             return len(self._records)
+
+    def count_records(self, status: Optional[OutboxStatus] = None) -> int:
+        """Total records in the outbox, optionally filtered by status."""
+        with self._lock:
+            if status is None:
+                return len(self._records)
+            return sum(1 for r in self._records.values() if r.status == status)
 
 
 class DeduplicatingEventHandler:

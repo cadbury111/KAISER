@@ -6,6 +6,7 @@ Supports standard .env file loading with safe defaults.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -167,6 +168,12 @@ class Settings:
     outbox_max_backoff_seconds: float = 60.0
     outbox_auto_dispatch: bool = False
 
+    # Outbox Retention & Pruning (Phase 2, Step 65)
+    outbox_retention_enabled: bool = False
+    outbox_retention_days: float = 7.0
+    outbox_prune_batch_size: int = 100
+    outbox_archival_enabled: bool = False
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -218,6 +225,8 @@ class Settings:
             "twelve_data_is_delayed",
             "outbox_enabled",
             "outbox_auto_dispatch",
+            "outbox_retention_enabled",
+            "outbox_archival_enabled",
         ):
             val = getattr(self, bool_field)
             if not isinstance(val, bool):
@@ -300,6 +309,16 @@ class Settings:
                 f"Must be >= OUTBOX_RETRY_BACKOFF_SECONDS ({self.outbox_retry_backoff_seconds})."
             )
 
+        # Outbox Retention Validation (Phase 2, Step 65)
+        if not math.isfinite(self.outbox_retention_days) or self.outbox_retention_days <= 0:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_RETENTION_DAYS: {self.outbox_retention_days}. Must be a positive finite float."
+            )
+        if self.outbox_prune_batch_size <= 0 or self.outbox_prune_batch_size > 50_000:
+            raise ConfigurationError(
+                f"Invalid OUTBOX_PRUNE_BATCH_SIZE: {self.outbox_prune_batch_size}. Must be an integer between 1 and 50000."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {
@@ -350,6 +369,10 @@ class Settings:
             "outbox_retry_backoff_seconds": self.outbox_retry_backoff_seconds,
             "outbox_max_backoff_seconds": self.outbox_max_backoff_seconds,
             "outbox_auto_dispatch": self.outbox_auto_dispatch,
+            "outbox_retention_enabled": self.outbox_retention_enabled,
+            "outbox_retention_days": self.outbox_retention_days,
+            "outbox_prune_batch_size": self.outbox_prune_batch_size,
+            "outbox_archival_enabled": self.outbox_archival_enabled,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -394,6 +417,8 @@ def get_settings(
         outbox_batch_size = int(source.get("OUTBOX_BATCH_SIZE", "50"))
         outbox_retry_backoff = float(source.get("OUTBOX_RETRY_BACKOFF_SECONDS", "2.0"))
         outbox_max_backoff = float(source.get("OUTBOX_MAX_BACKOFF_SECONDS", "60.0"))
+        outbox_retention_days = float(source.get("OUTBOX_RETENTION_DAYS", "7.0"))
+        outbox_prune_batch_size = int(source.get("OUTBOX_PRUNE_BATCH_SIZE", "100"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -445,6 +470,10 @@ def get_settings(
         outbox_retry_backoff_seconds=outbox_retry_backoff,
         outbox_max_backoff_seconds=outbox_max_backoff,
         outbox_auto_dispatch=parse_bool(source.get("OUTBOX_AUTO_DISPATCH", "false"), "OUTBOX_AUTO_DISPATCH"),
+        outbox_retention_enabled=parse_bool(source.get("OUTBOX_RETENTION_ENABLED", "false"), "OUTBOX_RETENTION_ENABLED"),
+        outbox_retention_days=outbox_retention_days,
+        outbox_prune_batch_size=outbox_prune_batch_size,
+        outbox_archival_enabled=parse_bool(source.get("OUTBOX_ARCHIVAL_ENABLED", "false"), "OUTBOX_ARCHIVAL_ENABLED"),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

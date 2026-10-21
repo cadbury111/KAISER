@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from app.core.events.bus import EventBus
 from app.core.exceptions import ValidationError
-from app.ledger.outbox import OutboxRecord, OutboxStatus, TransactionalOutbox
+from app.ledger.outbox import OutboxPruneResult, OutboxRecord, OutboxStatus, TransactionalOutbox
 
 logger = logging.getLogger("execution.outbox_dispatcher")
 
@@ -41,6 +41,10 @@ class OutboxDispatcher:
         clock: Callable[[], float] = time.time,
         auto_start: bool = False,
         poll_interval_seconds: float = 0.5,
+        retention_enabled: bool = False,
+        retention_days: float = 7.0,
+        prune_batch_size: int = 100,
+        archival_enabled: bool = False,
     ) -> None:
         if batch_size <= 0:
             raise ValidationError(f"batch_size must be positive, got {batch_size}")
@@ -52,6 +56,10 @@ class OutboxDispatcher:
             raise ValidationError(
                 f"max_backoff_seconds ({max_backoff_seconds}) must be >= retry_backoff_seconds ({retry_backoff_seconds})"
             )
+        if retention_days <= 0:
+            raise ValidationError(f"retention_days must be positive, got {retention_days}")
+        if prune_batch_size <= 0:
+            raise ValidationError(f"prune_batch_size must be positive, got {prune_batch_size}")
 
         self.outbox = outbox
         self.event_bus = event_bus
@@ -61,6 +69,10 @@ class OutboxDispatcher:
         self.max_backoff_seconds = max_backoff_seconds
         self.clock = clock
         self.poll_interval_seconds = max(0.05, poll_interval_seconds)
+        self.retention_enabled = retention_enabled
+        self.retention_days = retention_days
+        self.prune_batch_size = prune_batch_size
+        self.archival_enabled = archival_enabled
 
         self._lock = threading.RLock()
         self._dispatch_lock = threading.Lock()  # Serializes batch dispatch executions
@@ -264,10 +276,35 @@ class OutboxDispatcher:
             iterations += 1
         return total_delivered
 
+    def prune_delivered(
+        self,
+        retention_seconds: Optional[float] = None,
+        batch_size: Optional[int] = None,
+        archive: Optional[bool] = None,
+        now: Optional[float] = None,
+    ) -> OutboxPruneResult:
+        """Prune older delivered records, protecting currently in-flight event IDs from deletion."""
+        sec = retention_seconds if retention_seconds is not None else (self.retention_days * 86400.0)
+        b_size = batch_size or self.prune_batch_size
+        do_archive = archive if archive is not None else self.archival_enabled
+        current_time = now if now is not None else self.clock()
+
+        with self._lock:
+            protected_ids = set(self._in_flight_event_ids)
+
+        return self.outbox.prune_delivered_records(
+            retention_seconds=sec,
+            batch_size=b_size,
+            archive=do_archive,
+            now=current_time,
+            exclude_event_ids=protected_ids,
+        )
+
     def get_status(self) -> Dict[str, Any]:
         """Diagnostic snapshot of dispatcher lifecycle, statistics, and outbox state."""
         with self._lock:
             outbox_stats = self.outbox.get_stats()
+            retention_stats = self.outbox.get_retention_status()
             return {
                 "is_running": self._is_running,
                 "batch_size": self.batch_size,
@@ -278,5 +315,10 @@ class OutboxDispatcher:
                 "total_dispatched": self._total_dispatched,
                 "total_failed_attempts": self._total_failed_attempts,
                 "total_exhausted": self._total_exhausted,
+                "retention_enabled": self.retention_enabled,
+                "retention_days": self.retention_days,
+                "prune_batch_size": self.prune_batch_size,
+                "archival_enabled": self.archival_enabled,
                 "outbox": outbox_stats,
+                "retention": retention_stats,
             }

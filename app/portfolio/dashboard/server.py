@@ -3819,6 +3819,159 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 18. Paper Trading Outbox Retention Status & Preview (/api/paper/outbox/retention)
+            if path == "/api/paper/outbox/retention":
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                outbox = getattr(self.server, "outbox", None)
+                if outbox is None and alloc_mgr is not None:
+                    outbox = getattr(alloc_mgr, "outbox", None)
+                if outbox is None and coordinator is not None:
+                    outbox = getattr(coordinator, "outbox", None)
+
+                if outbox is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Transactional outbox service not initialized or not attached.",
+                    })
+                    return
+
+                retention_status = outbox.get_retention_status() if hasattr(outbox, "get_retention_status") else {}
+                preview_flag = query.get("preview", ["false"])[0].lower() in ("true", "1", "yes")
+                preview_data = None
+                if preview_flag and hasattr(outbox, "preview_prune_delivered_records"):
+                    preview_result = outbox.preview_prune_delivered_records()
+                    preview_data = preview_result.to_dict() if hasattr(preview_result, "to_dict") else preview_result
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "retention": retention_status,
+                    "preview": preview_data,
+                })
+                return
+
+            # 19. Paper Trading Session Lifecycle Records (/api/paper/outbox/sessions)
+            if path == "/api/paper/outbox/sessions":
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                if coordinator is None or not hasattr(coordinator, "list_sessions"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Paper workflow coordinator not initialized or not attached.",
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                sessions = coordinator.list_sessions()
+                status_filter = query.get("status", [None])[0]
+                if status_filter:
+                    status_clean = status_filter.strip().upper()
+                    sessions = [s for s in sessions if getattr(s, "status", "").upper() == status_clean]
+
+                total_count = len(sessions)
+                paginated = sessions[offset_clamped : offset_clamped + limit_clamped]
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "total": total_count,
+                    "count": len(paginated),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "sessions": [s.to_dict() if hasattr(s, "to_dict") else vars(s) for s in paginated],
+                })
+                return
+
+            # 20. Portfolio Equity Snapshots (/api/paper/outbox/snapshots, /api/paper/outbox/snapshots/<snapshot_id>)
+            if path == "/api/paper/outbox/snapshots" or path.startswith("/api/paper/outbox/snapshots/"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                alloc_mgr = getattr(self.server, "allocation_manager", None)
+                if alloc_mgr is None and coordinator is not None and hasattr(coordinator, "get_allocation_manager"):
+                    alloc_mgr = coordinator.get_allocation_manager()
+
+                target_mgr = alloc_mgr if alloc_mgr is not None and hasattr(alloc_mgr, "list_equity_snapshots") else coordinator
+                if target_mgr is None or not hasattr(target_mgr, "list_equity_snapshots"):
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Portfolio equity snapshot service not initialized or not attached.",
+                    })
+                    return
+
+                if path.startswith("/api/paper/outbox/snapshots/"):
+                    snapshot_id = path[len("/api/paper/outbox/snapshots/"):].strip()
+                    if not snapshot_id or not SAFE_ID_PATTERN.match(snapshot_id) or ".." in snapshot_id or len(snapshot_id) > 128:
+                        self._send_json_response(
+                            {"error": "Bad Request", "message": "Invalid snapshot_id format."},
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+
+                    snap = target_mgr.get_equity_snapshot(snapshot_id)
+                    if snap is None:
+                        self._send_json_response(
+                            {"error": "Not Found", "message": f"Equity snapshot '{snapshot_id}' not found."},
+                            status=HTTPStatus.NOT_FOUND,
+                        )
+                        return
+
+                    self._send_json_response({
+                        "status": "success",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "snapshot": snap.to_dict(),
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                    offset_val = int(query.get("offset", ["0"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                    offset_val = 0
+                limit_clamped = max(1, min(100, limit_val))
+                offset_clamped = max(0, offset_val)
+
+                snapshots = target_mgr.list_equity_snapshots(limit=limit_clamped, offset=offset_clamped)
+                latest_snap = snapshots[0].to_dict() if snapshots else None
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(snapshots),
+                    "limit": limit_clamped,
+                    "offset": offset_clamped,
+                    "latest_snapshot": latest_snap,
+                    "snapshots": [s.to_dict() for s in snapshots],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
