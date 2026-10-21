@@ -17,6 +17,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -31,6 +32,40 @@ from app.ledger.outbox import TransactionalOutbox, OutboxStatus, OutboxPruneResu
 
 logger = logging.getLogger(__name__)
 
+SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?:api_?key|access_?token|token|secret|password|bearer|auth|credential|private_?key)",
+    re.IGNORECASE,
+)
+
+SENSITIVE_TEXT_PATTERN = re.compile(
+    r"((?:token|auth_token|access_token|api_key|apikey|key|secret|bearer|password)\s*[:=]\s*['\"]?)([^'\"\s&]+)(['\"]?)",
+    re.IGNORECASE,
+)
+
+
+def sanitize_sensitive_text(text: str) -> str:
+    """Redact sensitive keys/tokens from error messages and text logs."""
+    if not text or not isinstance(text, str):
+        return str(text) if text is not None else ""
+    return SENSITIVE_TEXT_PATTERN.sub(r"\1[REDACTED]\3", text)
+
+
+def sanitize_dict_secrets(obj: Any) -> Any:
+    """Recursively redact sensitive key-values from dictionaries/lists."""
+    if isinstance(obj, dict):
+        clean = {}
+        for k, v in obj.items():
+            if isinstance(k, str) and SENSITIVE_KEY_PATTERN.search(k):
+                clean[k] = "[REDACTED]"
+            else:
+                clean[k] = sanitize_dict_secrets(v)
+        return clean
+    elif isinstance(obj, list):
+        return [sanitize_dict_secrets(item) for item in obj]
+    elif isinstance(obj, str):
+        return sanitize_sensitive_text(obj)
+    return obj
+
 
 class MaintenanceTaskStatus(str, Enum):
     """Structured outcomes for scheduled and manual maintenance tasks."""
@@ -41,6 +76,11 @@ class MaintenanceTaskStatus(str, Enum):
     SKIPPED_RECOVERY_INCOMPLETE = "SKIPPED_RECOVERY_INCOMPLETE"
     SKIPPED_OVERLAPPING = "SKIPPED_OVERLAPPING"
     FAILED = "FAILED"
+    RUNNING = "RUNNING"
+    INTERRUPTED = "INTERRUPTED"
+    TIMED_OUT = "TIMED_OUT"
+    UNKNOWN = "UNKNOWN"
+    RECOVERED = "RECOVERED"
 
 
 @dataclass(frozen=True)
@@ -73,9 +113,9 @@ class MaintenanceTaskResult:
             "records_processed": self.records_processed,
             "records_skipped": self.records_skipped,
             "has_more": self.has_more,
-            "skip_reason": self.skip_reason,
-            "error_message": self.error_message,
-            "details": dict(self.details),
+            "skip_reason": sanitize_sensitive_text(self.skip_reason) if self.skip_reason else None,
+            "error_message": sanitize_sensitive_text(self.error_message) if self.error_message else None,
+            "details": sanitize_dict_secrets(dict(self.details)),
         }
 
 
@@ -233,6 +273,7 @@ class MaintenanceScheduler:
 
         # Concurrency & lifecycle
         self._lock = threading.RLock()
+        self._shutdown_lock = threading.Lock()
         self._prune_lock = threading.Lock()
         self._digest_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -243,8 +284,9 @@ class MaintenanceScheduler:
         self._last_prune_mono: float = 0.0
         self._last_digest_mono: float = 0.0
 
-        # Memory caches
+        # Memory caches & in-flight tracking
         self._last_runs: Dict[str, MaintenanceTaskResult] = {}
+        self._running_tasks: Dict[str, str] = {}
         self._recent_errors: List[str] = []
 
         if self.db_path:
@@ -337,13 +379,70 @@ class MaintenanceScheduler:
             logger.error("Failed to initialize maintenance tables in SQLite (%s): %s", self.db_path, err)
             raise
 
+    def _record_claim(self, run_id: str, task_name: str, started_at: float) -> None:
+        """Record task claim / RUNNING state in SQLite and memory before execution begins."""
+        with self._lock:
+            self._running_tasks[task_name] = run_id
+
+        if not self.db_path:
+            return
+
+        try:
+            with self._get_connection() as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO paper_maintenance_runs (
+                            run_id, task_name, status, started_at, completed_at,
+                            duration_seconds, records_inspected, records_processed,
+                            records_skipped, has_more, skip_reason, error_message, details_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            task_name,
+                            MaintenanceTaskStatus.RUNNING.value,
+                            started_at,
+                            0.0,
+                            0.0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            None,
+                            None,
+                            json.dumps({"phase": "CLAIMED"}),
+                        ),
+                    )
+        except Exception as exc:
+            logger.warning("Could not persist claimed task state in SQLite: %s", exc)
+
     def _recover_state(self) -> None:
-        """Recover last task outcomes from SQLite on startup. Idempotent."""
+        """Recover last task outcomes from SQLite on startup and reconcile in-flight runs. Idempotent."""
         if not self.db_path or not Path(self.db_path).is_file():
             return
         with self._lock:
             try:
                 with self._get_connection() as conn:
+                    with conn:
+                        now = self._clock()
+                        conn.execute(
+                            """
+                            UPDATE paper_maintenance_runs
+                            SET status = ?,
+                                completed_at = CASE WHEN completed_at <= 0 THEN ? ELSE completed_at END,
+                                duration_seconds = CASE WHEN duration_seconds <= 0 THEN (? - started_at) ELSE duration_seconds END,
+                                error_message = coalesce(error_message, 'Task was interrupted by process termination or restart.')
+                            WHERE status = ?
+                            """,
+                            (
+                                MaintenanceTaskStatus.INTERRUPTED.value,
+                                now,
+                                now,
+                                MaintenanceTaskStatus.RUNNING.value,
+                            ),
+                        )
+
                     cursor = conn.execute(
                         """
                         SELECT run_id, task_name, status, started_at, completed_at,
@@ -388,7 +487,7 @@ class MaintenanceScheduler:
                 logger.info("MaintenanceScheduler start() called, but scheduler is disabled in configuration.")
                 return
 
-            if self._is_running:
+            if self._is_running or (self._worker_thread is not None and self._worker_thread.is_alive()):
                 logger.debug("MaintenanceScheduler is already running.")
                 return
 
@@ -408,26 +507,28 @@ class MaintenanceScheduler:
 
     def stop(self, timeout: Optional[float] = None) -> bool:
         """Gracefully stop the background worker thread within the timeout."""
-        with self._lock:
-            if not self._is_running:
-                return True
+        with self._shutdown_lock:
+            with self._lock:
+                if not self._is_running and (self._worker_thread is None or not self._worker_thread.is_alive()):
+                    return True
 
-            self._is_running = False
-            self._stop_event.set()
+                self._is_running = False
+                self._stop_event.set()
+                thread = self._worker_thread
 
-        t_out = timeout if timeout is not None else self.shutdown_timeout_seconds
-        thread = self._worker_thread
-        clean_exit = True
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=t_out)
-            if thread.is_alive():
-                logger.warning("MaintenanceScheduler worker thread did not terminate within %.2fs timeout.", t_out)
-                clean_exit = False
+            t_out = timeout if timeout is not None else self.shutdown_timeout_seconds
+            clean_exit = True
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=t_out)
+                if thread.is_alive():
+                    logger.warning("MaintenanceScheduler worker thread did not terminate within %.2fs timeout.", t_out)
+                    clean_exit = False
 
-        with self._lock:
-            self._worker_thread = None
-            logger.info("MaintenanceScheduler stopped (clean=%s).", clean_exit)
-        return clean_exit
+            with self._lock:
+                if clean_exit:
+                    self._worker_thread = None
+                logger.info("MaintenanceScheduler stopped (clean=%s).", clean_exit)
+            return clean_exit
 
     def _worker_loop(self) -> None:
         """Background maintenance loop polling intervals and executing tasks safely."""
@@ -631,42 +732,48 @@ class MaintenanceScheduler:
                 self._record_run("prune", res)
                 return res
 
-            # 4. Immediate Session Recheck right before destructive action
-            if self.coordinator is not None and self.active_session_policy == "skip":
-                if hasattr(self.coordinator, "is_session_active") and self.coordinator.is_session_active():
-                    res = MaintenanceTaskResult(
-                        run_id=run_id,
-                        task_name="prune",
-                        status=MaintenanceTaskStatus.SKIPPED_ACTIVE_SESSION,
-                        started_at=t_start,
-                        completed_at=self._clock(),
-                        duration_seconds=self._clock() - t_start,
-                        skip_reason="Active session detected on immediate pre-prune recheck.",
-                    )
-                    self._record_run("prune", res)
-                    return res
+            self._record_claim(run_id, "prune", t_start)
 
-            # 5. In-flight protection
-            exclude_ids: Set[str] = set()
-            disp = self.dispatcher
-            if disp is None and self.coordinator is not None:
-                disp = getattr(self.coordinator, "outbox_dispatcher", None) or getattr(self.coordinator, "dispatcher", None)
-            if disp is not None:
-                if hasattr(disp, "in_flight_event_ids"):
-                    val = getattr(disp, "in_flight_event_ids")
-                    exclude_ids = set(val() if callable(val) else val)
-                elif hasattr(disp, "_in_flight_event_ids"):
-                    with getattr(disp, "_lock", threading.Lock()):
-                        exclude_ids = set(disp._in_flight_event_ids)
+            # 4. Immediate Session Recheck and atomic execution under coordinator lock (race protection)
+            coord_lock = getattr(self.coordinator, "_lock", None) if self.coordinator else None
+            lock_to_use = coord_lock if coord_lock is not None else threading.Lock()
 
-            # 6. Execute Prune
-            current_time = now if now is not None else self._clock()
-            prune_res: OutboxPruneResult = target_outbox.prune_delivered_records(
-                retention_seconds=retention_seconds,
-                batch_size=batch_size,
-                now=current_time,
-                exclude_event_ids=exclude_ids,
-            )
+            with lock_to_use:
+                if self.coordinator is not None and self.active_session_policy == "skip":
+                    if hasattr(self.coordinator, "is_session_active") and self.coordinator.is_session_active():
+                        res = MaintenanceTaskResult(
+                            run_id=run_id,
+                            task_name="prune",
+                            status=MaintenanceTaskStatus.SKIPPED_ACTIVE_SESSION,
+                            started_at=t_start,
+                            completed_at=self._clock(),
+                            duration_seconds=self._clock() - t_start,
+                            skip_reason="Active session detected on immediate pre-prune recheck.",
+                        )
+                        self._record_run("prune", res)
+                        return res
+
+                # 5. In-flight protection
+                exclude_ids: Set[str] = set()
+                disp = self.dispatcher
+                if disp is None and self.coordinator is not None:
+                    disp = getattr(self.coordinator, "outbox_dispatcher", None) or getattr(self.coordinator, "dispatcher", None)
+                if disp is not None:
+                    if hasattr(disp, "in_flight_event_ids"):
+                        val = getattr(disp, "in_flight_event_ids")
+                        exclude_ids = set(val() if callable(val) else val)
+                    elif hasattr(disp, "_in_flight_event_ids"):
+                        with getattr(disp, "_lock", threading.Lock()):
+                            exclude_ids = set(disp._in_flight_event_ids)
+
+                # 6. Execute Prune
+                current_time = now if now is not None else self._clock()
+                prune_res: OutboxPruneResult = target_outbox.prune_delivered_records(
+                    retention_seconds=retention_seconds,
+                    batch_size=batch_size,
+                    now=current_time,
+                    exclude_event_ids=exclude_ids,
+                )
 
             t_end = self._clock()
             res = MaintenanceTaskResult(
@@ -718,11 +825,15 @@ class MaintenanceScheduler:
         cur_time = now if now is not None else t_start
         did = digest_id or f"hdig_{uuid.uuid4().hex[:12]}"
 
-        # Prevent overlapping execution of digest task
-        if not self._digest_lock.acquire(blocking=False):
-            logger.warning("Health digest creation is already in progress; waiting...")
-            with self._digest_lock:
-                pass
+        # Acquire digest lock with bounded wait for concurrency safety
+        acquired = self._digest_lock.acquire(blocking=True, timeout=self.shutdown_timeout_seconds)
+        if not acquired:
+            logger.warning("Timed out waiting for health digest lock for digest %s", did)
+            if self.db_path and Path(self.db_path).is_file():
+                existing = self.get_health_digest(did)
+                if existing is not None:
+                    return existing
+            raise TimeoutError(f"Health digest generation timed out waiting for lock ({did}).")
 
         try:
             # Check for existing digest with same ID (Idempotency)
@@ -730,6 +841,8 @@ class MaintenanceScheduler:
                 existing = self.get_health_digest(did)
                 if existing is not None:
                     return existing
+
+            self._record_claim(f"mrun_digest_{did}", "health_digest", t_start)
 
             # 1. Collect outbox metrics
             target_outbox = self.outbox
@@ -772,7 +885,7 @@ class MaintenanceScheduler:
             # 4. Tasks status
             with self._lock:
                 tasks_stat = {k: v.to_dict() for k, v in self._last_runs.items()}
-                recent_errs = list(self._recent_errors[-10:])
+                recent_errs = [sanitize_sensitive_text(e) for e in self._recent_errors[-10:]]
                 is_running = self._is_running
 
             # 5. Evaluate runtime status
@@ -807,10 +920,25 @@ class MaintenanceScheduler:
             )
 
             # Persist to SQLite
-            self._persist_health_digest(digest)
+            persisted_ok = self._persist_health_digest(digest)
 
             # Record task run audit
             t_end = self._clock()
+            if not persisted_ok and self.db_path:
+                self._record_error(f"Health digest persistence failed for {digest.digest_id}")
+                run_result = MaintenanceTaskResult(
+                    run_id=f"mrun_digest_{uuid.uuid4().hex[:12]}",
+                    task_name="health_digest",
+                    status=MaintenanceTaskStatus.FAILED,
+                    started_at=t_start,
+                    completed_at=t_end,
+                    duration_seconds=t_end - t_start,
+                    error_message=f"Health digest database persistence failed for {digest.digest_id}",
+                    details={"digest_id": digest.digest_id, "persistence_failed": True},
+                )
+                self._record_run("health_digest", run_result)
+                return digest
+
             run_result = MaintenanceTaskResult(
                 run_id=f"mrun_digest_{uuid.uuid4().hex[:12]}",
                 task_name="health_digest",
@@ -829,15 +957,17 @@ class MaintenanceScheduler:
             self._digest_lock.release()
 
     def _record_run(self, task_name: str, result: MaintenanceTaskResult) -> None:
-        """Update last run cache and persist to SQLite."""
+        """Update last run cache, remove from active tasks, and persist to SQLite."""
         with self._lock:
             self._last_runs[task_name] = result
+            self._running_tasks.pop(task_name, None)
         self._persist_task_run(result)
 
     def _record_error(self, err: str) -> None:
-        """Record bounded recent diagnostic error."""
+        """Record bounded recent diagnostic error with sensitive text sanitization."""
+        sanitized = sanitize_sensitive_text(str(err))
         with self._lock:
-            self._recent_errors.append(f"[{time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(self._clock()))}] {err[:256]}")
+            self._recent_errors.append(f"[{time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime(self._clock()))}] {sanitized[:256]}")
             if len(self._recent_errors) > 50:
                 self._recent_errors = self._recent_errors[-50:]
 
@@ -1072,6 +1202,7 @@ class MaintenanceScheduler:
             return {
                 "enabled": self._enabled,
                 "is_running": self._is_running,
+                "active_tasks": dict(self._running_tasks),
                 "pruning": {
                     "enabled": self._pruning_enabled,
                     "interval_seconds": self.pruning_interval_seconds,
