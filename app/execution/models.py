@@ -271,6 +271,7 @@ class PaperExecutionResult:
     fill: Optional[PaperFill] = None
     rejection_code: Optional[PaperRejectionCode] = None
     rejection_reason: Optional[str] = None
+    event_delivery_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert execution result to dictionary."""
@@ -280,4 +281,5 @@ class PaperExecutionResult:
             "fill": self.fill.to_dict() if self.fill else None,
             "rejection_code": self.rejection_code.value if self.rejection_code else None,
             "rejection_reason": self.rejection_reason,
+            "event_delivery_failed": self.event_delivery_failed,
         }

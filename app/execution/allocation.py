@@ -306,6 +306,7 @@ class PortfolioAllocationResult:
     rejection_reason: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
     deterministic_digest: str = ""
+    event_delivery_failed: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -320,6 +321,7 @@ class PortfolioAllocationResult:
             "rejection_reason": self.rejection_reason,
             "timestamp": self.timestamp,
             "deterministic_digest": self.deterministic_digest,
+            "event_delivery_failed": self.event_delivery_failed,
             "advisory_disclaimer": "SIMULATION ONLY: Allocation results reflect deterministic partition models and do not predict market returns.",
         }
 
@@ -583,6 +585,7 @@ class PortfolioExposureSnapshot:
     reconciliation_discrepancy: float
     timestamp: float
     deterministic_digest: str
+    event_delivery_failures: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -600,6 +603,7 @@ class PortfolioExposureSnapshot:
             "reconciliation_discrepancy": self.reconciliation_discrepancy,
             "timestamp": self.timestamp,
             "deterministic_digest": self.deterministic_digest,
+            "event_delivery_failures": self.event_delivery_failures,
             "advisory_disclaimer": "SIMULATION ONLY: Capital partitioning and exposure metrics are offline simulation tools.",
         }
 
@@ -766,6 +770,8 @@ class PortfolioAllocationManager:
         self._allocation_results: Dict[str, PortfolioAllocationResult] = {}
         self._order_requests: Dict[str, Tuple[str, PaperOrderRequest]] = {}  # client_order_id -> (sleeve_id, request)
         self._order_results: Dict[str, PaperExecutionResult] = {}            # client_order_id -> result
+        self._event_delivery_failures: List[Dict[str, Any]] = []
+        self._failed_event_deliveries: int = 0
         self._lock = threading.RLock()
 
         # If ledger already contains allocation entries, attempt recovery
@@ -777,6 +783,18 @@ class PortfolioAllocationManager:
         """Available cash remaining at the portfolio level not reserved to any sleeve."""
         with self._lock:
             return round(self._unallocated_cash, 4)
+
+    @property
+    def event_delivery_failures_count(self) -> int:
+        """Total count of event publication failures caught post-commit."""
+        with self._lock:
+            return self._failed_event_deliveries
+
+    @property
+    def event_delivery_failures(self) -> List[Dict[str, Any]]:
+        """Audit list of event delivery failures captured post-commit."""
+        with self._lock:
+            return list(self._event_delivery_failures)
 
     @property
     def total_allocated_capital(self) -> float:
@@ -1001,7 +1019,14 @@ class PortfolioAllocationManager:
             self._allocation_results[request.request_id] = final_result
             self._allocation_history.append(final_result)
 
-            # Publish event if bus attached
+            # 6. Post-Commit Event Publication (Non-Transactional Notification)
+            # Transaction Boundary Definition:
+            # Capital partitions and durable ledger records are ALREADY COMMITTED.
+            # EventBus is an in-memory decoupled broker; publication failure does NOT roll back
+            # the committed financial ledger state (which would cause fatal divergence between
+            # ledger and memory). Instead, delivery failure is surfaced on the result container
+            # and tracked in audit metrics.
+            event_failed = False
             if self.event_bus:
                 try:
                     self.event_bus.publish(
@@ -1013,7 +1038,34 @@ class PortfolioAllocationManager:
                         )
                     )
                 except Exception as err:
-                    logger.error("Failed to publish allocation event: %s", err)
+                    event_failed = True
+                    self._failed_event_deliveries += 1
+                    self._event_delivery_failures.append({
+                        "operation": "apply_allocation",
+                        "request_id": request.request_id,
+                        "error": str(err),
+                        "timestamp": now,
+                    })
+                    logger.warning(
+                        "Post-commit event publication failed for allocation '%s': %s (financial state remains committed)",
+                        request.request_id,
+                        err,
+                    )
+
+            if event_failed:
+                final_result = PortfolioAllocationResult(
+                    request_id=final_result.request_id,
+                    status=final_result.status,
+                    success=True,
+                    total_portfolio_capital=final_result.total_portfolio_capital,
+                    allocated_capital=final_result.allocated_capital,
+                    unallocated_capital=final_result.unallocated_capital,
+                    sleeve_allocations=final_result.sleeve_allocations,
+                    timestamp=final_result.timestamp,
+                    deterministic_digest=final_result.deterministic_digest,
+                    event_delivery_failed=True,
+                )
+                self._allocation_results[request.request_id] = final_result
 
             logger.info(
                 "Capital allocation applied [request_id=%s, sleeves=%d, allocated=%.2f, unallocated=%.2f]",
@@ -1361,12 +1413,12 @@ class PortfolioAllocationManager:
                 correlation_id=cid,
             )
 
-            final_res = PaperExecutionResult(success=True, order=filled_order, fill=fill)
-            if client_oid:
-                self._order_requests[client_oid] = (sleeve_id.strip(), request)
-                self._order_results[client_oid] = final_res
-
-            # 9. Publish Events
+            # 9. Post-Commit Event Publication (Non-Transactional Notification)
+            # Transaction Boundary Definition:
+            # The financial transaction (portfolio, sleeve, durable ledger) is ALREADY COMMITTED.
+            # Event delivery failure surfaces via `event_delivery_failed=True` and internal audit metrics,
+            # but does NOT roll back committed financial ledger state.
+            event_failed = False
             if self.event_bus:
                 try:
                     self.event_bus.publish(
@@ -1384,7 +1436,30 @@ class PortfolioAllocationManager:
                         )
                     )
                 except Exception as err:
-                    logger.error("Failed to publish sleeve order event: %s", err)
+                    event_failed = True
+                    self._failed_event_deliveries += 1
+                    self._event_delivery_failures.append({
+                        "operation": "execute_sleeve_order",
+                        "order_id": order_id,
+                        "client_order_id": client_oid,
+                        "error": str(err),
+                        "timestamp": now,
+                    })
+                    logger.warning(
+                        "Post-commit event publication failed for sleeve order '%s': %s (financial state remains committed)",
+                        order_id,
+                        err,
+                    )
+
+            final_res = PaperExecutionResult(
+                success=True,
+                order=filled_order,
+                fill=fill,
+                event_delivery_failed=event_failed,
+            )
+            if client_oid:
+                self._order_requests[client_oid] = (sleeve_id.strip(), request)
+                self._order_results[client_oid] = final_res
 
             logger.info(
                 "Sleeve order filled [sleeve_id=%s, symbol=%s, qty=%.2f, price=%.2f, net_cash=%.2f]",
@@ -1501,7 +1576,21 @@ class PortfolioAllocationManager:
                         )
                     )
                 except Exception as err:
-                    logger.error("Failed to publish transfer event: %s", err)
+                    self._failed_event_deliveries += 1
+                    self._event_delivery_failures.append({
+                        "operation": "transfer_between_sleeves",
+                        "source_sleeve_id": src_id,
+                        "target_sleeve_id": tgt_id,
+                        "amount": amt,
+                        "error": str(err),
+                        "timestamp": time.time(),
+                    })
+                    logger.warning(
+                        "Post-commit event publication failed for transfer %s -> %s: %s (financial state remains committed)",
+                        src_id,
+                        tgt_id,
+                        err,
+                    )
 
             logger.info("Inter-sleeve transfer completed [%s -> %s: %.2f]", src_id, tgt_id, amt)
             return True, None, None
@@ -1600,6 +1689,7 @@ class PortfolioAllocationManager:
                 reconciliation_discrepancy=recon["max_discrepancy"],
                 timestamp=time.time(),
                 deterministic_digest=digest,
+                event_delivery_failures=self._failed_event_deliveries,
             )
 
     def reconcile(self, tolerance: float = 1e-4) -> PortfolioSleeveReconciliationResult:

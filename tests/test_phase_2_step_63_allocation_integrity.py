@@ -768,7 +768,9 @@ def test_failure_injection_5_sleeve_update_succeeds_portfolio_fails() -> None:
 
 
 def test_failure_injection_6_event_publication_fails_after_operation() -> None:
-    """Scenario 6: Event publication fails after a financial operation -> order still succeeds and balances match."""
+    """Scenario 6: Event publication fails after a financial operation ->
+    operation remains committed, event_delivery_failed is surfaced, metrics track failure,
+    diagnostics remain reconciled, retries do not duplicate state, and recovery replays cleanly."""
     event_bus = EventBus()
     portfolio = PaperPortfolio(initial_cash=100_000.0)
     ledger = PaperLedger(name="test_fi_6", initial_balance=100_000.0)
@@ -778,20 +780,186 @@ def test_failure_injection_6_event_publication_fails_after_operation() -> None:
     now = 1_000_000.0
     quote = _make_quote("RELIANCE", 2500.0, timestamp=now)
 
-    # EventBus publish raises exception
-    with patch.object(event_bus, "publish", side_effect=Exception("Kafka/Bus connection down")):
+    req = PaperOrderRequest(
+        symbol="RELIANCE",
+        side=PaperOrderSide.BUY,
+        order_type=PaperOrderType.MARKET,
+        quantity=2.0,
+        client_order_id="event_fail_client_oid_1",
+    )
+
+    # 1. Simulate EventBus failure during publish
+    with patch.object(event_bus, "publish", side_effect=Exception("Kafka/Bus cluster connection reset")):
         res = manager.execute_sleeve_order(
             "alpha_momentum",
-            PaperOrderRequest("RELIANCE", PaperOrderSide.BUY, PaperOrderType.MARKET, 2.0),
+            req,
             quote=quote,
             reference_time=now,
         )
 
-    # Order execution succeeds, event failure is gracefully logged
+    # 2. Financial operation remains COMMITTED and immutable
     assert res.success is True
     assert res.order.status == PaperOrderStatus.FILLED
+    assert res.event_delivery_failed is True
+    assert res.to_dict()["event_delivery_failed"] is True
+
+    # 3. Manager tracks failed delivery in audit metrics
+    assert manager.event_delivery_failures_count == 1
+    assert len(manager.event_delivery_failures) == 1
+    audit_rec = manager.event_delivery_failures[0]
+    assert audit_rec["operation"] == "execute_sleeve_order"
+    assert audit_rec["client_order_id"] == "event_fail_client_oid_1"
+    assert "Kafka/Bus cluster connection reset" in audit_rec["error"]
+
+    # 4. Exposure snapshot surfaces failure metric without misrepresenting financial state
+    snap = manager.get_portfolio_exposure()
+    assert snap.is_reconciled is True
+    assert snap.event_delivery_failures == 1
+    assert snap.to_dict()["event_delivery_failures"] == 1
+
+    # 5. Financial accounting reconciles 100% with zero discrepancy
     recon = manager.reconcile()
     assert recon.is_reconciled is True
+    assert recon.max_discrepancy == 0.0
+
+    # 6. Idempotent Retry: Retrying with same client_order_id returns cached result
+    # and does NOT duplicate fills, fees, positions, or ledger entries
+    ledger_entries_before = len(ledger.get_entries())
+    res_retry = manager.execute_sleeve_order(
+        "alpha_momentum",
+        req,
+        quote=quote,
+        reference_time=now,
+    )
+    assert res_retry.success is True
+    assert res_retry.order.order_id == res.order.order_id
+    assert res_retry.event_delivery_failed is True
+    assert len(ledger.get_entries()) == ledger_entries_before
+    assert manager.get_sleeve("alpha_momentum").get_position("RELIANCE").quantity == 2.0
+
+    # 7. Restart Recovery: Replay from durable ledger recovers exact committed state
+    portfolio2 = PaperPortfolio(initial_cash=100_000.0)
+    engine2 = PaperExecutionEngine(ledger=ledger, portfolio=portfolio2, enabled=True)
+    engine2.recover_from_ledger()
+    manager2 = PortfolioAllocationManager(portfolio=portfolio2, ledger=ledger)
+    rec_info = manager2.recover_from_ledger(ledger)
+    assert rec_info["reconciled"] is True
+    assert manager2.get_sleeve("alpha_momentum").get_position("RELIANCE").quantity == 2.0
+
+
+def test_failure_injection_6b_event_publication_fails_in_allocation() -> None:
+    """Scenario 6b: Event publication fails in apply_allocation ->
+    capital partitions remain committed, event_delivery_failed is surfaced, and retry is idempotent."""
+    event_bus = EventBus()
+    portfolio = PaperPortfolio(initial_cash=100_000.0)
+    ledger = PaperLedger(name="test_fi_6b", initial_balance=100_000.0)
+    manager = PortfolioAllocationManager(portfolio=portfolio, ledger=ledger, event_bus=event_bus)
+
+    req = create_standard_multi_sleeve_request(request_id="alloc_event_fail_req")
+
+    with patch.object(event_bus, "publish", side_effect=Exception("Bus unreachable")):
+        res = manager.apply_allocation(req)
+
+    # Allocation is committed despite event publication failure
+    assert res.success is True
+    assert res.event_delivery_failed is True
+    assert res.to_dict()["event_delivery_failed"] is True
+    assert manager.event_delivery_failures_count == 1
+    assert len(manager.list_sleeves()) == 3
+    assert manager.unallocated_cash == 0.0
+
+    # Reconciles cleanly
+    recon = manager.reconcile()
+    assert recon.is_reconciled is True
+
+    # Duplicate retry returns cached committed result without duplicate ledger entries
+    ledger_count_before = len(ledger.get_entries())
+    res_retry = manager.apply_allocation(req)
+    assert res_retry.success is True
+    assert res_retry.event_delivery_failed is True
+    assert len(ledger.get_entries()) == ledger_count_before
+
+
+def test_failure_injection_6c_event_publication_fails_in_transfer() -> None:
+    """Scenario 6c: Event publication fails in transfer_between_sleeves ->
+    capital transfer remains committed and balances stay reconciled."""
+    event_bus = EventBus()
+    portfolio = PaperPortfolio(initial_cash=100_000.0)
+    ledger = PaperLedger(name="test_fi_6c", initial_balance=100_000.0)
+    manager = PortfolioAllocationManager(portfolio=portfolio, ledger=ledger, event_bus=event_bus)
+
+    manager.apply_allocation(create_standard_multi_sleeve_request())
+    s1_pre = manager.get_sleeve("alpha_momentum").available_cash
+    s2_pre = manager.get_sleeve("beta_mean_reversion").available_cash
+
+    with patch.object(event_bus, "publish", side_effect=Exception("Subscriber crashed")):
+        ok, code, reason = manager.transfer_between_sleeves(
+            "alpha_momentum",
+            "beta_mean_reversion",
+            5000.0,
+            allow_transfer=True,
+        )
+
+    assert ok is True
+    assert manager.event_delivery_failures_count == 1
+    assert manager.get_sleeve("alpha_momentum").available_cash == s1_pre - 5000.0
+    assert manager.get_sleeve("beta_mean_reversion").available_cash == s2_pre + 5000.0
+
+    recon = manager.reconcile()
+    assert recon.is_reconciled is True
+
+
+def test_failure_injection_6d_commit_boundary_ledger_failure_vs_event_failure() -> None:
+    """Scenario 6d: Explicit contrast of transaction commit boundary:
+    - Pre-Commit (Ledger Write Failure): Financial mutation is rolled back completely.
+    - Post-Commit (Event Publication Failure): Financial mutation remains committed."""
+    event_bus = EventBus()
+    now = 1_000_000.0
+    quote = _make_quote("RELIANCE", 2500.0, timestamp=now)
+
+    # PART A: Pre-commit ledger failure -> ROLLBACK
+    portfolio_a = PaperPortfolio(initial_cash=100_000.0)
+    ledger_a = PaperLedger(name="test_fi_6d_a", initial_balance=100_000.0)
+    manager_a = PortfolioAllocationManager(portfolio=portfolio_a, ledger=ledger_a, event_bus=event_bus)
+    manager_a.apply_allocation(create_standard_multi_sleeve_request())
+    pre_cash_a = manager_a.get_sleeve("alpha_momentum").available_cash
+
+    with patch.object(ledger_a, "record_entry", side_effect=IOError("Disk unwriteable")):
+        with pytest.raises(IOError):
+            manager_a.execute_sleeve_order(
+                "alpha_momentum",
+                PaperOrderRequest("RELIANCE", PaperOrderSide.BUY, PaperOrderType.MARKET, 2.0, client_order_id="pre_commit_fail_oid"),
+                quote=quote,
+                reference_time=now,
+            )
+
+    # Transaction rolled back: cash untouched, position empty, no order cached
+    assert manager_a.get_sleeve("alpha_momentum").available_cash == pre_cash_a
+    assert manager_a.get_sleeve("alpha_momentum").get_position("RELIANCE") is None
+    assert "pre_commit_fail_oid" not in manager_a._order_results
+
+    # PART B: Post-commit event failure -> COMMITTED
+    portfolio_b = PaperPortfolio(initial_cash=100_000.0)
+    ledger_b = PaperLedger(name="test_fi_6d_b", initial_balance=100_000.0)
+    manager_b = PortfolioAllocationManager(portfolio=portfolio_b, ledger=ledger_b, event_bus=event_bus)
+    manager_b.apply_allocation(create_standard_multi_sleeve_request())
+    pre_cash_b = manager_b.get_sleeve("alpha_momentum").available_cash
+
+    with patch.object(event_bus, "publish", side_effect=RuntimeError("Event dispatch timed out")):
+        res_b = manager_b.execute_sleeve_order(
+            "alpha_momentum",
+            PaperOrderRequest("RELIANCE", PaperOrderSide.BUY, PaperOrderType.MARKET, 2.0, client_order_id="post_commit_fail_oid"),
+            quote=quote,
+            reference_time=now,
+        )
+
+    # Transaction is committed: cash decremented, position acquired, cached idempotently
+    assert res_b.success is True
+    assert res_b.event_delivery_failed is True
+    assert manager_b.get_sleeve("alpha_momentum").available_cash < pre_cash_b
+    assert manager_b.get_sleeve("alpha_momentum").get_position("RELIANCE").quantity == 2.0
+    assert "post_commit_fail_oid" in manager_b._order_results
+    assert manager_b.reconcile().is_reconciled is True
 
 
 def test_failure_injection_7_exception_during_fill_processing() -> None:
