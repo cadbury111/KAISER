@@ -183,6 +183,8 @@ class Settings:
     maintenance_active_session_policy: str = "skip"
     maintenance_shutdown_timeout_seconds: float = 5.0
     maintenance_history_limit: int = 1000
+    maintenance_consecutive_failure_threshold: int = 3
+    maintenance_duration_sample_limit: int = 100
 
     # Architectural Safety Invariants
     execution_locked: bool = True
@@ -346,6 +348,14 @@ class Settings:
             raise ConfigurationError(
                 f"Invalid MAINTENANCE_HISTORY_LIMIT: {self.maintenance_history_limit}. Must be an integer between 10 and 100000."
             )
+        if self.maintenance_consecutive_failure_threshold < 1 or self.maintenance_consecutive_failure_threshold > 1000:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_CONSECUTIVE_FAILURE_THRESHOLD: {self.maintenance_consecutive_failure_threshold}. Must be an integer between 1 and 1000."
+            )
+        if self.maintenance_duration_sample_limit < 10 or self.maintenance_duration_sample_limit > 10_000:
+            raise ConfigurationError(
+                f"Invalid MAINTENANCE_DURATION_SAMPLE_LIMIT: {self.maintenance_duration_sample_limit}. Must be an integer between 10 and 10000."
+            )
         norm_policy = str(self.maintenance_active_session_policy).strip().lower()
         if norm_policy not in ("skip", "allow"):
             raise ConfigurationError(
@@ -415,6 +425,8 @@ class Settings:
             "maintenance_active_session_policy": self.maintenance_active_session_policy,
             "maintenance_shutdown_timeout_seconds": self.maintenance_shutdown_timeout_seconds,
             "maintenance_history_limit": self.maintenance_history_limit,
+            "maintenance_consecutive_failure_threshold": self.maintenance_consecutive_failure_threshold,
+            "maintenance_duration_sample_limit": self.maintenance_duration_sample_limit,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -465,6 +477,8 @@ def get_settings(
         maint_digest_interval = float(source.get("MAINTENANCE_HEALTH_DIGEST_INTERVAL_SECONDS", "300.0"))
         maint_shutdown_timeout = float(source.get("MAINTENANCE_SHUTDOWN_TIMEOUT_SECONDS", "5.0"))
         maint_history_limit = int(source.get("MAINTENANCE_HISTORY_LIMIT", "1000"))
+        maint_failure_threshold = int(source.get("MAINTENANCE_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
+        maint_sample_limit = int(source.get("MAINTENANCE_DURATION_SAMPLE_LIMIT", "100"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -528,6 +542,8 @@ def get_settings(
         maintenance_active_session_policy=source.get("MAINTENANCE_ACTIVE_SESSION_POLICY", "skip"),
         maintenance_shutdown_timeout_seconds=maint_shutdown_timeout,
         maintenance_history_limit=maint_history_limit,
+        maintenance_consecutive_failure_threshold=maint_failure_threshold,
+        maintenance_duration_sample_limit=maint_sample_limit,
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

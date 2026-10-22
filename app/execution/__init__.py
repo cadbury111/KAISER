@@ -90,10 +90,16 @@ from app.execution.stress_testing import (
     run_all_stress_scenarios,
 )
 from app.execution.maintenance import (
+    DiagnosticFailureSummary,
+    DurationSummary,
     HealthDigestSnapshot,
+    MaintenanceHealthStatus,
     MaintenanceScheduler,
     MaintenanceTaskResult,
     MaintenanceTaskStatus,
+    TaskMetricsTracker,
+    WorkerStatus,
+    compute_duration_summary,
 )
 from app.execution.workflow import (
     PaperSimulationSession,
@@ -105,10 +111,16 @@ from app.execution.workflow import (
 )
 
 __all__ = [
+    "DiagnosticFailureSummary",
+    "DurationSummary",
     "HealthDigestSnapshot",
+    "MaintenanceHealthStatus",
     "MaintenanceScheduler",
     "MaintenanceTaskResult",
     "MaintenanceTaskStatus",
+    "TaskMetricsTracker",
+    "WorkerStatus",
+    "compute_duration_summary",
     "PaperOrderSide",
     "PaperOrderType",
     "PaperOrderStatus",

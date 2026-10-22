@@ -4117,6 +4117,41 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 24. Maintenance Scheduler Metrics (/api/paper/maintenance/metrics)
+            if path == "/api/paper/maintenance/metrics":
+                scheduler = getattr(self.server, "maintenance_scheduler", None)
+                if scheduler is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_maintenance_scheduler"):
+                        scheduler = coordinator.get_maintenance_scheduler()
+
+                if scheduler is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Automated maintenance scheduler not initialized or not attached.",
+                    })
+                    return
+
+                health_st, health_reasons, health_diags = scheduler.evaluate_health()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "metrics": scheduler.get_metrics(),
+                    "health_status": {
+                        "status": health_st,
+                        "reasons": health_reasons,
+                        "diagnostics": health_diags,
+                    },
+                    "duration_summaries": scheduler.get_duration_summaries(),
+                    "failure_summaries": scheduler.get_failure_summaries(),
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
