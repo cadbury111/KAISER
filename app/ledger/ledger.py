@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from app.core.config import resolve_database_path
 from app.core.exceptions import ValidationError
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
 from app.ledger.outbox import OutboxRecord, TransactionalOutbox
@@ -42,7 +43,7 @@ class PaperLedger:
         outbox: Optional[TransactionalOutbox] = None,
     ) -> None:
         self.name = name
-        self.db_path = db_path
+        self.db_path = resolve_database_path(str(db_path)) if db_path else None
         self.event_bus = event_bus
         self.initial_balance = initial_balance
         self._entries: List[PaperLedgerEntry] = []

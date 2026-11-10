@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from app.analysis.models import SUPPORTED_TIMEFRAMES, normalize_timeframe
+from app.core.config import resolve_database_path
 from app.core.exceptions import ConfigurationError, ValidationError
 from app.core.logging_config import get_logger
 from app.market.historical.models import (
@@ -94,7 +95,7 @@ class SQLiteHistoricalBarRepository(HistoricalDataProvider, HistoricalBarReposit
         name: str = "sqlite_historical_repository",
     ) -> None:
         super().__init__(name=name)
-        self.db_path_str = str(db_path)
+        self.db_path_str = resolve_database_path(str(db_path))
         self._is_memory = self.db_path_str == ":memory:"
         self._lock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None

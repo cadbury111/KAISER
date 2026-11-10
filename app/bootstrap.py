@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, resolve_database_path
 from app.core.events import Event, EventBus, EventType
 from app.core.exceptions import ConfigurationError
 from app.core.logging_config import get_logger, setup_logging
@@ -334,12 +334,8 @@ def bootstrap_system(
             name="kaiser_main_voice_controller",
         )
 
-    # Initialize Historical Repository & Bounded Cache
-    db_path = "data/kaiser.db"
-    if active_settings.database_url.startswith("sqlite:///"):
-        db_path = active_settings.database_url.replace("sqlite:///", "")
-    elif active_settings.database_url.startswith("sqlite://"):
-        db_path = active_settings.database_url.replace("sqlite://", "")
+    # Initialize Historical Repository & Bounded Cache with isolated database resolution
+    db_path = resolve_database_path(active_settings.database_url, app_env=active_settings.app_env)
 
     historical_repository = SQLiteHistoricalBarRepository(db_path=db_path, name="sqlite_historical_repo")
     historical_cache = HistoricalDataCache(max_size=200, ttl_seconds=300.0)

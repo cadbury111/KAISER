@@ -35,6 +35,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from app.core.config import resolve_database_path
 from app.core.events.event import Event, EventType
 from app.core.exceptions import ValidationError
 
@@ -270,7 +271,7 @@ class TransactionalOutbox:
         archival_enabled: bool = False,
     ) -> None:
         self.name = name
-        self.db_path = db_path
+        self.db_path = resolve_database_path(str(db_path)) if db_path else None
         self.retention_enabled = retention_enabled
         self.retention_days = float(retention_days)
         self.prune_batch_size = int(prune_batch_size)

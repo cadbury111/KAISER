@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 import uuid
 
 from app.analysis.models import normalize_timeframe
+from app.core.config import resolve_database_path
 from app.core.events import Event, EventBus, EventType
 from app.core.exceptions import ValidationError
 from app.core.state import StateStore
@@ -53,7 +54,7 @@ class MarketDataProvenanceTracker:
         self.max_history = max(1, min(100000, max_history))
         self.event_bus = event_bus
         self.state_store = state_store
-        self.db_path = str(db_path) if db_path else None
+        self.db_path = resolve_database_path(str(db_path)) if db_path else None
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = threading.RLock()
 

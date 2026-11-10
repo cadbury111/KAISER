@@ -27,6 +27,7 @@ from app.analysis.runs.models import (
     generate_reproducibility_id,
     validate_lifecycle_transition,
 )
+from app.core.config import resolve_database_path
 from app.core.events.bus import EventBus
 from app.core.events.event import Event, EventType
 from app.core.exceptions import ValidationError
@@ -66,7 +67,7 @@ class AnalysisRunRegistry:
         self.clock = clock or time.time
         self.event_bus = event_bus
         self.state_store = state_store
-        self.db_path = str(db_path) if db_path else None
+        self.db_path = resolve_database_path(str(db_path)) if db_path else None
         self._conn: Optional[sqlite3.Connection] = None
         self._lock = threading.RLock()
 

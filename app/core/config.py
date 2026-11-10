@@ -49,6 +49,60 @@ def parse_bool(value: Any, field_name: str = "value") -> bool:
     )
 
 
+def resolve_database_path(
+    database_url_or_path: str = "sqlite:///data/kaiser.db",
+    app_env: str = "development",
+) -> str:
+    """Resolve SQLite database path with robust test isolation guarantees.
+
+    Ensures test execution never mutates, locks, or alters persistent user/production
+    databases (such as 'data/kaiser.db'). If running within an automated test context
+    (pytest detected, KAISER_TEST_DB_PATH set, or app_env == 'test') and the target
+    resolves to the production default 'data/kaiser.db', this redirects the path to
+    an isolated temporary database.
+    """
+    if not database_url_or_path:
+        return database_url_or_path
+
+    if database_url_or_path.startswith("sqlite:///"):
+        raw_path = database_url_or_path[10:]
+    elif database_url_or_path.startswith("sqlite://"):
+        raw_path = database_url_or_path[9:]
+    else:
+        raw_path = database_url_or_path
+
+    if raw_path == ":memory:":
+        return raw_path
+
+    # Check if raw_path points to the persistent production default database
+    normalized = Path(raw_path).as_posix()
+    is_prod_default = normalized in ("data/kaiser.db", "./data/kaiser.db", "kaiser.db")
+    if not is_prod_default:
+        try:
+            prod_resolved = Path("data/kaiser.db").resolve()
+            is_prod_default = Path(raw_path).resolve() == prod_resolved
+        except Exception:
+            is_prod_default = normalized.endswith("/data/kaiser.db")
+
+    test_override = os.environ.get("KAISER_TEST_DB_PATH")
+    import sys
+    is_test_env = (
+        bool(test_override)
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        or "pytest" in sys.modules
+        or app_env == "test"
+    )
+
+    if is_test_env and is_prod_default:
+        if test_override:
+            return test_override
+        import tempfile
+        import uuid
+        return Path(tempfile.gettempdir(), f"kaiser_isolated_test_{os.getpid()}_{uuid.uuid4().hex[:12]}.db").as_posix()
+
+    return raw_path
+
+
 def load_dotenv(
     dotenv_path: str | Path | None = None,
     override: bool = False,

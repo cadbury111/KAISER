@@ -3,7 +3,7 @@
 Provides centralized configuration, logging, and error handling.
 """
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings, get_settings, resolve_database_path
 from app.core.exceptions import (
     ConfigurationError,
     ExecutionLockedError,
@@ -20,6 +20,7 @@ from app.core.state import StateStore
 __all__ = [
     "Settings",
     "get_settings",
+    "resolve_database_path",
     "setup_logging",
     "get_logger",
     "KaiserError",

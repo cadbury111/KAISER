@@ -6,6 +6,7 @@ Entry point for bootstrapping the KAISER foundation layer.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from app.bootstrap import bootstrap_system, format_banner
@@ -19,6 +20,17 @@ def main() -> int:
         int: Process exit code (0 for success, non-zero for error).
     """
     try:
+        # Guarantee test database override cannot leak into normal application startup
+        os.environ.pop("KAISER_TEST_DB_PATH", None)
+
+        if "--help" in sys.argv or "-h" in sys.argv:
+            print("KAISER — Voice-First AI Trading Desk / Intelligence System\n")
+            print("Usage: python run.py [OPTIONS]\n")
+            print("Options:")
+            print("  --dashboard    Launch the Portfolio Analytics Command Center web UI")
+            print("  --help, -h     Show this message and exit")
+            return 0
+
         launch_dashboard = "--dashboard" in sys.argv
         custom_settings = None
         if launch_dashboard:
