@@ -240,6 +240,12 @@ class Settings:
     maintenance_consecutive_failure_threshold: int = 3
     maintenance_duration_sample_limit: int = 100
 
+    # Database Backup & Disaster Recovery (Phase 2, Step 78)
+    backup_dir: str = "data/backups"
+    backup_retention_enabled: bool = False
+    backup_retention_max_count: int = 5
+    backup_scheduler_enabled: bool = False
+
     # Architectural Safety Invariants
     execution_locked: bool = True
     paper_trading_only: bool = True
@@ -417,6 +423,11 @@ class Settings:
             )
         object.__setattr__(self, "maintenance_active_session_policy", norm_policy)
 
+        if self.backup_retention_max_count < 1 or self.backup_retention_max_count > 10_000:
+            raise ConfigurationError(
+                f"Invalid BACKUP_RETENTION_MAX_COUNT: {self.backup_retention_max_count}. Must be an integer between 1 and 10000."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {
@@ -481,6 +492,10 @@ class Settings:
             "maintenance_history_limit": self.maintenance_history_limit,
             "maintenance_consecutive_failure_threshold": self.maintenance_consecutive_failure_threshold,
             "maintenance_duration_sample_limit": self.maintenance_duration_sample_limit,
+            "backup_dir": self.backup_dir,
+            "backup_retention_enabled": self.backup_retention_enabled,
+            "backup_retention_max_count": self.backup_retention_max_count,
+            "backup_scheduler_enabled": self.backup_scheduler_enabled,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -533,6 +548,7 @@ def get_settings(
         maint_history_limit = int(source.get("MAINTENANCE_HISTORY_LIMIT", "1000"))
         maint_failure_threshold = int(source.get("MAINTENANCE_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
         maint_sample_limit = int(source.get("MAINTENANCE_DURATION_SAMPLE_LIMIT", "100"))
+        backup_retention_max_count = int(source.get("BACKUP_RETENTION_MAX_COUNT", "5"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -598,6 +614,10 @@ def get_settings(
         maintenance_history_limit=maint_history_limit,
         maintenance_consecutive_failure_threshold=maint_failure_threshold,
         maintenance_duration_sample_limit=maint_sample_limit,
+        backup_dir=source.get("BACKUP_DIR", "data/backups"),
+        backup_retention_enabled=parse_bool(source.get("BACKUP_RETENTION_ENABLED", "false"), "BACKUP_RETENTION_ENABLED"),
+        backup_retention_max_count=backup_retention_max_count,
+        backup_scheduler_enabled=parse_bool(source.get("BACKUP_SCHEDULER_ENABLED", "false"), "BACKUP_SCHEDULER_ENABLED"),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

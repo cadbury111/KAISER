@@ -7,6 +7,15 @@ Includes durable Transactional Outbox for reliable event delivery.
 
 from __future__ import annotations
 
+from app.ledger.backup import (
+    BackupResult,
+    BackupVerificationResult,
+    DatabaseBackupService,
+    PruneResult,
+    RestoreResult,
+    compute_file_sha256,
+    is_protected_target_path,
+)
 from app.ledger.ledger import PaperLedger
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
 from app.ledger.outbox import (
@@ -28,4 +37,11 @@ __all__ = [
     "TransactionalOutbox",
     "DeduplicatingEventHandler",
     "redact_sensitive_payload",
+    "DatabaseBackupService",
+    "BackupResult",
+    "BackupVerificationResult",
+    "RestoreResult",
+    "PruneResult",
+    "is_protected_target_path",
+    "compute_file_sha256",
 ]
