@@ -4152,6 +4152,221 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
 
+            # 25. Backup Operations Status (/api/paper/backups/status)
+            if path == "/api/paper/backups/status":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                with backup_coordinator._lock:
+                    coord_status = {
+                        "is_running": backup_coordinator.is_running,
+                        "is_job_active": backup_coordinator.is_job_active,
+                        "scheduler_enabled": backup_coordinator.scheduler_enabled,
+                        "interval_seconds": backup_coordinator.interval_seconds,
+                        "last_successful_backup": backup_coordinator._last_successful_backup,
+                        "last_failed_backup": backup_coordinator._last_failed_backup,
+                        "last_backup_duration": backup_coordinator._last_backup_duration,
+                        "last_backup_size": backup_coordinator._last_backup_size,
+                        "last_checksum": backup_coordinator._last_checksum,
+                        "last_integrity_status": backup_coordinator._last_integrity_status,
+                        "consecutive_failures": backup_coordinator._consecutive_failures,
+                    }
+
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "coordinator": coord_status,
+                })
+                return
+
+            # 26. Backup Inventory (/api/paper/backups/inventory)
+            if path == "/api/paper/backups/inventory":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["50"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 50
+                limit_clamped = max(1, min(200, limit_val))
+
+                items = backup_coordinator.get_inventory(limit=limit_clamped)
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(items),
+                    "inventory": [item.to_dict() for item in items],
+                })
+                return
+
+            # 27. Backup Health (/api/paper/backups/health)
+            if path == "/api/paper/backups/health":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                health = backup_coordinator.get_health()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "health": health.to_dict(),
+                })
+                return
+
+            # 28. Backup Retention Preview (/api/paper/backups/retention/preview)
+            if path == "/api/paper/backups/retention/preview":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                max_count_param: Optional[int] = None
+                if "max_count" in query:
+                    try:
+                        max_count_param = max(1, min(1000, int(query["max_count"][0])))
+                    except (ValueError, TypeError):
+                        pass
+
+                max_age_param: Optional[float] = None
+                if "max_age_days" in query:
+                    try:
+                        max_age_param = max(0.1, float(query["max_age_days"][0]))
+                    except (ValueError, TypeError):
+                        pass
+
+                preview = backup_coordinator.prune_retention(
+                    dry_run=True,
+                    max_count=max_count_param,
+                    max_age_days=max_age_param,
+                )
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "retention_preview": preview.to_dict(),
+                })
+                return
+
+            # 29. Disaster Recovery Status (/api/paper/recovery/status)
+            if path == "/api/paper/recovery/status":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                latest_drill = backup_coordinator.get_latest_recovery_drill()
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "recovery_drill_enabled": backup_coordinator.recovery_drill_enabled,
+                    "latest_drill": latest_drill.to_dict() if latest_drill else None,
+                })
+                return
+
+            # 30. Disaster Recovery History (/api/paper/recovery/history)
+            if path == "/api/paper/recovery/history":
+                backup_coordinator = getattr(self.server, "backup_coordinator", None)
+                if backup_coordinator is None:
+                    coordinator = getattr(self.server, "paper_coordinator", None)
+                    if coordinator and hasattr(coordinator, "get_backup_coordinator"):
+                        backup_coordinator = coordinator.get_backup_coordinator()
+
+                if backup_coordinator is None:
+                    self._send_json_response({
+                        "status": "no_data",
+                        "read_only": True,
+                        "execution_locked": True,
+                        "broker_provider": "none",
+                        "message": "Backup operations coordinator not initialized or not attached.",
+                    })
+                    return
+
+                try:
+                    limit_val = int(query.get("limit", ["20"])[0])
+                except (ValueError, TypeError):
+                    limit_val = 20
+                limit_clamped = max(1, min(100, limit_val))
+
+                history = backup_coordinator.get_recovery_drill_history(limit=limit_clamped)
+                self._send_json_response({
+                    "status": "success",
+                    "read_only": True,
+                    "execution_locked": True,
+                    "broker_provider": "none",
+                    "count": len(history),
+                    "history": [drill.to_dict() for drill in history],
+                })
+                return
+
             # Unrecognized path: 404
             self._send_json_response({"error": "Not Found", "path": path}, status=HTTPStatus.NOT_FOUND)
 
@@ -4312,6 +4527,7 @@ class PortfolioDashboardServer:
         paper_execution_engine: Optional[Any] = None,
         allocation_manager: Optional[Any] = None,
         maintenance_scheduler: Optional[Any] = None,
+        backup_coordinator: Optional[Any] = None,
         auth_token: Optional[str] = None,
         require_auth: bool = False,
         workflow_coordinator: Optional[Any] = None,
@@ -4389,6 +4605,7 @@ class PortfolioDashboardServer:
         self.paper_execution_engine = paper_execution_engine
         self.allocation_manager = allocation_manager
         self.maintenance_scheduler = maintenance_scheduler
+        self.backup_coordinator = backup_coordinator
 
         if auth_token is not None:
             if not isinstance(auth_token, str):
@@ -4465,6 +4682,7 @@ class PortfolioDashboardServer:
             setattr(self._server, "paper_execution_engine", self.paper_execution_engine)
             setattr(self._server, "allocation_manager", self.allocation_manager)
             setattr(self._server, "maintenance_scheduler", self.maintenance_scheduler)
+            setattr(self._server, "backup_coordinator", self.backup_coordinator)
             setattr(self._server, "auth_token", self.auth_token)
             setattr(self._server, "require_auth", self.require_auth)
 

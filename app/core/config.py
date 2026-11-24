@@ -240,11 +240,18 @@ class Settings:
     maintenance_consecutive_failure_threshold: int = 3
     maintenance_duration_sample_limit: int = 100
 
-    # Database Backup & Disaster Recovery (Phase 2, Step 78)
+    # Database Backup & Disaster Recovery (Phase 2, Steps 78 & 79)
     backup_dir: str = "data/backups"
     backup_retention_enabled: bool = False
     backup_retention_max_count: int = 5
     backup_scheduler_enabled: bool = False
+    backup_interval_seconds: float = 3600.0
+    backup_health_max_age_seconds: float = 86400.0
+    backup_retention_max_age_days: float = 30.0
+    backup_prune_batch_size: int = 50
+    backup_retry_max_attempts: int = 3
+    backup_shutdown_timeout_seconds: float = 5.0
+    recovery_drill_enabled: bool = False
 
     # Architectural Safety Invariants
     execution_locked: bool = True
@@ -427,6 +434,30 @@ class Settings:
             raise ConfigurationError(
                 f"Invalid BACKUP_RETENTION_MAX_COUNT: {self.backup_retention_max_count}. Must be an integer between 1 and 10000."
             )
+        if self.backup_interval_seconds <= 0 or not math.isfinite(self.backup_interval_seconds):
+            raise ConfigurationError(
+                f"Invalid BACKUP_INTERVAL_SECONDS: {self.backup_interval_seconds}. Must be a positive finite float."
+            )
+        if self.backup_health_max_age_seconds <= 0 or not math.isfinite(self.backup_health_max_age_seconds):
+            raise ConfigurationError(
+                f"Invalid BACKUP_HEALTH_MAX_AGE_SECONDS: {self.backup_health_max_age_seconds}. Must be a positive finite float."
+            )
+        if self.backup_retention_max_age_days <= 0 or not math.isfinite(self.backup_retention_max_age_days):
+            raise ConfigurationError(
+                f"Invalid BACKUP_RETENTION_MAX_AGE_DAYS: {self.backup_retention_max_age_days}. Must be a positive finite float."
+            )
+        if self.backup_prune_batch_size < 1 or self.backup_prune_batch_size > 10_000:
+            raise ConfigurationError(
+                f"Invalid BACKUP_PRUNE_BATCH_SIZE: {self.backup_prune_batch_size}. Must be an integer between 1 and 10000."
+            )
+        if self.backup_retry_max_attempts < 0 or self.backup_retry_max_attempts > 10:
+            raise ConfigurationError(
+                f"Invalid BACKUP_RETRY_MAX_ATTEMPTS: {self.backup_retry_max_attempts}. Must be an integer between 0 and 10."
+            )
+        if self.backup_shutdown_timeout_seconds <= 0 or self.backup_shutdown_timeout_seconds > 60.0 or not math.isfinite(self.backup_shutdown_timeout_seconds):
+            raise ConfigurationError(
+                f"Invalid BACKUP_SHUTDOWN_TIMEOUT_SECONDS: {self.backup_shutdown_timeout_seconds}. Must be a positive finite float <= 60.0."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
@@ -496,6 +527,13 @@ class Settings:
             "backup_retention_enabled": self.backup_retention_enabled,
             "backup_retention_max_count": self.backup_retention_max_count,
             "backup_scheduler_enabled": self.backup_scheduler_enabled,
+            "backup_interval_seconds": self.backup_interval_seconds,
+            "backup_health_max_age_seconds": self.backup_health_max_age_seconds,
+            "backup_retention_max_age_days": self.backup_retention_max_age_days,
+            "backup_prune_batch_size": self.backup_prune_batch_size,
+            "backup_retry_max_attempts": self.backup_retry_max_attempts,
+            "backup_shutdown_timeout_seconds": self.backup_shutdown_timeout_seconds,
+            "recovery_drill_enabled": self.recovery_drill_enabled,
             "execution_locked": self.execution_locked,
             "paper_trading_only": self.paper_trading_only,
         }
@@ -549,6 +587,12 @@ def get_settings(
         maint_failure_threshold = int(source.get("MAINTENANCE_CONSECUTIVE_FAILURE_THRESHOLD", "3"))
         maint_sample_limit = int(source.get("MAINTENANCE_DURATION_SAMPLE_LIMIT", "100"))
         backup_retention_max_count = int(source.get("BACKUP_RETENTION_MAX_COUNT", "5"))
+        backup_interval = float(source.get("BACKUP_INTERVAL_SECONDS", "3600.0"))
+        backup_health_max_age = float(source.get("BACKUP_HEALTH_MAX_AGE_SECONDS", "86400.0"))
+        backup_retention_max_age = float(source.get("BACKUP_RETENTION_MAX_AGE_DAYS", "30.0"))
+        backup_prune_batch = int(source.get("BACKUP_PRUNE_BATCH_SIZE", "50"))
+        backup_retry_max = int(source.get("BACKUP_RETRY_MAX_ATTEMPTS", "3"))
+        backup_shutdown_timeout = float(source.get("BACKUP_SHUTDOWN_TIMEOUT_SECONDS", "5.0"))
     except ValueError as val_err:
         raise ConfigurationError(f"Invalid numeric configuration in environment: {val_err}") from val_err
 
@@ -618,6 +662,13 @@ def get_settings(
         backup_retention_enabled=parse_bool(source.get("BACKUP_RETENTION_ENABLED", "false"), "BACKUP_RETENTION_ENABLED"),
         backup_retention_max_count=backup_retention_max_count,
         backup_scheduler_enabled=parse_bool(source.get("BACKUP_SCHEDULER_ENABLED", "false"), "BACKUP_SCHEDULER_ENABLED"),
+        backup_interval_seconds=backup_interval,
+        backup_health_max_age_seconds=backup_health_max_age,
+        backup_retention_max_age_days=backup_retention_max_age,
+        backup_prune_batch_size=backup_prune_batch,
+        backup_retry_max_attempts=backup_retry_max,
+        backup_shutdown_timeout_seconds=backup_shutdown_timeout,
+        recovery_drill_enabled=parse_bool(source.get("RECOVERY_DRILL_ENABLED", "false"), "RECOVERY_DRILL_ENABLED"),
         execution_locked=parse_bool(source.get("EXECUTION_LOCKED", "true"), "EXECUTION_LOCKED"),
         paper_trading_only=parse_bool(source.get("PAPER_TRADING_ONLY", "true"), "PAPER_TRADING_ONLY"),
     )

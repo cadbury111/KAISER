@@ -16,6 +16,17 @@ from app.ledger.backup import (
     compute_file_sha256,
     is_protected_target_path,
 )
+from app.ledger.backup_coordinator import (
+    BackupHealthSnapshot,
+    BackupHealthStatus,
+    BackupInventoryItem,
+    BackupJobResult,
+    BackupOperationsCoordinator,
+    RecoveryDrillResult,
+    RecoveryDrillStatus,
+    RetentionGovernanceResult,
+    sanitize_backup_path_for_display,
+)
 from app.ledger.ledger import PaperLedger
 from app.ledger.models import LedgerEntryType, PaperLedgerEntry
 from app.ledger.outbox import (
@@ -44,4 +55,13 @@ __all__ = [
     "PruneResult",
     "is_protected_target_path",
     "compute_file_sha256",
+    "BackupOperationsCoordinator",
+    "BackupHealthStatus",
+    "RecoveryDrillStatus",
+    "BackupHealthSnapshot",
+    "BackupInventoryItem",
+    "RecoveryDrillResult",
+    "RetentionGovernanceResult",
+    "BackupJobResult",
+    "sanitize_backup_path_for_display",
 ]
