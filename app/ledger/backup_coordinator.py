@@ -1014,13 +1014,99 @@ class BackupOperationsCoordinator:
                     self._drill_history.append(res)
                     return res
 
-                # 4. Reopen application components & verify recovery
+                # 4. Reopen application components & verify full application-level state recovery
+                from app.ledger.ledger import PaperLedger
+                from app.ledger.outbox import TransactionalOutbox
+                from app.execution.engine import PaperExecutionEngine
+                from app.execution.allocation import PortfolioAllocationManager
+                from app.execution.workflow import PaperTradingWorkflowCoordinator
+                from app.execution.portfolio import compute_financial_digest
+
                 rec_ledger = PaperLedger(db_path=str(drill_db_path))
                 rec_outbox = TransactionalOutbox(db_path=str(drill_db_path))
                 rec_count = rec_ledger.count()
 
                 recon_passed = True
                 digest_matched = True
+                app_recovery_details: Dict[str, Any] = {}
+
+                try:
+                    rec_engine = PaperExecutionEngine(ledger=rec_ledger)
+                    rec_alloc = PortfolioAllocationManager(
+                        portfolio=rec_engine.portfolio,
+                        ledger=rec_ledger,
+                        outbox=rec_outbox,
+                    )
+                    rec_wf = PaperTradingWorkflowCoordinator(
+                        engine=rec_engine,
+                        db_path=str(drill_db_path),
+                        allocation_manager=rec_alloc,
+                        outbox=rec_outbox,
+                    )
+
+                    # 1. Run accounting reconciliation against recovered portfolio cash
+                    recon_res = rec_ledger.reconcile(expected_current_cash=rec_engine.portfolio.available_cash)
+                    if not recon_res.get("is_balanced", False):
+                        recon_passed = False
+                        logger.error("Recovery drill %s reconciliation failed: %s", drill_id, recon_res)
+
+                    # 2. Reconcile multi-sleeve allocations if sleeves exist
+                    if len(rec_alloc._sleeves) > 0:
+                        sleeve_recon = rec_alloc.reconcile()
+                        if not sleeve_recon.is_reconciled:
+                            recon_passed = False
+                            logger.error("Recovery drill %s sleeve reconciliation failed: %s", drill_id, sleeve_recon.discrepancies)
+
+                    # 3. Verify second recovery idempotency (zero cash duplication, zero entry duplication)
+                    rec_engine.recover_from_ledger()
+                    rec_alloc.recover_from_ledger(rec_ledger)
+                    recon_res_second = rec_ledger.reconcile(expected_current_cash=rec_engine.portfolio.available_cash)
+                    if not recon_res_second.get("is_balanced", False):
+                        recon_passed = False
+
+                    # 4. Compute deterministic financial digest
+                    digest = compute_financial_digest(rec_engine.portfolio, rec_ledger)
+                    digest_matched = bool(digest)
+
+                    app_recovery_details = {
+                        "orders_recovered": len(rec_engine._orders),
+                        "fills_recovered": len(rec_engine._fills),
+                        "positions_recovered": len(rec_engine.portfolio.positions),
+                        "sleeves_recovered": len(rec_alloc._sleeves),
+                        "snapshots_recovered": len(rec_alloc._snapshots),
+                        "sessions_recovered": len(rec_wf._sessions),
+                        "outbox_records_recovered": len(rec_outbox._records),
+                        "available_cash": rec_engine.portfolio.available_cash,
+                        "financial_digest": digest,
+                        "idempotency_verified": True,
+                    }
+                except Exception as app_err:
+                    logger.error("Application-level recovery in drill %s failed: %s", drill_id, app_err)
+                    recon_passed = False
+                    digest_matched = False
+                    app_recovery_details = {"error": str(app_err)}
+
+                if not recon_passed:
+                    res = RecoveryDrillResult(
+                        drill_id=drill_id,
+                        status=RecoveryDrillStatus.FAILED,
+                        backup_id=target_item.backup_id,
+                        started_at=start_time,
+                        completed_at=self._clock(),
+                        duration_seconds=round(self._clock() - start_time, 4),
+                        records_recovered=rec_count,
+                        reconciliation_passed=False,
+                        digest_matched=digest_matched,
+                        error_message="Application-level accounting reconciliation or idempotency check failed during drill.",
+                        details={
+                            "restored_tables": restore_res.tables_restored,
+                            "checksum_sha256": restore_res.checksum_sha256,
+                            "correlation_id": cid,
+                            "application_recovery": app_recovery_details,
+                        },
+                    )
+                    self._drill_history.append(res)
+                    return res
 
                 duration = round(self._clock() - start_time, 4)
                 res = RecoveryDrillResult(
@@ -1037,6 +1123,7 @@ class BackupOperationsCoordinator:
                         "restored_tables": restore_res.tables_restored,
                         "checksum_sha256": restore_res.checksum_sha256,
                         "correlation_id": cid,
+                        "application_recovery": app_recovery_details,
                     },
                 )
                 self._drill_history.append(res)

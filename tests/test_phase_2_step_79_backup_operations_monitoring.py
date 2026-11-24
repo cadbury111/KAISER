@@ -67,24 +67,13 @@ def sample_source_db(temp_dir: Path) -> Path:
     ledger = PaperLedger(db_path=str(db_path), initial_balance=50000.0)
     outbox = TransactionalOutbox(db_path=str(db_path))
 
-    # Record sample entry
-    entry = PaperLedgerEntry(
-        entry_id="init_entry",
-        timestamp=time.time(),
-        entry_type=LedgerEntryType.INITIAL_CAPITAL,
-        cash_change=50000.0,
-        cash_balance_after=50000.0,
-        fee=0.0,
-        realized_pnl=0.0,
-        idempotency_key="init_sample_key",
-    )
     rec = OutboxRecord(
         event_id="outbox_init",
         event_type="ledger.capital_allocated",
         schema_version=1,
         payload={"cash": 50000.0},
     )
-    ledger.record_entry_with_outbox(entry, rec)
+    outbox.stage_record(rec)
     return db_path
 
 
