@@ -459,6 +459,46 @@ class Settings:
                 f"Invalid BACKUP_SHUTDOWN_TIMEOUT_SECONDS: {self.backup_shutdown_timeout_seconds}. Must be a positive finite float <= 60.0."
             )
 
+        # Broker provider validation (must remain 'none' or 'paper' in test contexts)
+        norm_broker = self.broker_provider.strip().lower()
+        if norm_broker not in {"none", "paper"}:
+            raise ConfigurationError(
+                f"Unsupported BROKER_PROVIDER: '{self.broker_provider}'. Live external broker integration is "
+                f"strictly prohibited in Phase 2. Allowed providers are: 'none', 'paper'."
+            )
+        object.__setattr__(self, "broker_provider", norm_broker)
+
+        # Database URL validation (must be valid SQLite URL or :memory:)
+        if not self.database_url or not isinstance(self.database_url, str) or not self.database_url.strip():
+            raise ConfigurationError("DATABASE_URL cannot be empty. Must specify a valid SQLite connection URL.")
+        clean_db_url = self.database_url.strip()
+        if not (clean_db_url.startswith("sqlite://") or clean_db_url == ":memory:"):
+            raise ConfigurationError(
+                f"Unsupported database scheme in DATABASE_URL: '{self.database_url}'. "
+                f"KAISER only supports SQLite databases (e.g. 'sqlite:///data/kaiser.db' or ':memory:')."
+            )
+        object.__setattr__(self, "database_url", clean_db_url)
+
+        # Backup directory validation
+        if not self.backup_dir or not isinstance(self.backup_dir, str) or not self.backup_dir.strip():
+            raise ConfigurationError("BACKUP_DIR cannot be empty. Must specify a valid backup directory path.")
+
+        # Speech-to-Text provider validation
+        norm_stt = self.stt_provider.strip().lower()
+        if norm_stt not in {"mock", "local_whisper"}:
+            raise ConfigurationError(
+                f"Unsupported STT_PROVIDER: '{self.stt_provider}'. Allowed providers are: 'mock', 'local_whisper'."
+            )
+        object.__setattr__(self, "stt_provider", norm_stt)
+
+        # Text-to-Speech provider validation
+        norm_tts = self.tts_provider.strip().lower()
+        if norm_tts not in {"mock", "pyttsx3", "local_pyttsx3"}:
+            raise ConfigurationError(
+                f"Unsupported TTS_PROVIDER: '{self.tts_provider}'. Allowed providers are: 'mock', 'pyttsx3', 'local_pyttsx3'."
+            )
+        object.__setattr__(self, "tts_provider", norm_tts)
+
     def to_dict(self) -> dict[str, Any]:
         """Export settings as a dictionary."""
         return {

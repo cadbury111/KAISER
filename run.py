@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 
-from app.bootstrap import bootstrap_system, format_banner
+from app.bootstrap import bootstrap_system, format_banner, shutdown_system
 from app.core.exceptions import KaiserError
 
 
@@ -42,16 +42,16 @@ def main() -> int:
         status = bootstrap_system(settings=custom_settings)
         print(format_banner(status))
 
-        if launch_dashboard and status.portfolio_dashboard_server:
-            print(f"\nPortfolio Analytics Command Center active at {status.portfolio_dashboard_server.url}")
-            print("Press Ctrl+C to stop dashboard.")
-            try:
-                import time
+        try:
+            if launch_dashboard and status.portfolio_dashboard_server:
+                print(f"\nPortfolio Analytics Command Center active at {status.portfolio_dashboard_server.url}")
+                print("Press Ctrl+C to stop dashboard.")
                 while status.portfolio_dashboard_server.is_running:
                     time.sleep(1)
-            except KeyboardInterrupt:
-                print("\nStopping dashboard server...")
-                status.portfolio_dashboard_server.stop()
+        except KeyboardInterrupt:
+            print("\nShutting down KAISER gracefully...")
+        finally:
+            shutdown_system(status)
 
         return 0
     except KaiserError as err:

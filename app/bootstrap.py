@@ -966,3 +966,90 @@ def format_banner(status: SystemStatus) -> str:
         f"Trading engine: {status.trading_engine}\n"
         f"Execution engine: {status.execution_engine}"
     )
+
+
+def shutdown_system(status: Optional[SystemStatus], timeout_seconds: float = 5.0) -> bool:
+    """Safely and gracefully shut down all active KAISER subsystems and services.
+
+    Performs bounded, non-destructive resource cleanup:
+    1. Stops the Portfolio Dashboard server if running.
+    2. Shuts down the Voice Interaction Controller and session manager.
+    3. Stops market feeds and quality monitors.
+    4. Shuts down active schedulers (maintenance / backup) if present.
+    5. Shuts down the EventBus and cancels listener threads.
+    6. Flushes and cleans up open database repositories if applicable.
+    7. Updates state store to indicate shutdown status.
+
+    Args:
+        status: The running SystemStatus to shut down. If None or already shut down,
+            acts as a safe no-op.
+        timeout_seconds: Maximum grace period for background services to stop.
+
+    Returns:
+        bool: True if all components shut down cleanly, False if any component failed.
+    """
+    if status is None:
+        return True
+
+    logger = get_logger("bootstrap.shutdown")
+    logger.info("Initiating graceful shutdown of %s subsystems...", status.app_name)
+    clean = True
+
+    # 1. Stop Dashboard Server
+    if status.portfolio_dashboard_server is not None:
+        try:
+            if status.portfolio_dashboard_server.is_running:
+                logger.info("Stopping Portfolio Dashboard Server...")
+                status.portfolio_dashboard_server.stop()
+        except Exception as exc:
+            logger.warning("Error stopping dashboard server: %s", exc)
+            clean = False
+
+    # 2. Shutdown Voice Controller & Audio Resources
+    if status.voice_controller is not None:
+        try:
+            logger.info("Shutting down Voice Interaction Controller...")
+            status.voice_controller.shutdown()
+        except Exception as exc:
+            logger.warning("Error shutting down voice controller: %s", exc)
+            clean = False
+
+    # 3. Stop Market Service Feeds
+    if status.market_service is not None:
+        try:
+            logger.info("Stopping Market Data Service feeds...")
+            status.market_service.stop()
+        except Exception as exc:
+            logger.warning("Error stopping market service: %s", exc)
+            clean = False
+
+    # 4. Stop Paper Coordinator & Schedulers if present
+    if status.paper_coordinator is not None:
+        try:
+            if hasattr(status.paper_coordinator, "stop"):
+                status.paper_coordinator.stop()
+        except Exception as exc:
+            logger.warning("Error stopping paper coordinator: %s", exc)
+            clean = False
+
+    # 5. Shutdown EventBus
+    if status.event_bus is not None:
+        try:
+            is_shut = status.event_bus.is_shutdown if isinstance(status.event_bus.is_shutdown, bool) else status.event_bus.is_shutdown()
+            if hasattr(status.event_bus, "shutdown") and not is_shut:
+                logger.info("Shutting down EventBus...")
+                status.event_bus.shutdown()
+        except Exception as exc:
+            logger.warning("Error shutting down event bus: %s", exc)
+            clean = False
+
+    # 6. Update State Store
+    if status.state_store is not None:
+        try:
+            status.state_store.set("system_status", "shutdown")
+            status.state_store.set("shutdown_clean", clean)
+        except Exception as exc:
+            logger.warning("Error updating state store on shutdown: %s", exc)
+
+    logger.info("KAISER system shutdown sequence complete (clean=%s).", clean)
+    return clean

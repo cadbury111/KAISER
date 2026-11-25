@@ -297,3 +297,14 @@ class MarketDataService:
             return self.ingest_order_book(record, correlation_id=correlation_id)
 
         return None
+
+    def stop(self) -> None:
+        """Stop all registered feeds and release market data resources."""
+        for name, feed in list(self._feeds.items()):
+            if hasattr(feed, "stop") and callable(feed.stop):
+                try:
+                    feed.stop()
+                except Exception as exc:
+                    logger.warning("Error stopping feed '%s': %s", name, exc)
+        self._feeds.clear()
+        logger.info("MarketDataService stopped and feeds cleared.")

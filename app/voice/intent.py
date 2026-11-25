@@ -145,7 +145,7 @@ class VoiceCommandIntentResolver:
             ),
             (
                 re.compile(
-                    r"\b(place\s+order|execute\s+trade|send\s+order|market\s+order|limit\s+order)\b",
+                    r"\b(place\s+(?:an?\s+|the\s+)?order|execute\s+(?:an?\s+|the\s+)?(?:trade|order)|send\s+(?:an?\s+|the\s+)?order|market\s+order|limit\s+order)\b",
                     re.IGNORECASE,
                 ),
                 "order_placement",
@@ -159,7 +159,7 @@ class VoiceCommandIntentResolver:
             ),
             (
                 re.compile(
-                    r"\b(vaangu|vithuru|order\s+podu|trade\s+execute\s+pannu)\b",
+                    r"\b(vaangu|vangiko|vaangiko|vithuru|order\s+podu|trade\s+execute\s+pannu)\b",
                     re.IGNORECASE,
                 ),
                 "tanglish_trade_directive",

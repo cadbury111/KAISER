@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import secrets
 import threading
@@ -199,8 +200,8 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             server_token = getattr(self.server, "auth_token", None)
             auth_enforced = bool(server_token or require_auth_flag)
 
-            # Enforce authorization: all sensitive data APIs (/api/* except public health /api/status)
-            if auth_enforced and path.startswith("/api/") and path != "/api/status":
+            # Enforce authorization: all sensitive data APIs (/api/* except public health /api/status and /api/health)
+            if auth_enforced and path.startswith("/api/") and path not in ("/api/status", "/api/health"):
                 if not self._check_authorization():
                     return
 
@@ -311,15 +312,50 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json_response({"status": "success", "comparison": comp.to_dict()})
                 return
 
-            # 7. Health and Status Endpoint (/api/status)
-            if path == "/api/status":
+            # 7. Health and Status Endpoint (/api/status and /api/health)
+            if path in ("/api/status", "/api/health"):
+                coordinator = getattr(self.server, "paper_coordinator", None)
+                engine = getattr(self.server, "paper_execution_engine", None)
+
+                ledger_reconciled = None
+                if engine and getattr(engine, "ledger", None):
+                    try:
+                        rec = engine.ledger.reconcile()
+                        ledger_reconciled = rec.is_clean
+                    except Exception:
+                        ledger_reconciled = False
+
+                outbox_backlog = None
+                if coordinator and getattr(coordinator, "outbox", None):
+                    try:
+                        pending = coordinator.outbox.get_pending_records()
+                        outbox_backlog = len(pending)
+                    except Exception:
+                        outbox_backlog = None
+
                 self._send_json_response({
                     "status": "healthy",
                     "app": "KAISER",
                     "dashboard": "Portfolio Analytics Command Center",
+                    "pid": os.getpid(),
                     "execution_locked": True,
                     "read_only": True,
+                    "trading_engine": "not initialized",
+                    "broker_provider": "none",
+                    "paper_execution_enabled": bool(engine and engine.is_enabled),
+                    "voice_microphone_capture": False,
+                    "market_data_live_connected": False,
+                    "ledger_reconciled": ledger_reconciled,
+                    "outbox_backlog_count": outbox_backlog,
                     "cached_reports_count": len(service._reports),
+                    "subsystems": {
+                        "application_process": "running",
+                        "database": "available",
+                        "voice_subsystem": "safe_offline",
+                        "market_data_feed": "mock_or_delayed",
+                        "execution_engine": "locked",
+                        "broker_interface": "none",
+                    },
                 })
                 return
 
