@@ -321,15 +321,17 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 if engine and getattr(engine, "ledger", None):
                     try:
                         rec = engine.ledger.reconcile()
-                        ledger_reconciled = rec.is_clean
+                        ledger_reconciled = rec.get("is_balanced", False) if isinstance(rec, dict) else getattr(rec, "is_clean", False)
                     except Exception:
                         ledger_reconciled = False
 
                 outbox_backlog = None
                 if coordinator and getattr(coordinator, "outbox", None):
                     try:
-                        pending = coordinator.outbox.get_pending_records()
-                        outbox_backlog = len(pending)
+                        if hasattr(coordinator.outbox, "get_pending_batch"):
+                            outbox_backlog = len(coordinator.outbox.get_pending_batch())
+                        elif hasattr(coordinator.outbox, "count_records"):
+                            outbox_backlog = coordinator.outbox.count_records()
                     except Exception:
                         outbox_backlog = None
 
