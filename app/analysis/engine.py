@@ -22,6 +22,8 @@ from app.analysis.indicators import (
     classify_bollinger,
     classify_macd,
     classify_rsi,
+    extract_depth_features,
+    extract_trade_flow_features,
 )
 from app.analysis.models import (
     SUPPORTED_TIMEFRAMES,
@@ -71,6 +73,8 @@ class TechnicalAnalysisEngine:
         self._series: Dict[Tuple[str, str], RollingBarSeries] = {}
         self._latest_vectors: Dict[Tuple[str, str], TechnicalFeatureVector] = {}
         self._stream_rejected_unhealthy: Dict[Tuple[str, str], int] = {}
+        self._depth_analytics: Dict[str, Any] = {}
+        self._trade_flow_analytics: Dict[str, Any] = {}
 
         self._counters = {
             "bars_processed": 0,
@@ -78,6 +82,40 @@ class TechnicalAnalysisEngine:
             "feature_vectors_computed": 0,
             "indicators_calculated": 0,
         }
+
+    def set_depth_analytics(self, analytics: Any) -> None:
+        """Store latest evaluated Level 2 depth analytics for a symbol."""
+        if analytics is not None and hasattr(analytics, "symbol"):
+            sym = str(analytics.symbol).strip().upper()
+            with self._lock:
+                self._depth_analytics[sym] = analytics
+
+    def get_depth_analytics(self, symbol: str) -> Optional[Any]:
+        """Retrieve latest Level 2 depth analytics for a symbol if present."""
+        with self._lock:
+            return self._depth_analytics.get(symbol.strip().upper())
+
+    def get_depth_features(self, symbol: str) -> Dict[str, Any]:
+        """Extract standard read-only depth features for a symbol."""
+        analytics = self.get_depth_analytics(symbol)
+        return extract_depth_features(analytics)
+
+    def set_trade_flow_analytics(self, analytics: Any) -> None:
+        """Store latest evaluated trade flow analytics for a symbol."""
+        if analytics is not None and hasattr(analytics, "symbol"):
+            sym = str(analytics.symbol).strip().upper()
+            with self._lock:
+                self._trade_flow_analytics[sym] = analytics
+
+    def get_trade_flow_analytics(self, symbol: str) -> Optional[Any]:
+        """Retrieve latest trade flow analytics for a symbol if present."""
+        with self._lock:
+            return self._trade_flow_analytics.get(symbol.strip().upper())
+
+    def get_trade_flow_features(self, symbol: str) -> Dict[str, Any]:
+        """Extract standard read-only trade flow features for a symbol."""
+        analytics = self.get_trade_flow_analytics(symbol)
+        return extract_trade_flow_features(analytics)
 
     def _normalize_tf(self, timeframe: str) -> str:
         """Helper to obtain canonical timeframe with fallback."""

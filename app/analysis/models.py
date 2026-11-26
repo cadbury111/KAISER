@@ -25,6 +25,9 @@ class IndicatorType(str, Enum):
     BOLLINGER_BANDS = "BOLLINGER_BANDS"
     ATR = "ATR"
     CUSTOM = "CUSTOM"
+    ORDER_BOOK_IMBALANCE = "ORDER_BOOK_IMBALANCE"
+    MICRO_PRICE = "MICRO_PRICE"
+    DEPTH_SPREAD = "DEPTH_SPREAD"
 
 
 class SignalDirection(str, Enum):

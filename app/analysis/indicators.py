@@ -402,3 +402,137 @@ def classify_bollinger(price: float, bands: Optional[Dict[str, float]]) -> Signa
     if price < middle:
         return SignalDirection.BEARISH
     return SignalDirection.NEUTRAL
+
+
+def classify_order_book_imbalance(
+    imbalance: Optional[float],
+    threshold: float = 0.05,
+) -> SignalDirection:
+    """Classify Order Book Imbalance into BULLISH (buy pressure), BEARISH (sell pressure), or NEUTRAL.
+
+    Args:
+        imbalance: OBI value in [-1.0, 1.0] or None.
+        threshold: Sensitivity threshold (default 0.05).
+
+    Returns:
+        SignalDirection: BULLISH if imbalance > threshold, BEARISH if < -threshold, else NEUTRAL.
+    """
+    if imbalance is None or not math.isfinite(imbalance):
+        return SignalDirection.NEUTRAL
+    if imbalance > threshold:
+        return SignalDirection.BULLISH
+    if imbalance < -threshold:
+        return SignalDirection.BEARISH
+    return SignalDirection.NEUTRAL
+
+
+def extract_depth_features(analytics: Optional[Any]) -> Dict[str, Any]:
+    """Extract standard read-only microstructure depth features for downstream specialist agents.
+
+    Guarantees deterministic, clean serializable dictionary. If analytics is None or invalid,
+    defaults safely to neutral / zero values without raising exceptions.
+
+    Args:
+        analytics: MarketDepthAnalytics instance or None.
+
+    Returns:
+        Dict[str, Any]: Dictionary of numerical and categorical depth features.
+    """
+    if analytics is None or not getattr(analytics, "is_valid", False):
+        return {
+            "depth_available": False,
+            "order_book_imbalance": 0.0,
+            "order_book_pressure": "NEUTRAL",
+            "micro_price": None,
+            "depth_slope_ratio": 0.0,
+            "relative_spread_bps": None,
+            "volume_weighted_spread": None,
+            "cumulative_bid_quantity": 0.0,
+            "cumulative_ask_quantity": 0.0,
+        }
+
+    imb = getattr(analytics, "imbalance", None)
+    mp = getattr(analytics, "micro_price", None)
+    ds = getattr(analytics, "depth_slope", None)
+    ws = getattr(analytics, "weighted_spread", None)
+
+    return {
+        "depth_available": True,
+        "order_book_imbalance": imb.value if imb else 0.0,
+        "order_book_pressure": imb.interpretation.value if imb else "NEUTRAL",
+        "micro_price": mp.price if mp else None,
+        "depth_slope_ratio": ds.ratio if ds else 0.0,
+        "relative_spread_bps": ws.relative_spread_bps if ws else None,
+        "volume_weighted_spread": ws.volume_weighted_spread if ws else None,
+        "cumulative_bid_quantity": getattr(analytics, "cumulative_bid_quantity", 0.0),
+        "cumulative_ask_quantity": getattr(analytics, "cumulative_ask_quantity", 0.0),
+    }
+
+
+def classify_trade_flow_imbalance(
+    tfi: Optional[float],
+    threshold: float = 0.05,
+) -> SignalDirection:
+    """Classify Trade Flow Imbalance into BULLISH (buyer aggression), BEARISH (seller aggression), or NEUTRAL.
+
+    Args:
+        tfi: TFI value in [-1.0, 1.0] or None.
+        threshold: Sensitivity threshold (default 0.05).
+
+    Returns:
+        SignalDirection: BULLISH if tfi > threshold, BEARISH if < -threshold, else NEUTRAL.
+    """
+    if tfi is None or not math.isfinite(tfi):
+        return SignalDirection.NEUTRAL
+    if tfi > threshold:
+        return SignalDirection.BULLISH
+    if tfi < -threshold:
+        return SignalDirection.BEARISH
+    return SignalDirection.NEUTRAL
+
+
+def extract_trade_flow_features(analytics: Optional[Any]) -> Dict[str, Any]:
+    """Extract standard read-only trade flow features for downstream specialist agents.
+
+    Guarantees deterministic, clean serializable dictionary. If analytics is None or invalid,
+    defaults safely to neutral / zero values without raising exceptions.
+
+    Args:
+        analytics: TradeFlowAnalytics instance or None.
+
+    Returns:
+        Dict[str, Any]: Dictionary of numerical and categorical trade flow features.
+    """
+    if analytics is None or not getattr(analytics, "is_valid", False):
+        return {
+            "trade_flow_available": False,
+            "trade_flow_imbalance": 0.0,
+            "tfi_ewma": 0.0,
+            "rolling_tfi": 0.0,
+            "total_traded_volume": 0.0,
+            "buy_aggressor_volume": 0.0,
+            "sell_aggressor_volume": 0.0,
+            "unknown_volume": 0.0,
+            "trade_count": 0,
+            "trade_flow_pressure": "NEUTRAL",
+            "combined_pressure": None,
+            "vwap": None,
+        }
+
+    interp = getattr(analytics, "interpretation", None)
+    comb = getattr(analytics, "combined_diagnostic", None)
+
+    return {
+        "trade_flow_available": True,
+        "trade_flow_imbalance": getattr(analytics, "trade_flow_imbalance", 0.0),
+        "tfi_ewma": getattr(analytics, "tfi_ewma", 0.0),
+        "rolling_tfi": getattr(analytics, "rolling_tfi", 0.0),
+        "total_traded_volume": getattr(analytics, "total_traded_volume", 0.0),
+        "buy_aggressor_volume": getattr(analytics, "buy_aggressor_volume", 0.0),
+        "sell_aggressor_volume": getattr(analytics, "sell_aggressor_volume", 0.0),
+        "unknown_volume": getattr(analytics, "unknown_volume", 0.0),
+        "trade_count": getattr(analytics, "trade_count", 0),
+        "trade_flow_pressure": interp.value if hasattr(interp, "value") else str(interp or "NEUTRAL"),
+        "combined_pressure": comb.value if hasattr(comb, "value") else (str(comb) if comb else None),
+        "vwap": getattr(analytics, "vwap", None),
+    }

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -265,6 +266,8 @@ class OrderBookSnapshot:
         bids: Tuple of bid levels, sorted by price descending.
         asks: Tuple of ask levels, sorted by price ascending.
         source: Data source tag.
+        sequence_number: Optional sequence number from upstream feed.
+        is_valid: Boolean indicating whether snapshot is consistent and uncrossed.
     """
 
     symbol: str
@@ -273,6 +276,8 @@ class OrderBookSnapshot:
     bids: Tuple[OrderBookLevel, ...] = ()
     asks: Tuple[OrderBookLevel, ...] = ()
     source: str = "mock"
+    sequence_number: Optional[int] = None
+    is_valid: bool = True
 
     def __post_init__(self) -> None:
         """Validate and freeze depth levels."""
@@ -333,5 +338,248 @@ class OrderBookSnapshot:
             "best_bid": self.best_bid,
             "best_ask": self.best_ask,
             "spread": self.spread,
+            "source": self.source,
+            "sequence_number": self.sequence_number,
+            "is_valid": self.is_valid,
+        }
+
+
+class DeltaAction(str, Enum):
+    """Operation types for Level 2 order book updates."""
+
+    ADD = "ADD"
+    UPDATE = "UPDATE"
+    DELETE = "DELETE"
+
+
+class BookSide(str, Enum):
+    """Order book sides."""
+
+    BID = "BID"
+    ASK = "ASK"
+
+
+@dataclass(frozen=True)
+class OrderBookDelta:
+    """Immutable Level 2 order book price level delta.
+
+    Attributes:
+        symbol: Ticker symbol.
+        side: Order book side (BID or ASK).
+        price: Price level (strictly finite and positive).
+        quantity: Available volume at price level (strictly finite and non-negative; 0 removes level).
+        action: Operation type (ADD, UPDATE, DELETE).
+        timestamp: POSIX UTC timestamp.
+        sequence_number: Optional monotonic sequence number for gap/duplicate detection.
+        orders_count: Optional count of resting orders at price level.
+        exchange: Exchange identifier.
+        source: Data source tag.
+    """
+
+    symbol: str
+    side: BookSide
+    price: float
+    quantity: float
+    action: DeltaAction
+    timestamp: float
+    sequence_number: Optional[int] = None
+    orders_count: Optional[int] = None
+    exchange: str = "NSE"
+    source: str = "websocket"
+
+    def __post_init__(self) -> None:
+        """Validate delta invariants fail-closed."""
+        if not self.symbol or not isinstance(self.symbol, str) or not self.symbol.strip():
+            raise ValidationError("OrderBookDelta symbol must be a non-empty string.")
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+
+        if not self.exchange or not isinstance(self.exchange, str) or not self.exchange.strip():
+            raise ValidationError("OrderBookDelta exchange must be a non-empty string.")
+        object.__setattr__(self, "exchange", self.exchange.strip().upper())
+
+        # Normalize side
+        if isinstance(self.side, str):
+            clean_side = self.side.strip().upper()
+            if clean_side not in ("BID", "ASK"):
+                raise ValidationError(f"Invalid OrderBookDelta side: {self.side}. Must be 'BID' or 'ASK'.")
+            object.__setattr__(self, "side", BookSide(clean_side))
+        elif not isinstance(self.side, BookSide):
+            raise ValidationError(f"OrderBookDelta side must be BookSide or str, got {type(self.side).__name__}")
+
+        # Normalize action
+        if isinstance(self.action, str):
+            clean_act = self.action.strip().upper()
+            if clean_act not in ("ADD", "UPDATE", "DELETE"):
+                raise ValidationError(f"Invalid OrderBookDelta action: {self.action}. Must be ADD, UPDATE, or DELETE.")
+            object.__setattr__(self, "action", DeltaAction(clean_act))
+        elif not isinstance(self.action, DeltaAction):
+            raise ValidationError(f"OrderBookDelta action must be DeltaAction or str, got {type(self.action).__name__}")
+
+        # Price validation: finite and positive
+        if not math.isfinite(self.price) or self.price <= 0:
+            raise ValidationError(f"OrderBookDelta price must be a finite positive float, got {self.price}")
+
+        # Quantity validation: finite and non-negative
+        if not math.isfinite(self.quantity) or self.quantity < 0:
+            raise ValidationError(f"OrderBookDelta quantity must be a finite non-negative float, got {self.quantity}")
+
+        # Timestamp validation: finite and positive
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"OrderBookDelta timestamp must be a finite positive float, got {self.timestamp}")
+
+        # Sequence number validation
+        if self.sequence_number is not None:
+            if not isinstance(self.sequence_number, int) or self.sequence_number < 0:
+                raise ValidationError(
+                    f"OrderBookDelta sequence_number must be a non-negative integer, got {self.sequence_number}"
+                )
+
+        # Orders count validation
+        if self.orders_count is not None:
+            if not isinstance(self.orders_count, int) or self.orders_count < 0:
+                raise ValidationError(
+                    f"OrderBookDelta orders_count must be a non-negative integer, got {self.orders_count}"
+                )
+
+    @property
+    def iso_timestamp(self) -> str:
+        """Return the ISO-8601 UTC timestamp string."""
+        return datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert OrderBookDelta into a clean serializable dictionary."""
+        return {
+            "symbol": self.symbol,
+            "exchange": self.exchange,
+            "side": self.side.value,
+            "price": self.price,
+            "quantity": self.quantity,
+            "action": self.action.value,
+            "timestamp": self.timestamp,
+            "iso_timestamp": self.iso_timestamp,
+            "sequence_number": self.sequence_number,
+            "orders_count": self.orders_count,
+            "source": self.source,
+        }
+
+
+class AggressorSide(str, Enum):
+    """Categorical classification of trade initiator (aggressor side)."""
+
+    BUY_INITIATED = "BUY_INITIATED"
+    SELL_INITIATED = "SELL_INITIATED"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True)
+class TradeTick:
+    """Immutable executed market trade tick.
+
+    Attributes:
+        symbol: Ticker symbol (e.g. 'RELIANCE', 'TCS').
+        price: Executed trade price (finite, strictly positive).
+        volume: Executed trade quantity / volume (finite, strictly positive).
+        timestamp: Exchange execution POSIX UTC timestamp.
+        received_timestamp: Local system receipt POSIX UTC timestamp.
+        trade_id: Unique trade execution identifier from upstream feed.
+        sequence_number: Optional monotonic sequence number.
+        aggressor_side: Party classification (BUY_INITIATED, SELL_INITIATED, UNKNOWN).
+        exchange: Exchange identifier.
+        source: Data source tag.
+    """
+
+    symbol: str
+    price: float
+    volume: float
+    timestamp: float
+    received_timestamp: float
+    trade_id: str
+    sequence_number: Optional[int] = None
+    aggressor_side: AggressorSide = AggressorSide.UNKNOWN
+    exchange: str = "NSE"
+    source: str = "trade_feed"
+
+    def __post_init__(self) -> None:
+        """Validate trade tick invariants fail-closed."""
+        if not self.symbol or not isinstance(self.symbol, str) or not self.symbol.strip():
+            raise ValidationError("TradeTick symbol must be a non-empty string.")
+        object.__setattr__(self, "symbol", self.symbol.strip().upper())
+
+        if not self.exchange or not isinstance(self.exchange, str) or not self.exchange.strip():
+            raise ValidationError("TradeTick exchange must be a non-empty string.")
+        object.__setattr__(self, "exchange", self.exchange.strip().upper())
+
+        if not self.trade_id or not isinstance(self.trade_id, str) or not str(self.trade_id).strip():
+            raise ValidationError("TradeTick trade_id must be a non-empty string.")
+        object.__setattr__(self, "trade_id", str(self.trade_id).strip())
+
+        # Price validation: finite and strictly positive
+        if not math.isfinite(self.price) or self.price <= 0:
+            raise ValidationError(f"TradeTick price must be a finite positive float, got {self.price}")
+
+        # Volume validation: finite and strictly positive
+        if not math.isfinite(self.volume) or self.volume <= 0:
+            raise ValidationError(f"TradeTick volume must be a finite positive float, got {self.volume}")
+
+        # Timestamps validation
+        if not math.isfinite(self.timestamp) or self.timestamp <= 0:
+            raise ValidationError(f"TradeTick timestamp must be a positive float, got {self.timestamp}")
+
+        if not math.isfinite(self.received_timestamp) or self.received_timestamp <= 0:
+            raise ValidationError(
+                f"TradeTick received_timestamp must be a positive float, got {self.received_timestamp}"
+            )
+
+        # Sequence number validation
+        if self.sequence_number is not None:
+            if not isinstance(self.sequence_number, int) or self.sequence_number < 0:
+                raise ValidationError(
+                    f"TradeTick sequence_number must be a non-negative integer, got {self.sequence_number}"
+                )
+
+        # Normalize aggressor_side
+        if isinstance(self.aggressor_side, str):
+            clean_side = self.aggressor_side.strip().upper()
+            if clean_side not in ("BUY_INITIATED", "SELL_INITIATED", "UNKNOWN"):
+                raise ValidationError(
+                    f"Invalid TradeTick aggressor_side: '{self.aggressor_side}'. "
+                    f"Must be BUY_INITIATED, SELL_INITIATED, or UNKNOWN."
+                )
+            object.__setattr__(self, "aggressor_side", AggressorSide(clean_side))
+        elif not isinstance(self.aggressor_side, AggressorSide):
+            raise ValidationError(
+                f"TradeTick aggressor_side must be AggressorSide or str, got {type(self.aggressor_side).__name__}"
+            )
+
+    @property
+    def quantity(self) -> float:
+        """Alias for volume to satisfy quantity-based callers."""
+        return self.volume
+
+    @property
+    def iso_timestamp(self) -> str:
+        """Return the exchange execution ISO-8601 UTC timestamp string."""
+        return datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat()
+
+    @property
+    def iso_received_timestamp(self) -> str:
+        """Return the local receipt ISO-8601 UTC timestamp string."""
+        return datetime.fromtimestamp(self.received_timestamp, tz=timezone.utc).isoformat()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert TradeTick into a clean serializable dictionary."""
+        return {
+            "symbol": self.symbol,
+            "exchange": self.exchange,
+            "trade_id": self.trade_id,
+            "price": self.price,
+            "volume": self.volume,
+            "quantity": self.volume,
+            "timestamp": self.timestamp,
+            "iso_timestamp": self.iso_timestamp,
+            "received_timestamp": self.received_timestamp,
+            "iso_received_timestamp": self.iso_received_timestamp,
+            "sequence_number": self.sequence_number,
+            "aggressor_side": self.aggressor_side.value,
             "source": self.source,
         }

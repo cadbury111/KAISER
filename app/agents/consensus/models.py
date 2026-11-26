@@ -140,6 +140,30 @@ class AgentConsensusReport:
         # Safety invariant: strictly prohibit trading recommendations
         validate_no_prohibited_fields(self.to_dict())
 
+    @property
+    def depth_features(self) -> Optional[Dict[str, Any]]:
+        """Retrieve Level 2 depth analytics features from specialist findings if present."""
+        for finding in self.agent_findings.values():
+            if finding.facts and "depth" in finding.facts:
+                return finding.facts["depth"]
+        return None
+
+    @property
+    def trade_flow_features(self) -> Optional[Dict[str, Any]]:
+        """Retrieve trade flow analytics features from specialist findings if present."""
+        for finding in self.agent_findings.values():
+            if finding.facts and "trade_flow" in finding.facts:
+                return finding.facts["trade_flow"]
+        return None
+
+    @property
+    def microstructure_context(self) -> Dict[str, Any]:
+        """Aggregate read-only microstructure depth and trade flow context for consensus visibility."""
+        return {
+            "depth": self.depth_features,
+            "trade_flow": self.trade_flow_features,
+        }
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "consensus_id": self.consensus_id,

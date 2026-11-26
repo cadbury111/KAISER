@@ -14,6 +14,14 @@ from app.market.feeds.twelve_data import (
     TwelveDataMarketFeed,
     TwelveDataTransport,
 )
+from app.market.feeds.websocket import (
+    AsyncWebSocketTransport,
+    MockWebSocketTransport,
+    ReconnectPolicy,
+    WebSocketFeedConfig,
+    WebSocketFeedState,
+    WebSocketMarketFeed,
+)
 
 __all__ = [
     "MarketFeed",
@@ -27,5 +35,11 @@ __all__ = [
     "TwelveDataTransport",
     "StandardHttpTransport",
     "MockTwelveDataTransport",
+    "WebSocketMarketFeed",
+    "WebSocketFeedState",
+    "AsyncWebSocketTransport",
+    "MockWebSocketTransport",
+    "ReconnectPolicy",
+    "WebSocketFeedConfig",
 ]
 

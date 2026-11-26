@@ -12,7 +12,15 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from app.core.exceptions import ValidationError
-from app.market.models import Bar, OrderBookLevel, OrderBookSnapshot, Quote
+from app.market.models import (
+    Bar,
+    BookSide,
+    DeltaAction,
+    OrderBookDelta,
+    OrderBookLevel,
+    OrderBookSnapshot,
+    Quote,
+)
 from app.market.validators import validate_raw_bar_dict, validate_raw_quote_dict
 
 
@@ -253,5 +261,58 @@ class MarketDataNormalizer:
             timestamp=timestamp,
             bids=parse_levels(raw_bids),
             asks=parse_levels(raw_asks),
+            source=source,
+        )
+
+    @staticmethod
+    def normalize_order_book_delta(raw: Dict[str, Any], default_source: str = "unknown") -> OrderBookDelta:
+        """Normalize a raw dictionary into a validated immutable OrderBookDelta.
+
+        Args:
+            raw: Dictionary containing raw order book delta fields.
+            default_source: Fallback source name.
+
+        Returns:
+            OrderBookDelta: Validated immutable delta.
+        """
+        if not isinstance(raw, dict):
+            raise ValidationError(f"Raw delta data must be a dictionary, got {type(raw).__name__}")
+
+        symbol = str(raw.get("symbol") or raw.get("Symbol") or raw.get("ticker") or "")
+        exchange = str(raw.get("exchange") or "NSE")
+        source = str(raw.get("source") or default_source)
+
+        raw_side = str(raw.get("side") or raw.get("Side") or "BID").strip().upper()
+        raw_action = str(raw.get("action") or raw.get("operation") or raw.get("type") or "UPDATE").strip().upper()
+
+        raw_price = raw.get("price") if "price" in raw else raw.get("level")
+        price = parse_float(raw_price, "price")
+        assert price is not None
+
+        raw_qty = raw.get("quantity") if "quantity" in raw else raw.get("size") if "size" in raw else raw.get("qty", 0.0)
+        quantity = parse_float(raw_qty, "quantity")
+        assert quantity is not None
+
+        raw_ts = raw.get("timestamp") or raw.get("time") or time.time()
+        timestamp = parse_timestamp(raw_ts)
+
+        seq = int(raw["sequence_number"]) if "sequence_number" in raw and raw["sequence_number"] is not None else None
+        if seq is None and "sequence" in raw and raw["sequence"] is not None:
+            seq = int(raw["sequence"])
+        if seq is None and "seq" in raw and raw["seq"] is not None:
+            seq = int(raw["seq"])
+
+        orders_count = int(raw["orders_count"]) if "orders_count" in raw and raw["orders_count"] is not None else None
+
+        return OrderBookDelta(
+            symbol=symbol,
+            side=BookSide(raw_side),
+            price=price,
+            quantity=quantity,
+            action=DeltaAction(raw_action),
+            timestamp=timestamp,
+            sequence_number=seq,
+            orders_count=orders_count,
+            exchange=exchange,
             source=source,
         )

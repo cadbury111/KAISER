@@ -322,6 +322,18 @@ class TechnicalAnalysisAgent(BaseAgent):
             timeframe_reports[tf] = tf_report
             all_facts["timeframes"][tf] = tf_report.facts
 
+        # Attach read-only Level 2 depth features if available
+        if hasattr(self.analysis_engine, "get_depth_features"):
+            depth_feats = self.analysis_engine.get_depth_features(clean_symbol)
+            if depth_feats.get("depth_available"):
+                all_facts["depth"] = depth_feats
+
+        # Attach read-only trade flow features if available
+        if hasattr(self.analysis_engine, "get_trade_flow_features"):
+            tf_feats = self.analysis_engine.get_trade_flow_features(clean_symbol)
+            if tf_feats.get("trade_flow_available"):
+                all_facts["trade_flow"] = tf_feats
+
         # 3. Cross-Timeframe Synthesis & Agreement Assessment
         overall_condition, agreement, agreement_summary, confidence, cross_interpretation = (
             self._synthesize_cross_timeframe(

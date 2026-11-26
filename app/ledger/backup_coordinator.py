@@ -807,8 +807,8 @@ class BackupOperationsCoordinator:
                     if ".tmp_" not in item.name and ".restore_tmp_" not in item.name:
                         candidates.append(item)
 
-            # Sort descending by modification time (newest first)
-            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            # Sort descending by modification time (newest first), with name tie-break
+            candidates.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
 
             in_use_resolved = {str(Path(p).resolve()) for p in self._in_use_backups}
 
