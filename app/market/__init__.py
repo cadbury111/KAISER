@@ -71,6 +71,14 @@ from app.market.trade_flow import (
     calculate_trade_flow_imbalance,
     evaluate_combined_microstructure_pressure,
 )
+from app.market.coordinator import (
+    MarketStreamType,
+    MultiStreamMarketDataCoordinator,
+    SyncQuality,
+    SynchronizedMarketContext,
+    UnifiedMarketDataEvent,
+    normalize_timestamp,
+)
 from app.market.normalizer import MarketDataNormalizer
 from app.market.quality import (
     DataQualityAssessment,
@@ -130,6 +138,12 @@ __all__ = [
     "calculate_trade_flow_imbalance",
     "calculate_ewma",
     "evaluate_combined_microstructure_pressure",
+    "MarketStreamType",
+    "SyncQuality",
+    "UnifiedMarketDataEvent",
+    "SynchronizedMarketContext",
+    "MultiStreamMarketDataCoordinator",
+    "normalize_timestamp",
     "MarketDataNormalizer",
     "MarketFeed",
     "MarketRecord",

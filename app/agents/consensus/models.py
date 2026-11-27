@@ -145,7 +145,7 @@ class AgentConsensusReport:
         """Retrieve Level 2 depth analytics features from specialist findings if present."""
         for finding in self.agent_findings.values():
             if finding.facts and "depth" in finding.facts:
-                return finding.facts["depth"]
+                return copy.deepcopy(finding.facts["depth"])
         return None
 
     @property
@@ -153,15 +153,24 @@ class AgentConsensusReport:
         """Retrieve trade flow analytics features from specialist findings if present."""
         for finding in self.agent_findings.values():
             if finding.facts and "trade_flow" in finding.facts:
-                return finding.facts["trade_flow"]
+                return copy.deepcopy(finding.facts["trade_flow"])
+        return None
+
+    @property
+    def synchronized_market_context(self) -> Optional[Dict[str, Any]]:
+        """Retrieve synchronized multi-stream context from specialist findings if present."""
+        for finding in self.agent_findings.values():
+            if finding.facts and "synchronized_context" in finding.facts:
+                return copy.deepcopy(finding.facts["synchronized_context"])
         return None
 
     @property
     def microstructure_context(self) -> Dict[str, Any]:
-        """Aggregate read-only microstructure depth and trade flow context for consensus visibility."""
+        """Aggregate read-only microstructure depth, trade flow, and sync context for consensus visibility."""
         return {
             "depth": self.depth_features,
             "trade_flow": self.trade_flow_features,
+            "synchronized_context": self.synchronized_market_context,
         }
 
     def to_dict(self) -> Dict[str, Any]:

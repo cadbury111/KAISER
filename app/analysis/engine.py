@@ -24,6 +24,7 @@ from app.analysis.indicators import (
     classify_rsi,
     extract_depth_features,
     extract_trade_flow_features,
+    extract_synchronized_context_features,
 )
 from app.analysis.models import (
     SUPPORTED_TIMEFRAMES,
@@ -75,6 +76,7 @@ class TechnicalAnalysisEngine:
         self._stream_rejected_unhealthy: Dict[Tuple[str, str], int] = {}
         self._depth_analytics: Dict[str, Any] = {}
         self._trade_flow_analytics: Dict[str, Any] = {}
+        self._synchronized_contexts: Dict[str, Any] = {}
 
         self._counters = {
             "bars_processed": 0,
@@ -116,6 +118,23 @@ class TechnicalAnalysisEngine:
         """Extract standard read-only trade flow features for a symbol."""
         analytics = self.get_trade_flow_analytics(symbol)
         return extract_trade_flow_features(analytics)
+
+    def set_synchronized_context(self, context: Any) -> None:
+        """Store latest evaluated synchronized multi-stream context for a symbol."""
+        if context is not None and hasattr(context, "symbol"):
+            sym = str(context.symbol).strip().upper()
+            with self._lock:
+                self._synchronized_contexts[sym] = context
+
+    def get_synchronized_context(self, symbol: str) -> Optional[Any]:
+        """Retrieve latest synchronized multi-stream context for a symbol if present."""
+        with self._lock:
+            return self._synchronized_contexts.get(symbol.strip().upper())
+
+    def get_synchronized_context_features(self, symbol: str) -> Dict[str, Any]:
+        """Extract standard read-only synchronization features for a symbol."""
+        context = self.get_synchronized_context(symbol)
+        return extract_synchronized_context_features(context)
 
     def _normalize_tf(self, timeframe: str) -> str:
         """Helper to obtain canonical timeframe with fallback."""

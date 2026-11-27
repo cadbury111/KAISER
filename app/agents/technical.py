@@ -334,6 +334,12 @@ class TechnicalAnalysisAgent(BaseAgent):
             if tf_feats.get("trade_flow_available"):
                 all_facts["trade_flow"] = tf_feats
 
+        # Attach read-only synchronized multi-stream context if available
+        if hasattr(self.analysis_engine, "get_synchronized_context_features"):
+            sync_feats = self.analysis_engine.get_synchronized_context_features(clean_symbol)
+            if sync_feats.get("context_available"):
+                all_facts["synchronized_context"] = sync_feats
+
         # 3. Cross-Timeframe Synthesis & Agreement Assessment
         overall_condition, agreement, agreement_summary, confidence, cross_interpretation = (
             self._synthesize_cross_timeframe(

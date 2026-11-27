@@ -536,3 +536,43 @@ def extract_trade_flow_features(analytics: Optional[Any]) -> Dict[str, Any]:
         "combined_pressure": comb.value if hasattr(comb, "value") else (str(comb) if comb else None),
         "vwap": getattr(analytics, "vwap", None),
     }
+
+
+def extract_synchronized_context_features(context: Optional[Any]) -> Dict[str, Any]:
+    """Extract standard read-only synchronized multi-stream context features.
+
+    Guarantees deterministic, clean serializable dictionary. If context is None or invalid,
+    defaults safely to un-synchronized / default values without raising exceptions.
+    Ensures no recommendation prohibited keys are used.
+
+    Args:
+        context: SynchronizedMarketContext instance or None.
+
+    Returns:
+        Dict[str, Any]: Dictionary of numerical and categorical synchronization features.
+    """
+    if context is None or not getattr(context, "is_valid", False):
+        return {
+            "context_available": False,
+            "sync_quality": "INVALID" if (context and not getattr(context, "is_valid", False)) else "NO_CONTEXT",
+            "is_synchronized": False,
+            "max_skew_ms": 0.0,
+            "missing_streams": ["QUOTE", "DEPTH", "TRADE"],
+            "has_quote": False,
+            "has_depth": False,
+            "has_trade": False,
+        }
+
+    sq = getattr(context, "sync_quality", None)
+    sq_val = sq.value if hasattr(sq, "value") else str(sq or "PARTIAL")
+
+    return {
+        "context_available": True,
+        "sync_quality": sq_val,
+        "is_synchronized": bool(getattr(context, "is_synchronized", False)),
+        "max_skew_ms": float(getattr(context, "max_skew_ms", 0.0)),
+        "missing_streams": list(getattr(context, "missing_streams", ())),
+        "has_quote": getattr(context, "quote", None) is not None,
+        "has_depth": getattr(context, "depth_snapshot", None) is not None,
+        "has_trade": getattr(context, "last_trade", None) is not None,
+    }
